@@ -1,0 +1,15 @@
+[package]
+name = "cs2hl-core"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+parser.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+ahash = "0.8"
+flate2 = "1"
+zstd = "0.13"
+bzip2 = "0.4"

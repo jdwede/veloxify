@@ -1,0 +1,15 @@
+[package]
+name = "cs2hl-cli"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "cs2hl"
+path = "src/main.rs"
+
+[dependencies]
+cs2hl-core = { path = "../core" }
+anyhow.workspace = true
+parser.workspace = true
+serde_json.workspace = true
