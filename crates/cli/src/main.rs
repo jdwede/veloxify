@@ -6,6 +6,7 @@ use std::time::Instant;
 const USAGE: &str = "usage:
   cs2hl analyze <demo> [--player <steamid64>] [--json]
   cs2hl events <demo> [event names...]
+  cs2hl extract <demo> <out.dem>   (decompress to a playable .dem)
   cs2hl validate <demo>...   (compare computed stats with CS2's in-demo scoreboard)";
 
 fn main() -> Result<()> {
@@ -14,6 +15,11 @@ fn main() -> Result<()> {
         Some("analyze") => analyze(&args[1..]),
         Some("events") => events(&args[1..]),
         Some("validate") => validate(&args[1..]),
+        Some("extract") => {
+            let (src, dst) = (args.get(1).context(USAGE)?, args.get(2).context(USAGE)?);
+            std::fs::write(dst, demo_io::read_demo(&PathBuf::from(src))?)?;
+            Ok(())
+        }
         _ => bail!("{USAGE}"),
     }
 }
