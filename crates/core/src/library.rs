@@ -44,6 +44,9 @@ pub struct HighlightEntry {
     pub id: String,
     pub player: String,
     pub round: u32,
+    /// 3 = always a highlight, 2 = when it matters, 1 = filler.
+    #[serde(default)]
+    pub tier: u8,
     pub score: f64,
     pub title: String,
     pub tags: Vec<String>,
@@ -127,7 +130,7 @@ pub struct MatchSummary {
 /// Builds the library entry for one match from the perspective of `me`. `played_ts` comes from
 /// the source (FACEIT/Valve match time) or, failing that, the demo file's timestamp.
 /// Highlights are detected for `me` only, plus anyone in `policy.also_clip` (opt-in per player);
-/// everyone else gets stats only.
+/// everyone else gets stats only. With `demo`, reaction flicks are detected too (extra parse).
 pub fn match_entry(
     id: &str,
     demo_path: &str,
@@ -138,6 +141,7 @@ pub fn match_entry(
     stats: &[PlayerStats],
     me: u64,
     policy: &ClipPolicy,
+    demo: Option<&[u8]>,
 ) -> Option<MatchEntry> {
     let my_team = m.team_of(me)?;
     let (mine, theirs) = match my_team {
@@ -165,10 +169,8 @@ pub fn match_entry(
         .iter()
         .filter(|p| p.steamid == me || policy.also_clip.contains(&p.steamid))
         .flat_map(|p| {
-            highlights::detect(m, a, p.steamid)
-                .into_iter()
-                .filter(|h| h.score >= policy.selectivity.threshold())
-                .take(policy.max_per_player)
+            let flicks = demo.and_then(|d| highlights::reaction_flicks(d, m, p.steamid).ok()).unwrap_or_default();
+            highlights::select(highlights::detect(m, a, p.steamid, &flicks), policy.selectivity, policy.max_per_player)
         })
         .map(|h| highlight_entry(id, &h))
         .collect();
@@ -201,6 +203,7 @@ fn highlight_entry(match_id: &str, h: &Highlight) -> HighlightEntry {
         id: format!("{match_id}-{}-r{}", h.player, h.round_number),
         player: h.player.to_string(),
         round: h.round_number,
+        tier: h.tier,
         score: h.score,
         title: h.title.clone(),
         tags: h.tags.clone(),

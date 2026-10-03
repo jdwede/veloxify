@@ -49,8 +49,8 @@ a { color: inherit; text-decoration: none; }
   border-bottom: 1px solid var(--line);
   backdrop-filter: blur(8px);
 }
-.brand { font-weight: 700; letter-spacing: 0.12em; font-size: 14px; color: var(--muted); }
-.brand-mark { color: var(--gold); }
+.brand { display: flex; align-items: center; gap: 10px; font-weight: 700; letter-spacing: 0.18em; font-size: 15px; color: var(--text); }
+.brand-logo { width: 26px; height: 26px; color: #fff; }
 .tabs { display: flex; gap: 4px; margin: 0 auto; }
 .tabs a {
   padding: 8px 18px; text-transform: uppercase; letter-spacing: 0.08em; font-size: 15px;

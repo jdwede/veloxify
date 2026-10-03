@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 const USAGE: &str = "usage:
-  cs2hl analyze <demo> [--player <steamid64>] [--json]
+  cs2hl analyze <demo> [--player <steamid64>] [--selectivity everything|solid-plays|highlights-only] [--json]
   cs2hl events <demo> [event names...]
   cs2hl extract <demo> <out.dem>   (decompress to a playable .dem)
   cs2hl library <library dir> --player <steamid64> [--also <steamid64>]...
@@ -50,10 +50,23 @@ fn analyze(args: &[String]) -> Result<()> {
         Some(p) => vec![p],
         None => m.players.iter().map(|p| p.steamid).collect(),
     };
+    let sel = args
+        .iter()
+        .position(|a| a == "--selectivity")
+        .and_then(|i| args.get(i + 1))
+        .and_then(|s| highlights::Selectivity::parse(s))
+        .unwrap_or(highlights::Selectivity::SolidPlays);
     let hl: Vec<highlights::Highlight> = players
         .iter()
-        .flat_map(|&p| highlights::detect(&m, &a, p))
-        .filter(|h| h.score >= highlights::AUTO_THRESHOLD)
+        .flat_map(|&p| {
+            let flicks = highlights::reaction_flicks(&demo, &m, p).unwrap_or_default();
+            if std::env::var("CS2HL_DEBUG_FLICKS").is_ok() {
+                let mut f: Vec<_> = flicks.iter().map(|(k, v)| (m.rounds[m.kills[*k].round].number, m.kills[*k].tick, *v as i32)).collect();
+                f.sort();
+                eprintln!("flick candidates (round, tick, swing deg): {f:?}");
+            }
+            highlights::select(highlights::detect(&m, &a, p, &flicks), sel, highlights::MAX_PER_PLAYER)
+        })
         .collect();
 
     if json {
@@ -81,13 +94,13 @@ fn analyze(args: &[String]) -> Result<()> {
             format!("{mark}{}", truncate(&s.name, 17)), format!("{:?}", s.team), c.kills, c.assists, c.deaths,
             d.adr, d.kast, d.hs_pct, d.rating1, d.rating2, c.opening_kills, c.opening_deaths, mk, cw, ca);
     }
-    println!("\nhighlights (score >= {}):", highlights::AUTO_THRESHOLD);
+    println!("\nhighlights ({sel:?}):");
     for h in &hl {
         let name = m.player(h.player).map(|p| p.name.as_str()).unwrap_or("?");
         let segs: Vec<String> = h.segments.iter()
             .map(|s| format!("{}-{}", s.start_tick, s.end_tick)).collect();
-        println!("  {:>5.1}  {:<16} {:<36} {:>5.1}s  [{}]  {}",
-            h.score, truncate(name, 16), h.title, h.duration_s, h.tags.join(", "), segs.join(" "));
+        println!("  T{} {:>5.1}  {:<16} {:<40} {:>5.1}s  [{}]  {}",
+            h.tier, h.score, truncate(name, 16), h.title, h.duration_s, h.tags.join(", "), segs.join(" "));
     }
     Ok(())
 }
@@ -141,7 +154,7 @@ fn library(args: &[String]) -> Result<()> {
         };
         let a = analysis::analyze(&m);
         let st = stats::player_stats(&m, &a, true);
-        let Some(entry) = library::match_entry(&id, path, local.timestamp(), &local.format("%Y-%m-%dT%H:%M:%S").to_string(), &m, &a, &st, me, &policy) else {
+        let Some(entry) = library::match_entry(&id, path, local.timestamp(), &local.format("%Y-%m-%dT%H:%M:%S").to_string(), &m, &a, &st, me, &policy, Some(&demo)) else {
             println!("skip    {id}: player {me} not in this match");
             continue;
         };

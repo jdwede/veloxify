@@ -131,3 +131,50 @@ fn int_at(v: &VarVec, row: usize) -> Option<i64> {
         _ => None,
     }
 }
+
+/// Reads numeric props for one player at the given ticks, returned in tick order.
+pub fn player_series(demo: &[u8], steamid: u64, props: &[&str], ticks: &[i32]) -> Result<Vec<(i32, HashMap<String, f64>)>> {
+    let (real, names) = friendly_to_real(props)?;
+    let out = run(demo, |i| {
+        i.wanted_player_props = real;
+        i.real_name_to_og_name = names;
+        i.wanted_ticks = ticks.to_vec();
+        i.wanted_players = vec![steamid];
+    })?;
+    let ids: Vec<(u32, String)> = out
+        .prop_controller
+        .prop_infos
+        .iter()
+        .filter(|p| props.contains(&p.prop_friendly_name.as_str()))
+        .map(|p| (p.id, p.prop_friendly_name.clone()))
+        .collect();
+    let (Some(VarVec::U64(steamids)), Some(VarVec::I32(row_ticks))) = (
+        out.df.get(&STEAMID_ID).and_then(|c| c.data.as_ref()),
+        out.df.get(&TICK_ID).and_then(|c| c.data.as_ref()),
+    ) else {
+        return Ok(vec![]);
+    };
+    let mut rows = vec![];
+    for (row, (sid, tick)) in steamids.iter().zip(row_ticks).enumerate() {
+        if *sid != Some(steamid) {
+            continue;
+        }
+        let Some(tick) = tick else { continue };
+        let mut vals = HashMap::new();
+        for (id, name) in &ids {
+            if let Some(v) = out.df.get(id).and_then(|c| c.data.as_ref()).and_then(|d| num_at(d, row)) {
+                vals.insert(name.clone(), v);
+            }
+        }
+        rows.push((*tick, vals));
+    }
+    rows.sort_by_key(|(t, _)| *t);
+    Ok(rows)
+}
+
+fn num_at(v: &VarVec, row: usize) -> Option<f64> {
+    match v {
+        VarVec::F32(x) => x.get(row).copied().flatten().map(|v| v as f64),
+        _ => int_at(v, row).map(|v| v as f64),
+    }
+}

@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="20 30 210 190" role="img" aria-label="Veloxify">
+  <!-- Veloxify "V": winged V with a pinstripe cut through the left arm (the stripe is a hole, so
+       the mark works on any background). Uses currentColor. -->
+  <path fill="currentColor" fill-rule="evenodd" d="
+    M 30 47 L 97 52 L 125 146 L 153 52 L 220 47 L 171 64 L 126 209 L 79 64 Z
+    M 66 54 L 77 55 L 127 185 L 124 192 Z"/>
+</svg>

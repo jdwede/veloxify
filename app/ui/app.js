@@ -1,4 +1,4 @@
-// CS2 Highlights UI. Reads the library written by the backend (index.json + matches/<id>.json)
+// Veloxify UI. Reads the library written by the backend (index.json + matches/<id>.json)
 // and renders: calendar → day (CS2-style match history) → day stats / match scoreboard / clips.
 // Runs inside the Tauri window; for development it also works from any static file server.
 "use strict";
