@@ -4,3 +4,4 @@
 *.dem.zst
 *.dem.bz2
 /out
+/library

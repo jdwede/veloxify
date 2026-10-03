@@ -7,6 +7,7 @@ const USAGE: &str = "usage:
   cs2hl analyze <demo> [--player <steamid64>] [--json]
   cs2hl events <demo> [event names...]
   cs2hl extract <demo> <out.dem>   (decompress to a playable .dem)
+  cs2hl library <library dir> --player <steamid64> <demo>...   (add demos, rebuild index.json)
   cs2hl validate <demo>...   (compare computed stats with CS2's in-demo scoreboard)";
 
 fn main() -> Result<()> {
@@ -15,6 +16,7 @@ fn main() -> Result<()> {
         Some("analyze") => analyze(&args[1..]),
         Some("events") => events(&args[1..]),
         Some("validate") => validate(&args[1..]),
+        Some("library") => library(&args[1..]),
         Some("extract") => {
             let (src, dst) = (args.get(1).context(USAGE)?, args.get(2).context(USAGE)?);
             std::fs::write(dst, demo_io::read_demo(&PathBuf::from(src))?)?;
@@ -85,6 +87,68 @@ fn analyze(args: &[String]) -> Result<()> {
         println!("  {:>5.1}  {:<16} {:<36} {:>5.1}s  [{}]  {}",
             h.score, truncate(name, 16), h.title, h.duration_s, h.tags.join(", "), segs.join(" "));
     }
+    Ok(())
+}
+
+fn library(args: &[String]) -> Result<()> {
+    use cs2hl_core::library;
+    use std::path::Path;
+    let root = PathBuf::from(args.first().context(USAGE)?);
+    let pi = args.iter().position(|a| a == "--player").context("--player <steamid64> is required")?;
+    let me: u64 = args.get(pi + 1).context("--player <steamid64>")?.parse()?;
+    let demos: Vec<&String> = args[1..].iter().enumerate().filter(|(i, _)| *i + 1 != pi && *i + 1 != pi + 1).map(|(_, a)| a).collect();
+    let matches_dir = root.join("matches");
+    std::fs::create_dir_all(&matches_dir)?;
+
+    for path in demos {
+        let p = Path::new(path);
+        let name = p.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
+        let id = library::demo_id(&name);
+        let out = matches_dir.join(format!("{id}.json"));
+        if out.exists() {
+            println!("cached  {id}");
+            continue;
+        }
+        // Until a FACEIT/Valve match time is known, the demo file's timestamp stands in for it.
+        let mtime = std::fs::metadata(p)?.modified()?;
+        let local: chrono::DateTime<chrono::Local> = mtime.into();
+        let t = Instant::now();
+        let demo = demo_io::read_demo(p)?;
+        let m = match model::load_match(&demo) {
+            Ok(m) => m,
+            Err(e) => {
+                println!("skip    {id}: {e}");
+                continue;
+            }
+        };
+        let a = analysis::analyze(&m);
+        let st = stats::player_stats(&m, &a, true);
+        let Some(entry) = library::match_entry(&id, path, local.timestamp(), &local.format("%Y-%m-%dT%H:%M:%S").to_string(), &m, &a, &st, me) else {
+            println!("skip    {id}: player {me} not in this match");
+            continue;
+        };
+        std::fs::write(&out, serde_json::to_string_pretty(&entry)?)?;
+        println!("added   {id}  {} {}-{} {}  ({:.1}s)", entry.map, entry.score_mine, entry.score_theirs, entry.result, t.elapsed().as_secs_f64());
+    }
+
+    let mut all: Vec<library::MatchEntry> = vec![];
+    for f in std::fs::read_dir(&matches_dir)? {
+        let f = f?.path();
+        if f.extension().is_some_and(|e| e == "json") {
+            all.push(serde_json::from_str(&std::fs::read_to_string(&f)?)?);
+        }
+    }
+    let index = library::build_index(me, &mut all, |ts| {
+        chrono::DateTime::from_timestamp(ts, 0)
+            .map(|d| d.with_timezone(&chrono::Local).format("%Y-%m-%d").to_string())
+            .unwrap_or_default()
+    });
+    // Party flags are decided per session, so write them back into the match files.
+    for m in &all {
+        std::fs::write(matches_dir.join(format!("{}.json", m.id)), serde_json::to_string_pretty(m)?)?;
+    }
+    std::fs::write(root.join("index.json"), serde_json::to_string_pretty(&index)?)?;
+    println!("index: {} matches over {} days", index.matches.len(), index.days.len());
     Ok(())
 }
 

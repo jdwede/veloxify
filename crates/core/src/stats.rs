@@ -5,13 +5,13 @@
 
 use crate::analysis::{is_enemy_kill, Analysis};
 use crate::model::{Match, TeamId};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::ops::AddAssign;
 
 const UTILITY_WEAPONS: &[&str] = &["hegrenade", "inferno", "molotov", "incgrenade"];
 
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Counts {
     pub matches: u32,
     pub wins: u32,
@@ -74,7 +74,7 @@ impl AddAssign<&Counts> for Counts {
 }
 
 /// Rates and ratings derived from [`Counts`].
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Derived {
     pub kpr: f64,
     pub dpr: f64,
