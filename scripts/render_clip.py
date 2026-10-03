@@ -92,12 +92,13 @@ def read_cvar(vc, name):
     n = len(vc.lines)
     vc.send(name)
     deadline = time.time() + 3
-    pat = re.compile(r"%s = (.*)$" % re.escape(name))
+    # Empty values print as "name =" with nothing after, so the value part is optional.
+    pat = re.compile(r"%s =(?: (.*))?$" % re.escape(name))
     while time.time() < deadline:
         for line in vc.lines[n:]:
             m = pat.search(line)
             if m:
-                return m.group(1).strip()
+                return (m.group(1) or "").strip()
         time.sleep(0.05)
     return None
 
@@ -117,7 +118,7 @@ def apply_console(vc, profile):
     with open(JOURNAL, "w") as f:
         json.dump(originals, f, indent=1)
     for name, val in wanted.items():
-        vc.send(f"{name} {val}")
+        vc.send(f'{name} "{val}"')  # quoted: values like device ids contain braces
     return originals
 
 
@@ -143,6 +144,23 @@ def park_offscreen():
 
 # ---- main -----------------------------------------------------------------------------------------
 
+def silent_device_id(name):
+    """Windows endpoint id of the output device whose name contains `name` (e.g. Steam Streaming
+    Speakers, a virtual device that plays to nothing), or None if it isn't installed."""
+    out = subprocess.run([CAPTURE, "devices"], capture_output=True, text=True).stdout
+    for line in out.splitlines():
+        dev_id, _, dev_name = line.partition("\t")
+        if name.lower() in dev_name.lower():
+            return dev_id
+    return None
+
+
+def cs2_pid():
+    out = subprocess.run(["tasklist", "/FI", "IMAGENAME eq cs2.exe", "/FO", "CSV", "/NH"], capture_output=True, text=True).stdout
+    m = re.search(r'"cs2\.exe","(\d+)"', out)
+    return int(m.group(1)) if m else None
+
+
 def main():
     demo, acc, segs, out = sys.argv[1], int(sys.argv[2]), sys.argv[3], os.path.abspath(sys.argv[4])
     profile_path = sys.argv[5] if len(sys.argv) > 5 else os.path.join(ROOT, "profiles", "default.json")
@@ -153,6 +171,21 @@ def main():
     user_cfg = USER_CFG.format(acc=acc)
     if cs2_running():
         raise SystemExit("CS2 is running; close it first")
+
+    # Audio: route CS2 to a device that plays to nothing, keep it playing while unfocused, and
+    # record only CS2's own audio. Without a silent device, render without sound rather than
+    # playing the game through the user's speakers.
+    a = profile.get("audio", {})
+    audio = bool(a.get("enabled", True))
+    if audio:
+        silent = silent_device_id(a.get("silent_device", "Steam Streaming Speakers"))
+        if silent:
+            profile["console"].update({"sound_device_override": silent, "snd_mute_losefocus": "0",
+                                       "volume": str(a.get("game_volume", 0.6))})
+        else:
+            log("no silent output device found; rendering without audio")
+            audio = False
+
     restore_video(user_cfg)  # in case a previous run crashed
     backup = os.path.join(ROOT, "out", "cfg-backup-" + time.strftime("%Y%m%d-%H%M%S"))
     shutil.copytree(user_cfg, backup)
@@ -186,9 +219,11 @@ def main():
             raise RuntimeError("demo never finished loading")
         log(f"demo loaded in {time.time() - t0:.0f}s")
         park_offscreen()  # CS2 may re-position itself while loading
+        vc.send("demo_pause")
         time.sleep(2)
         originals = apply_console(vc, profile)
         vc.send(f"spec_lock_to_accountid {acc}")
+        pid = cs2_pid() if audio else None
 
         for i, (start, end) in enumerate(segments):
             vc.send("demo_pause")
@@ -198,8 +233,10 @@ def main():
             time.sleep(0.5)
             part = os.path.join(tmp, f"part{i}.mp4")
             seconds = (end - start) / TICKRATE + SETTLE_S
-            cap = subprocess.Popen([CAPTURE, WINDOW_TITLE, part, f"{seconds:.2f}", str(o["capture_bitrate_mbps"]),
-                                    str(o["fps"])], stdout=subprocess.PIPE, text=True)
+            cmd = [CAPTURE, WINDOW_TITLE, part, f"{seconds:.2f}", str(o["capture_bitrate_mbps"]), str(o["fps"])]
+            if pid:
+                cmd += ["--audio-pid", str(pid)]
+            cap = subprocess.Popen(cmd, stdout=subprocess.PIPE, text=True)
             first = cap.stdout.readline().strip()
             if first != "CAPTURE_STARTED":
                 cap.wait()
@@ -208,8 +245,11 @@ def main():
             done = cap.stdout.read().strip()
             cap.wait()
             vc.send("demo_pause")
-            log(f"segment {i + 1}/{len(segments)}: {done}")
-            parts.append((part, seconds))
+            m = re.search(r"AUDIO_OFFSET ([0-9.]+)", done)
+            wav = part + ".wav" if m and os.path.exists(part + ".wav") else None
+            log(f"segment {i + 1}/{len(segments)}: {done.splitlines()[0] if done else '?'}"
+                + (f", audio offset {float(m.group(1)) * 1000:.0f} ms" if wav else ""))
+            parts.append({"video": part, "seconds": seconds, "wav": wav, "audio_offset": float(m.group(1)) if wav else 0.0})
     finally:
         if vc and vc.alive:
             if originals:
@@ -224,35 +264,60 @@ def main():
             time.sleep(2)
         restore_video(user_cfg)
 
-    assemble(parts, out, profile["output"])
+    assemble(parts, out, profile["output"], a if audio else None)
     shutil.rmtree(tmp, ignore_errors=True)
     log("done:", out)
 
 
-def assemble(parts, out, o):
-    """Trim the settle second off each part and join them with hard cuts or crossfades."""
+def assemble(parts, out, o, audio):
+    """Trim the settle second off each part, join them with hard cuts or crossfades, and mix in
+    CS2's audio (aligned per part, loudness-normalised) when it was recorded."""
+    with_audio = audio is not None and all(p["wav"] for p in parts)
     inputs, chains = [], []
-    for i, (path, _) in enumerate(parts):
-        inputs += ["-i", path]
-        chains.append(f"[{i}:v]trim=start={SETTLE_S},setpts=PTS-STARTPTS,fps={o['fps']},format=yuv420p[v{i}]")
-    lengths = [secs - SETTLE_S for _, secs in parts]
-    if len(parts) == 1:
-        graph, last = chains[0], "[v0]"
+    for i, p in enumerate(parts):
+        length = p["seconds"] - SETTLE_S
+        inputs += ["-i", p["video"]]
+        chains.append(f"[{2 * i}:v]trim=start={SETTLE_S}:duration={length:.3f},setpts=PTS-STARTPTS,"
+                      f"fps={o['fps']},format=yuv420p[v{i}]")
+        if with_audio:
+            inputs += ["-i", p["wav"]]
+            start = SETTLE_S + p["audio_offset"]
+            chains.append(f"[{2 * i + 1}:a]atrim=start={start:.4f}:duration={length:.3f},asetpts=PTS-STARTPTS,"
+                          f"apad=whole_dur={length:.3f}[a{i}]")
+    if not with_audio:  # inputs are video-only, so renumber
+        inputs = [x for p in parts for x in ("-i", p["video"])]
+        chains = [c.replace(f"[{2 * i}:v]", f"[{i}:v]") for i, c in enumerate(chains)]
+    lengths = [p["seconds"] - SETTLE_S for p in parts]
+    n = len(parts)
+    graph = ";".join(chains)
+    if n == 1:
+        vlast, alast = "[v0]", "[a0]"
     elif o.get("transition") == "fade":
         d = o.get("transition_seconds", 0.35)
-        graph, prev, offset = ";".join(chains), "[v0]", 0.0
-        for i in range(1, len(parts)):
+        vprev, aprev, offset = "[v0]", "[a0]", 0.0
+        for i in range(1, n):
             offset += lengths[i - 1] - d
-            graph += f";{prev}[v{i}]xfade=transition=fade:duration={d}:offset={offset:.3f}[x{i}]"
-            prev = f"[x{i}]"
-        last = prev
+            graph += f";{vprev}[v{i}]xfade=transition=fade:duration={d}:offset={offset:.3f}[xv{i}]"
+            vprev = f"[xv{i}]"
+            if with_audio:
+                graph += f";{aprev}[a{i}]acrossfade=d={d}[xa{i}]"
+                aprev = f"[xa{i}]"
+        vlast, alast = vprev, aprev
     else:
-        graph = ";".join(chains) + ";" + "".join(f"[v{i}]" for i in range(len(parts))) + \
-            f"concat=n={len(parts)}:v=1:a=0[cat]"
-        last = "[cat]"
-    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", *inputs, "-filter_complex", graph, "-map", last,
-           "-c:v", "libx264", "-preset", "slow", "-crf", str(o["final_crf"]), "-profile:v", "high",
-           "-movflags", "+faststart", "-an", out]
+        pads = "".join(f"[v{i}][a{i}]" if with_audio else f"[v{i}]" for i in range(n))
+        graph += f";{pads}concat=n={n}:v=1:a={1 if with_audio else 0}" + ("[cv][ca]" if with_audio else "[cv]")
+        vlast, alast = "[cv]", "[ca]"
+    maps = ["-map", vlast]
+    codec = ["-c:v", "libx264", "-preset", "slow", "-crf", str(o["final_crf"]), "-profile:v", "high"]
+    if with_audio:
+        lufs = audio.get("loudness_lufs", -18)
+        graph += f";{alast}loudnorm=I={lufs}:TP=-1.5:LRA=11,aresample=48000[aout]"
+        maps += ["-map", "[aout]"]
+        codec += ["-c:a", "aac", "-b:a", f"{audio.get('bitrate_kbps', 192)}k"]
+    else:
+        codec += ["-an"]
+    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", *inputs, "-filter_complex", graph, *maps, *codec,
+           "-movflags", "+faststart", out]
     subprocess.run(cmd, check=True)
 
 

@@ -49,5 +49,13 @@
     "cl_hud_telemetry_ping_show": "0",
     "cl_hud_telemetry_net_misdelivery_show": "0",
     "cl_hud_telemetry_serverrecvmargin_graph_show": "0"
+  },
+  "audio": {
+    "_comment": "CS2's own audio only (never Discord/Spotify). During the render CS2 is switched to an output that plays to nothing, so you don't hear it; your audio device, volume and focus-mute settings are restored afterwards.",
+    "enabled": true,
+    "silent_device": "Steam Streaming Speakers",
+    "game_volume": 0.6,
+    "loudness_lufs": -18,
+    "bitrate_kbps": 192
   }
 }
