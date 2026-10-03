@@ -23,7 +23,7 @@
     "setting.r_csgo_cmaa_enable": "0"
   },
   "console": {
-    "_comment": "Set over VConsole before recording; your previous values are put back before CS2 quits.",
+    "_comment": "Set over VConsole before recording; your previous values are put back before CS2 quits. cl_show_observer_crosshair: 0 = the crosshair below, 2 = the recorded player's own crosshair.",
     "cl_draw_only_deathnotices": "1",
     "spec_show_xray": "0",
     "demo_ui_mode": "0",
@@ -33,9 +33,9 @@
     "cl_showfps": "0",
     "cl_show_observer_crosshair": "0",
     "cl_crosshairstyle": "4",
-    "cl_crosshairsize": "1.5",
-    "cl_crosshairgap": "-2",
-    "cl_crosshairthickness": "0.5",
+    "cl_crosshairsize": "2.5",
+    "cl_crosshairgap": "-1.5",
+    "cl_crosshairthickness": "0.6",
     "cl_crosshairdot": "0",
     "cl_crosshair_drawoutline": "0",
     "cl_crosshaircolor": "5",
@@ -44,6 +44,10 @@
     "cl_crosshaircolor_b": "0",
     "cl_crosshairalpha": "255",
     "engine_no_focus_sleep": "0",
-    "fps_max": "0"
+    "fps_max": "0",
+    "cl_hud_telemetry_frametime_show": "0",
+    "cl_hud_telemetry_ping_show": "0",
+    "cl_hud_telemetry_net_misdelivery_show": "0",
+    "cl_hud_telemetry_serverrecvmargin_graph_show": "0"
   }
 }

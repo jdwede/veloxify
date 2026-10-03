@@ -165,7 +165,9 @@ def main():
         log("launching CS2 in the background")
         o = profile["output"]
         subprocess.Popen([STEAM, "-applaunch", "730", "-insecure", "-novid", "-windowed", "-noborder",
-                          "-w", str(o["width"]), "-h", str(o["height"]), "+playdemo", demo])
+                          "-w", str(o["width"]), "-h", str(o["height"]),
+                          # Demo UI must be off before playback starts; it isn't a saved setting.
+                          "+demo_ui_mode", "0", "+playdemo", demo])
         vc = VConsole()
         t0 = time.time()
         while not user32.FindWindowW(None, WINDOW_TITLE) and time.time() - t0 < 60:

@@ -10,8 +10,39 @@ const PRE_ROLL_S: f64 = 4.0;
 const POST_ROLL_S: f64 = 3.0;
 /// Kills further apart than this become separate segments of the same moment.
 const SEGMENT_GAP_S: f64 = 12.0;
-/// Moments scoring at least this are auto-selected.
-pub const AUTO_THRESHOLD: f64 = 3.0;
+/// How picky auto-selection is, mirroring Allstar's Autocapture levels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub enum Selectivity {
+    /// Any 2K, any won clutch, any defuse, single kills with something special (score >= 2).
+    Everything,
+    /// 3K+, won clutches, ninja defuses, 2Ks with something special (score >= 4). Default.
+    SolidPlays,
+    /// 4K/ACE, 3K with extras, 1v2+ clutches (score >= 5.5).
+    HighlightsOnly,
+}
+
+impl Selectivity {
+    pub fn threshold(self) -> f64 {
+        match self {
+            Selectivity::Everything => 2.0,
+            Selectivity::SolidPlays => 4.0,
+            Selectivity::HighlightsOnly => 5.5,
+        }
+    }
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().replace(['-', '_', ' '], "").as_str() {
+            "everything" => Some(Self::Everything),
+            "solidplays" | "solid" => Some(Self::SolidPlays),
+            "highlightsonly" | "highlights" => Some(Self::HighlightsOnly),
+            _ => None,
+        }
+    }
+}
+
+/// Default auto-selection threshold (Solid Plays).
+pub const AUTO_THRESHOLD: f64 = 4.0;
+/// Default cap on auto-selected moments per player per match (Allstar's Standard plan uses 5).
+pub const MAX_PER_PLAYER: usize = 5;
 
 const SNIPERS: &[&str] = &["awp", "ssg08", "scar20", "g3sg1"];
 
@@ -47,7 +78,8 @@ pub fn detect(m: &Match, a: &Analysis, player: u64) -> Vec<Highlight> {
             })
             .collect();
         let clutch: Option<&Clutch> = a.rounds[r].clutches.iter().find(|c| c.player == player && c.won);
-        if kills.is_empty() && clutch.is_none() {
+        let defuse = m.bomb.iter().find(|b| b.round == r && b.player == player && b.defused);
+        if kills.is_empty() && clutch.is_none() && defuse.is_none() {
             continue;
         }
 
@@ -78,6 +110,23 @@ pub fn detect(m: &Match, a: &Analysis, player: u64) -> Vec<Highlight> {
         if let Some(c) = clutch {
             score += 2.0 + 1.5 * c.vs as f64;
             tag(&format!("1v{} clutch", c.vs), &mut tags);
+        }
+        if let Some(d) = defuse {
+            // A ninja defuse happens with enemies still alive.
+            let my_team = m.team_of(player);
+            let enemies = m.players.iter().filter(|p| Some(p.team) != my_team).count();
+            let enemy_deaths = m
+                .kills
+                .iter()
+                .filter(|k| k.round == r && k.tick <= d.tick && m.team_of(k.victim).is_some() && m.team_of(k.victim) != my_team)
+                .count();
+            if enemy_deaths < enemies {
+                score += 3.0;
+                tag("ninja defuse", &mut tags);
+            } else {
+                score += 1.0;
+                tag("defuse", &mut tags);
+            }
         }
         if a.rounds[r].opening_kill.is_some_and(|ki| kills.contains(&ki)) {
             score += 0.3;
@@ -154,6 +203,16 @@ pub fn detect(m: &Match, a: &Analysis, player: u64) -> Vec<Highlight> {
                 last.end_tick = last.end_tick.max(end);
             }
         }
+        if let Some(d) = defuse {
+            // Show the defuse (up to 10 s without a kit) unless a kill segment already covers it.
+            let (start, end) = (d.tick - (8.0 * TICKRATE) as i32, d.tick + (2.0 * TICKRATE) as i32);
+            if !segments.iter().any(|s| s.start_tick <= d.tick && d.tick <= s.end_tick) {
+                match segments.last_mut() {
+                    Some(last) if start - last.end_tick <= gap => last.end_tick = last.end_tick.max(end),
+                    _ => segments.push(Segment { start_tick: start, end_tick: end }),
+                }
+            }
+        }
         for s in &mut segments {
             s.start_tick = s.start_tick.max(lo);
             s.end_tick = s.end_tick.min(hi);
@@ -170,10 +229,11 @@ pub fn detect(m: &Match, a: &Analysis, player: u64) -> Vec<Highlight> {
         let duration_s = merged.iter().map(|s| (s.end_tick - s.start_tick) as f64 / TICKRATE).sum();
 
         let weapon = most_used_weapon(m, &kills);
-        // Clutches lead the title; otherwise the multi-kill tag (always pushed first).
+        // Clutches lead the title, then ninja defuses; otherwise the multi-kill tag (pushed first).
         let headline = tags
             .iter()
             .find(|t| t.ends_with("clutch"))
+            .or(tags.iter().find(|t| *t == "ninja defuse"))
             .or(tags.first())
             .cloned()
             .unwrap_or_else(|| format!("{n}K"));

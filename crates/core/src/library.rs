@@ -10,6 +10,21 @@ use crate::stats::{Counts, Derived, PlayerStats};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 
+/// Which moments become clips: who gets them, how picky selection is, and how many per match.
+#[derive(Debug, Clone)]
+pub struct ClipPolicy {
+    /// Players besides you whose highlights are also detected (opt-in; empty by default).
+    pub also_clip: Vec<u64>,
+    pub selectivity: highlights::Selectivity,
+    pub max_per_player: usize,
+}
+
+impl Default for ClipPolicy {
+    fn default() -> Self {
+        Self { also_clip: vec![], selectivity: highlights::Selectivity::SolidPlays, max_per_player: highlights::MAX_PER_PLAYER }
+    }
+}
+
 /// Matches closer together than this belong to the same session.
 pub const SESSION_GAP_S: i64 = 3 * 3600;
 
@@ -111,6 +126,8 @@ pub struct MatchSummary {
 
 /// Builds the library entry for one match from the perspective of `me`. `played_ts` comes from
 /// the source (FACEIT/Valve match time) or, failing that, the demo file's timestamp.
+/// Highlights are detected for `me` only, plus anyone in `policy.also_clip` (opt-in per player);
+/// everyone else gets stats only.
 pub fn match_entry(
     id: &str,
     demo_path: &str,
@@ -120,6 +137,7 @@ pub fn match_entry(
     a: &Analysis,
     stats: &[PlayerStats],
     me: u64,
+    policy: &ClipPolicy,
 ) -> Option<MatchEntry> {
     let my_team = m.team_of(me)?;
     let (mine, theirs) = match my_team {
@@ -142,13 +160,16 @@ pub fn match_entry(
             derived: s.derived.clone(),
         })
         .collect();
-    // Highlights for everyone on my team: party members get theirs too.
     let mut hls: Vec<HighlightEntry> = m
         .players
         .iter()
-        .filter(|p| p.team == my_team)
-        .flat_map(|p| highlights::detect(m, a, p.steamid))
-        .filter(|h| h.score >= highlights::AUTO_THRESHOLD)
+        .filter(|p| p.steamid == me || policy.also_clip.contains(&p.steamid))
+        .flat_map(|p| {
+            highlights::detect(m, a, p.steamid)
+                .into_iter()
+                .filter(|h| h.score >= policy.selectivity.threshold())
+                .take(policy.max_per_player)
+        })
         .map(|h| highlight_entry(id, &h))
         .collect();
     hls.sort_by(|x, y| y.score.partial_cmp(&x.score).unwrap());
@@ -221,6 +242,9 @@ pub fn build_index(me: u64, matches: &mut [MatchEntry], date_of: impl Fn(i64) ->
         }
     }
 
+    // Only opted-in players' highlights exist in the first place, so every one counts.
+    let counted = |m: &MatchEntry| -> u32 { m.highlights.len() as u32 };
+
     // Days.
     let mut by_day: BTreeMap<String, Vec<&Vec<usize>>> = BTreeMap::new();
     for sess in &sessions {
@@ -242,7 +266,7 @@ pub fn build_index(me: u64, matches: &mut [MatchEntry], date_of: impl Fn(i64) ->
                             "loss" => l += 1,
                             _ => t += 1,
                         }
-                        highlight_count += m.highlights.len() as u32;
+                        highlight_count += counted(m);
                         for p in m.players.iter().filter(|p| p.steamid == me_s || p.party) {
                             let e = agg.entry(p.steamid.clone()).or_insert((p.name.clone(), Counts::default(), 0));
                             e.1 += &p.counts;
@@ -294,7 +318,7 @@ pub fn build_index(me: u64, matches: &mut [MatchEntry], date_of: impl Fn(i64) ->
             score_mine: m.score_mine,
             score_theirs: m.score_theirs,
             result: m.result.clone(),
-            highlight_count: m.highlights.len() as u32,
+            highlight_count: counted(m),
         })
         .collect();
     Index { me: me_s, me_name, days, matches: summaries }

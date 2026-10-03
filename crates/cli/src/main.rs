@@ -7,7 +7,9 @@ const USAGE: &str = "usage:
   cs2hl analyze <demo> [--player <steamid64>] [--json]
   cs2hl events <demo> [event names...]
   cs2hl extract <demo> <out.dem>   (decompress to a playable .dem)
-  cs2hl library <library dir> --player <steamid64> <demo>...   (add demos, rebuild index.json)
+  cs2hl library <library dir> --player <steamid64> [--also <steamid64>]...
+        [--selectivity everything|solid-plays|highlights-only] [--max-per-match N] <demo>...
+      (add demos and rebuild index.json; highlights only for --player and any --also players)
   cs2hl validate <demo>...   (compare computed stats with CS2's in-demo scoreboard)";
 
 fn main() -> Result<()> {
@@ -96,7 +98,23 @@ fn library(args: &[String]) -> Result<()> {
     let root = PathBuf::from(args.first().context(USAGE)?);
     let pi = args.iter().position(|a| a == "--player").context("--player <steamid64> is required")?;
     let me: u64 = args.get(pi + 1).context("--player <steamid64>")?.parse()?;
-    let demos: Vec<&String> = args[1..].iter().enumerate().filter(|(i, _)| *i + 1 != pi && *i + 1 != pi + 1).map(|(_, a)| a).collect();
+    let mut policy = library::ClipPolicy::default();
+    let mut skip: Vec<usize> = vec![pi, pi + 1];
+    for (i, a) in args.iter().enumerate() {
+        let val = || args.get(i + 1).with_context(|| format!("{a} needs a value"));
+        match a.as_str() {
+            // Also detect highlights for this player (opt-in, repeatable).
+            "--also" => policy.also_clip.push(val()?.parse()?),
+            "--selectivity" => {
+                policy.selectivity = cs2hl_core::highlights::Selectivity::parse(val()?)
+                    .context("--selectivity everything|solid-plays|highlights-only")?
+            }
+            "--max-per-match" => policy.max_per_player = val()?.parse()?,
+            _ => continue,
+        }
+        skip.extend([i, i + 1]);
+    }
+    let demos: Vec<&String> = args.iter().enumerate().skip(1).filter(|(i, _)| !skip.contains(i)).map(|(_, a)| a).collect();
     let matches_dir = root.join("matches");
     std::fs::create_dir_all(&matches_dir)?;
 
@@ -123,7 +141,7 @@ fn library(args: &[String]) -> Result<()> {
         };
         let a = analysis::analyze(&m);
         let st = stats::player_stats(&m, &a, true);
-        let Some(entry) = library::match_entry(&id, path, local.timestamp(), &local.format("%Y-%m-%dT%H:%M:%S").to_string(), &m, &a, &st, me) else {
+        let Some(entry) = library::match_entry(&id, path, local.timestamp(), &local.format("%Y-%m-%dT%H:%M:%S").to_string(), &m, &a, &st, me, &policy) else {
             println!("skip    {id}: player {me} not in this match");
             continue;
         };

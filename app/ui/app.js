@@ -3,11 +3,12 @@
 // Runs inside the Tauri window; for development it also works from any static file server.
 "use strict";
 
-const LIB = window.CS2HL_LIBRARY || "library";
+// Dev preview serves the repo root, so the library sits two levels up from app/ui/.
+const LIB = window.CS2HL_LIBRARY || (location.pathname.includes("/app/ui/") ? "../../library" : "library");
 const tauri = window.__TAURI__;
 const assetUrl = (rel) => (tauri ? tauri.core.convertFileSrc(`${LIB}/${rel}`) : `${LIB}/${rel}`);
 
-const state = { index: null, matches: new Map(), month: null, playlist: [], playing: -1, showAllTeammates: false };
+const state = { index: null, matches: new Map(), month: null, playlist: [], playing: -1 };
 
 // ---- data ----------------------------------------------------------------------------------------
 
@@ -276,19 +277,17 @@ async function renderMatch(el, date, id, tab) {
 // ---- highlights ---------------------------------------------------------------------------------
 
 async function renderHighlights(body, ids) {
-  const me = state.index.me;
+  // Only you (and players you opted in) have highlights; everyone else is stats-only.
   const groups = [];
   for (const id of ids) {
     const m = await loadMatch(id);
-    const party = new Set(m.players.filter((p) => p.party || p.steamid === me).map((p) => p.steamid));
     const names = new Map(m.players.map((p) => [p.steamid, p.name]));
-    const list = m.highlights.filter((h) => state.showAllTeammates || party.has(h.player)).map((h) => ({ ...h, name: names.get(h.player), match: m }));
+    const list = m.highlights.map((h) => ({ ...h, name: names.get(h.player), match: m }));
     if (list.length) groups.push({ m, list });
   }
   state.playlist = groups.flatMap((g) => g.list.filter((h) => h.clip));
   if (!groups.length) { body.innerHTML = `<div class="empty">No highlights detected.</div>`; return; }
   body.innerHTML = `
-    <label class="sub" style="display:block;margin-bottom:14px"><input type="checkbox" id="allmates" ${state.showAllTeammates ? "checked" : ""}> Include teammates outside your party</label>
     ${groups.map(({ m, list }) => `
       <div class="hl-group">
         ${ids.length > 1 ? `<div class="h2">${esc(mapName(m.map))} · ${m.score_mine}-${m.score_theirs} · ${fmtTime(m.played_at)}</div>` : ""}
@@ -301,7 +300,6 @@ async function renderHighlights(body, ids) {
           </div>`).join("")}
         </div>
       </div>`).join("")}`;
-  body.querySelector("#allmates").onchange = (e) => { state.showAllTeammates = e.target.checked; renderHighlights(body, ids); };
   body.querySelectorAll("[data-hl]").forEach((c) => (c.onclick = () => {
     const i = state.playlist.findIndex((h) => h.id === c.dataset.hl);
     if (i >= 0) play(i);
