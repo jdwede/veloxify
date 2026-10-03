@@ -1,0 +1,61 @@
+# Veloxify roadmap
+
+Priorities, in order. Each phase ships something usable before the next starts.
+
+## 1. Highlights (now)
+
+- Auto-detected highlights for **you only** (teammates opt-in), rendered silently in the
+  background after a session from FACEIT and Premier demos, Allstar-style by default and
+  configurable (HUD, crosshair, graphics, resolution, transitions).
+- Calendar → day → CS2-style match history → match scoreboard + stats → highlights.
+- Highlight rules (from the player, 9,000 h / ex semi-pro):
+  - Always: 3K/4K/ACE (eco kills included), any won clutch (incl. T-side win after the
+    clutcher dies and the bomb explodes), ninja defuses, noscopes, knife kills, grenade-impact
+    kills, jumping/falling kills, 2+ kills with Deagle/R8/Scout (Scout ranked by damage).
+  - When it matters: 2K including the opening kill in a won round; 2K in a critical round
+    (overtime, 10-10+ within one, enemy match point, our match point vs 10+); reaction flick
+    (hit first, then a fast snap onto the enemy). Eco kills don't count toward a 2K.
+  - Never: plain single kills.
+  - Open questions: lost clutches with kills? Eco cutoff ($2,000 equipment) right?
+
+## 2. Stats (Leetify, minus the clutter)
+
+- Match history → click a match → stats → its highlights. Nothing more by default.
+- Default window: last 30 matches; any period selectable.
+- HLTV-style numbers people already understand (Rating 1.0 exact, Rating 2.0 est., ADR, KAST,
+  K/D, HS%, entries, clutches, multi-kills).
+- **Platform weighting:** FACEIT stats matter most (especially level 10+ and Challenger,
+  top 1,000). Premier counts less. Anything that isn't FACEIT, Premier or Competitive is
+  "casual": hidden or greyed out, never mixed into ratings.
+- **Velox rating** (to design): one number that means something in plain terms and accounts for
+  the strength of the opposition, unlike an unexplained "80 aim". Ideas: opponent-strength
+  adjustment from FACEIT ELO / Premier rating of the lobby; express it relative to a reference
+  population ("plays like a FACEIT level 9").
+
+## 3. Legit score (cheater detection)
+
+Every player on every scoreboard gets a plain-English verdict, e.g. "95% likely legit" or
+"5% likely legit: most likely cheating". Valve and Leetify are too conservative; some stat
+lines
+are effectively impossible legitimately (five Scout wallbang headshots in a game, consistently
+30+ kills, never caught off guard).
+
+Legit score = **Reputation** + **Overwatch**.
+
+- **Reputation** (cheap, from public data):
+  - Steam account age (older = more likely legit)
+  - Games owned and inventory/skin value
+  - FACEIT account and history: a god in Premier (top 3%, great stats) with a level-5 FACEIT
+    and few matches or poor FACEIT stats is a red flag
+  - Friend count (accounts people care about)
+- **Overwatch** (gameplay analysis from the demo):
+  - Quick and dirty first: statistical outliers (wallbang/through-smoke kill rates, headshot
+    rates, reaction times, kills per round vs. lobby, "never caught off guard").
+  - Deep dive on demand for a suspected player:
+    - Aim: non-human mouse paths (instant snaps at the end of a movement, robotic lock-on,
+      unnatural smoothing).
+    - Information: rebuild what each team legitimately knew at every moment (teammates' sight
+      lines, radar spots, sounds: footsteps, reloads, grenade throws/bounces/drops, utility seen
+      in flight) and flag players who keep acting on information their team didn't have:
+      prefiring/tracking through walls and smokes, rotating early with no info, always facing
+      where the action will be.
