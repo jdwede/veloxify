@@ -11,6 +11,7 @@ the clean bindings are what CS2 saves (locally and to Steam Cloud).
 import ctypes
 import ctypes.wintypes as wt
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -101,6 +102,47 @@ class Console:
         return None
 
 
+def remove_f13_bind(user_cfg):
+    """Fallback when CS2 can't run `unbind`: drop our bind line from the saved keys file."""
+    path = os.path.join(user_cfg, "cs2_user_keys_0_slot0.vcfg")
+    with open(path, encoding="utf-8", errors="surrogateescape", newline="") as f:
+        lines = f.readlines()
+    kept = [l for l in lines if not ('"F13"' in l and "cs2hl/cmd" in l)]
+    if len(kept) != len(lines):
+        with open(path, "w", encoding="utf-8", errors="surrogateescape", newline="") as f:
+            f.writelines(kept)
+        log("removed leftover F13 bind from", path)
+
+
+VIDEO_OVERRIDES = {"setting.fullscreen": "0", "setting.coop_fullscreen": "0", "setting.nowindowborder": "0"}
+
+
+def force_windowed(user_cfg, w, h):
+    """CS2 lets cs2_video.txt override -windowed, so temporarily switch it to a window.
+    The original is kept next to it and restored by restore_video()."""
+    path = os.path.join(user_cfg, "cs2_video.txt")
+    orig = path + ".cs2hl-orig"
+    if not os.path.exists(orig):
+        shutil.copy2(path, orig)
+    overrides = dict(VIDEO_OVERRIDES, **{"setting.defaultres": str(w), "setting.defaultresheight": str(h)})
+    with open(orig, encoding="utf-8", newline="") as f:
+        text = f.read()
+    for key, val in overrides.items():
+        # Replace only the quoted value, keeping the file's own whitespace and line endings.
+        text = re.sub(r'("%s"\s+")[^"]*(")' % re.escape(key), lambda m: m.group(1) + val + m.group(2), text)
+    with open(path, "w", encoding="utf-8", newline="") as f:
+        f.write(text)
+
+
+def restore_video(user_cfg):
+    path = os.path.join(user_cfg, "cs2_video.txt")
+    orig = path + ".cs2hl-orig"
+    if os.path.exists(orig):
+        shutil.copy2(orig, path)
+        os.remove(orig)
+        log("restored your cs2_video.txt")
+
+
 def client_rect():
     hwnd = cs2_window()
     rect, pt = wt.RECT(), wt.POINT(0, 0)
@@ -115,8 +157,12 @@ def main():
     demo = os.path.abspath(demo)
     user_cfg = USER_CFG.format(acc=acc)
     backup = os.path.abspath(os.path.join("out", "cfg-backup-" + time.strftime("%Y%m%d-%H%M%S")))
+    if cs2_window():
+        raise SystemExit("CS2 is running; close it first")
+    restore_video(user_cfg)  # in case a previous run crashed
     shutil.copytree(user_cfg, backup)
     log("backed up CS2 cfg to", backup)
+    force_windowed(user_cfg, w, h)
 
     os.makedirs(CFG_DIR, exist_ok=True)
     with open(os.path.join(CFG_DIR, "init.cfg"), "w") as f:
@@ -129,22 +175,33 @@ def main():
         record(con, demo, acc, start, end, out, w, h)
     finally:
         if cs2_window():
-            con.send('unbind "F13"', "quit", wait=False)
+            con.send('unbind "F13"')
+            con.send("quit", wait=False)
             for _ in range(60):
                 if not cs2_window():
                     break
                 time.sleep(1)
-        log("CS2 closed" if not cs2_window() else "CS2 still running!")
-        shutil.copy(CONSOLE_LOG, out + ".console.log")
+        if cs2_window():
+            log("CS2 still running! Close it, then run this script again to restore settings.")
+        else:
+            log("CS2 closed")
+            time.sleep(2)  # CS2 writes its config files on the way out
+            restore_video(user_cfg)
+            remove_f13_bind(user_cfg)
+            shutil.rmtree(CFG_DIR, ignore_errors=True)
+        if os.path.exists(CONSOLE_LOG):
+            shutil.copy(CONSOLE_LOG, out + ".console.log")
 
 
 def record(con, demo, acc, start, end, out, w, h):
     log("launching CS2")
-    subprocess.Popen([STEAM, "-applaunch", "730", "-insecure", "-novid", "-windowed", "-noborder",
+    subprocess.Popen([STEAM, "-applaunch", "730", "-insecure", "-novid", "-windowed",
                       "-w", str(w), "-h", str(h), "-condebug", "+exec", "cs2hl/init", "+playdemo", demo])
     t0 = time.time()
     if not con.wait_for("Requesting playback", 120):
         raise RuntimeError("CS2 never started demo playback")
+    if con.wait_for("REPLAY_INCOMPATIBLE", 8, after="Requesting playback"):
+        raise RuntimeError("CS2 can't play this demo: it was recorded on an older game version")
     # The demo is in game once the client reaches full signon after the playback request.
     hit = con.wait_for("SIGNONSTATE_FULL", 180, after="Requesting playback")
     if not hit:
