@@ -195,6 +195,10 @@ def assemble(parts, out, o, audio):
         pads = "".join(f"[v{i}][a{i}]" if with_audio else f"[v{i}]" for i in range(n))
         graph += f";{pads}concat=n={n}:v=1:a={1 if with_audio else 0}" + ("[cv][ca]" if with_audio else "[cv]")
         vlast, alast = "[cv]", "[ca]"
+    corner = detect_fps_counter(parts[0]["video"]) if o.get("hide_fps_counter", True) else None
+    if corner:
+        graph += f";{vlast}{fps_mask_filter(corner, o['width'], o['height'])}[vmask]"
+        vlast = "[vmask]"
     maps = ["-map", vlast]
     if o.get("final_encoder", "nvenc") == "nvenc":
         # GPU encode: a couple of seconds per clip instead of ~20 s of CPU, and quality-targeted.
@@ -214,6 +218,42 @@ def assemble(parts, out, o, audio):
            "-movflags", "+faststart", out]
     subprocess.run(cmd, check=True)
 
+
+
+# Steam's in-game FPS counter (green text on a black box) is drawn into the game window when the
+# user has it enabled. Renders find it in the first frame and cover it with a mirrored copy of the
+# strip next to it, which continues the surrounding image seamlessly at this size.
+FPS_BOX_W, FPS_BOX_H = 56, 15
+
+
+def detect_fps_counter(video, at=0.5):
+    """Corner ('tl', 'tr', 'bl', 'br') holding Steam's FPS counter in `video`, or None."""
+    probe = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v", "-show_entries", "stream=width,height",
+                            "-of", "csv=p=0", video], capture_output=True, text=True).stdout.strip()
+    w, h = map(int, probe.split(",")[:2])
+    corners = {"tl": (0, 0), "tr": (w - FPS_BOX_W, 0), "bl": (0, h - FPS_BOX_H), "br": (w - FPS_BOX_W, h - FPS_BOX_H)}
+    best, best_n = None, 0
+    for name, (x, y) in corners.items():
+        raw = subprocess.run(["ffmpeg", "-v", "error", "-ss", str(at), "-i", video, "-frames:v", "1",
+                              "-vf", f"crop={FPS_BOX_W}:{FPS_BOX_H}:{x}:{y}", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
+                             capture_output=True).stdout
+        n = sum(1 for i in range(0, len(raw) - 2, 3)
+                if raw[i + 1] > 150 and raw[i + 1] > raw[i] + 60 and raw[i + 1] > raw[i + 2] + 60)
+        if n > best_n:
+            best, best_n = name, n
+    return best if best_n >= 12 else None
+
+
+def fps_mask_filter(corner, w, h):
+    """Filter chain (input/output labelled by the caller) hiding the counter in `corner`."""
+    bw, bh = FPS_BOX_W, FPS_BOX_H
+    x = 0 if corner[1] == "l" else w - bw
+    if corner[0] == "t":
+        src_y, dst_y = bh, 0
+    else:
+        src_y, dst_y = h - 2 * bh, h - bh
+    return (f"format=gbrp,split=2[fm_a][fm_b];[fm_b]crop={bw}:{bh}:{x}:{src_y},vflip[fm_p];"
+            f"[fm_a][fm_p]overlay={x}:{dst_y},format=yuv420p")
 
 
 def make_thumb(clip, thumb, at=3.7):
