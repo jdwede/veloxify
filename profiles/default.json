@@ -1,0 +1,49 @@
+{
+  "_comment": "Default render profile, modelled on Allstar.gg clips: kill feed only, no x-ray, small crosshair, high graphics, 1080p60. Copy this file and change any value to make your own profile.",
+  "output": {
+    "width": 1920,
+    "height": 1080,
+    "fps": 60,
+    "capture_bitrate_mbps": 40,
+    "final_codec": "h264",
+    "final_crf": 20,
+    "transition": "cut",
+    "transition_seconds": 0.35
+  },
+  "video": {
+    "_comment": "Written to cs2_video.txt for the render only; your own file is restored afterwards.",
+    "setting.videocfg_shadow_quality": "2",
+    "setting.videocfg_dynamic_shadows": "1",
+    "setting.videocfg_texture_detail": "2",
+    "setting.videocfg_ao_detail": "2",
+    "setting.videocfg_particle_detail": "2",
+    "setting.r_texturefilteringquality": "5",
+    "setting.shaderquality": "1",
+    "setting.msaa_samples": "4",
+    "setting.r_csgo_cmaa_enable": "0"
+  },
+  "console": {
+    "_comment": "Set over VConsole before recording; your previous values are put back before CS2 quits.",
+    "cl_draw_only_deathnotices": "1",
+    "spec_show_xray": "0",
+    "demo_ui_mode": "0",
+    "cl_spec_show_bindings": "0",
+    "cl_trueview_show_status": "0",
+    "r_show_build_info": "0",
+    "cl_showfps": "0",
+    "cl_show_observer_crosshair": "0",
+    "cl_crosshairstyle": "4",
+    "cl_crosshairsize": "1.5",
+    "cl_crosshairgap": "-2",
+    "cl_crosshairthickness": "0.5",
+    "cl_crosshairdot": "0",
+    "cl_crosshair_drawoutline": "0",
+    "cl_crosshaircolor": "5",
+    "cl_crosshaircolor_r": "200",
+    "cl_crosshaircolor_g": "255",
+    "cl_crosshaircolor_b": "0",
+    "cl_crosshairalpha": "255",
+    "engine_no_focus_sleep": "0",
+    "fps_max": "0"
+  }
+}
