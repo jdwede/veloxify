@@ -1,0 +1,13 @@
+[package]
+name = "cs2hl-capture"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "cs2hl-capture"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+windows-capture = "1"
