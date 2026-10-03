@@ -18,8 +18,8 @@ async function loadIndex() {
   state.index = await res.json();
 }
 
-async function loadMatch(id) {
-  if (!state.matches.has(id)) {
+async function loadMatch(id, fresh = false) {
+  if (fresh || !state.matches.has(id)) {
     const res = await fetch(`${LIB}/matches/${encodeURIComponent(id)}.json`, { cache: "no-store" });
     state.matches.set(id, await res.json());
   }
@@ -46,6 +46,7 @@ const parseLocal = (s) => new Date(s); // backend writes local time without offs
 const fmtTime = (s) => parseLocal(s).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
 const fmtDate = (d) => new Date(`${d}T12:00:00`).toLocaleDateString([], { weekday: "long", month: "long", day: "numeric" });
 const fmtDur = (s) => `${Math.round(s / 60)} min`;
+const fmtClip = (s) => { const t = Math.round(s); return `${Math.floor(t / 60)}:${String(t % 60).padStart(2, "0")}`; };
 const iso = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 const f1 = (x) => x.toFixed(1);
 const f2 = (x) => x.toFixed(2);
@@ -280,23 +281,35 @@ async function renderHighlights(body, ids) {
   // Only you (and players you opted in) have highlights; everyone else is stats-only.
   const groups = [];
   for (const id of ids) {
-    const m = await loadMatch(id);
+    const m = await loadMatch(id, true); // clips appear while the renderer works
     const names = new Map(m.players.map((p) => [p.steamid, p.name]));
     const list = m.highlights.map((h) => ({ ...h, name: names.get(h.player), match: m }));
     if (list.length) groups.push({ m, list });
   }
   state.playlist = groups.flatMap((g) => g.list.filter((h) => h.clip));
   if (!groups.length) { body.innerHTML = `<div class="empty">No highlights detected.</div>`; return; }
+  // While clips are still rendering, refresh this list every few seconds (not while a clip plays).
+  clearTimeout(state.refreshTimer);
+  if (groups.some((g) => g.list.some((h) => !h.clip && !h.render_error))) {
+    state.refreshTimer = setTimeout(() => {
+      if (document.body.contains(body) && document.getElementById("player").hidden) renderHighlights(body, ids);
+    }, 5000);
+  }
   body.innerHTML = `
     ${groups.map(({ m, list }) => `
       <div class="hl-group">
         ${ids.length > 1 ? `<div class="h2">${esc(mapName(m.map))} · ${m.score_mine}-${m.score_theirs} · ${fmtTime(m.played_at)}</div>` : ""}
         <div class="hl-grid">${list.map((h) => `
           <div class="hl-card ${h.clip ? "" : "pending"}" data-hl="${esc(h.id)}">
-            <div class="hl-title">${h.clip ? "▶ " : ""}${esc(h.title)}</div>
-            <div class="hl-meta"><span>${esc(h.name || "")}</span><span>${f1(h.duration_s)}s</span><span>score ${f1(h.score)}</span></div>
-            <div class="tags">${h.tags.map((t) => `<span class="tag">${esc(t)}</span>`).join("")}</div>
-            ${h.clip ? "" : `<div class="sub">Not rendered yet</div>`}
+            <div class="hl-thumb" style="--map-bg:${mapColor(m.map)};${h.thumb ? `background-image:url('${assetUrl(h.thumb)}')` : ""}">
+              ${h.clip ? `<span class="play">▶</span>` : `<span class="state">${h.render_error ? esc(h.render_error) : "Rendering…"}</span>`}
+              <span class="dur">${fmtClip(h.duration_s)}</span>
+            </div>
+            <div class="hl-info">
+              <div class="hl-title">${esc(h.title)}</div>
+              <div class="hl-meta"><span>${esc(h.name || "")}</span><span>${esc(mapName(m.map))} · round ${h.round}</span></div>
+              <div class="tags">${h.tags.map((t) => `<span class="tag">${esc(t)}</span>`).join("")}</div>
+            </div>
           </div>`).join("")}
         </div>
       </div>`).join("")}`;
@@ -337,6 +350,13 @@ function renderSettings(view) {
 // ---- wiring -------------------------------------------------------------------------------------
 
 document.getElementById("player-close").onclick = closePlayer;
+// Theater mode, remembered between clips (and sessions, where storage is available).
+const setTheater = (on) => {
+  document.getElementById("player").classList.toggle("theater", on);
+  try { localStorage.setItem("veloxify.theater", on ? "1" : "0"); } catch (e) { /* storage unavailable */ }
+};
+try { setTheater(localStorage.getItem("veloxify.theater") === "1"); } catch (e) { /* default view */ }
+document.getElementById("player-theater").onclick = () => setTheater(!document.getElementById("player").classList.contains("theater"));
 document.getElementById("player").addEventListener("click", (e) => { if (e.target.id === "player") closePlayer(); });
 document.getElementById("player-prev").onclick = () => play(state.playing - 1);
 document.getElementById("player-next").onclick = () => play(state.playing + 1);
@@ -346,6 +366,7 @@ document.getElementById("player-copy").onclick = () => tauri?.core.invoke("copy_
 document.addEventListener("keydown", (e) => {
   if (document.getElementById("player").hidden) return;
   if (e.key === "Escape") closePlayer();
+  if (e.key === "t" || e.key === "T") setTheater(!document.getElementById("player").classList.contains("theater"));
   if (e.key === "ArrowRight" && e.shiftKey) play(state.playing + 1);
   if (e.key === "ArrowLeft" && e.shiftKey) play(state.playing - 1);
 });

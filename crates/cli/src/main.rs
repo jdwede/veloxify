@@ -7,7 +7,7 @@ const USAGE: &str = "usage:
   cs2hl analyze <demo> [--player <steamid64>] [--selectivity everything|solid-plays|highlights-only] [--json]
   cs2hl events <demo> [event names...]
   cs2hl extract <demo> <out.dem>   (decompress to a playable .dem)
-  cs2hl library <library dir> --player <steamid64> [--also <steamid64>]...
+  cs2hl library <library dir> --player <steamid64> [--also <steamid64>]... [--refresh]
         [--selectivity everything|solid-plays|highlights-only] [--max-per-match N] <demo>...
       (add demos and rebuild index.json; highlights only for --player and any --also players)
   cs2hl validate <demo>...   (compare computed stats with CS2's in-demo scoreboard)";
@@ -112,6 +112,7 @@ fn library(args: &[String]) -> Result<()> {
     let pi = args.iter().position(|a| a == "--player").context("--player <steamid64> is required")?;
     let me: u64 = args.get(pi + 1).context("--player <steamid64>")?.parse()?;
     let mut policy = library::ClipPolicy::default();
+    let mut refresh = false;
     let mut skip: Vec<usize> = vec![pi, pi + 1];
     for (i, a) in args.iter().enumerate() {
         let val = || args.get(i + 1).with_context(|| format!("{a} needs a value"));
@@ -123,6 +124,11 @@ fn library(args: &[String]) -> Result<()> {
                     .context("--selectivity everything|solid-plays|highlights-only")?
             }
             "--max-per-match" => policy.max_per_player = val()?.parse()?,
+            "--refresh" => {
+                refresh = true;
+                skip.push(i);
+                continue;
+            }
             _ => continue,
         }
         skip.extend([i, i + 1]);
@@ -136,10 +142,16 @@ fn library(args: &[String]) -> Result<()> {
         let name = p.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
         let id = library::demo_id(&name);
         let out = matches_dir.join(format!("{id}.json"));
-        if out.exists() {
-            println!("cached  {id}");
-            continue;
-        }
+        // --refresh re-analyzes cached matches (e.g. after rule changes) but keeps rendered clips.
+        let previous: Option<library::MatchEntry> = if out.exists() {
+            if !refresh {
+                println!("cached  {id}");
+                continue;
+            }
+            serde_json::from_str(&std::fs::read_to_string(&out)?).ok()
+        } else {
+            None
+        };
         // Until a FACEIT/Valve match time is known, the demo file's timestamp stands in for it.
         let mtime = std::fs::metadata(p)?.modified()?;
         let local: chrono::DateTime<chrono::Local> = mtime.into();
@@ -158,6 +170,18 @@ fn library(args: &[String]) -> Result<()> {
             println!("skip    {id}: player {me} not in this match");
             continue;
         };
+        let mut entry = entry;
+        if let Some(prev) = previous {
+            for h in entry.highlights.iter_mut() {
+                if let Some(old) = prev.highlights.iter().find(|o| o.id == h.id) {
+                    h.clip = old.clip.clone();
+                    h.render_error = old.render_error.clone();
+                    h.thumb = old.thumb.clone();
+                }
+            }
+            entry.played_ts = prev.played_ts;
+            entry.played_at = prev.played_at.clone();
+        }
         std::fs::write(&out, serde_json::to_string_pretty(&entry)?)?;
         println!("added   {id}  {} {}-{} {}  ({:.1}s)", entry.map, entry.score_mine, entry.score_theirs, entry.result, t.elapsed().as_secs_f64());
     }

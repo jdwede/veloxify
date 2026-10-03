@@ -47,6 +47,9 @@ pub struct HighlightEntry {
     /// 3 = always a highlight, 2 = when it matters, 1 = filler.
     #[serde(default)]
     pub tier: u8,
+    /// Render priority ("poker hand"): kills x100 + flashiness.
+    #[serde(default)]
+    pub hand: u32,
     pub score: f64,
     pub title: String,
     pub tags: Vec<String>,
@@ -54,6 +57,12 @@ pub struct HighlightEntry {
     pub segments: Vec<(i32, i32)>,
     /// Path relative to the library root once rendered.
     pub clip: Option<String>,
+    /// Preview frame (JPEG) next to the clip, once rendered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thumb: Option<String>,
+    /// Why rendering failed (e.g. the demo is from an older CS2 version), if it did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub render_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -204,12 +213,15 @@ fn highlight_entry(match_id: &str, h: &Highlight) -> HighlightEntry {
         player: h.player.to_string(),
         round: h.round_number,
         tier: h.tier,
+        hand: h.hand,
         score: h.score,
         title: h.title.clone(),
         tags: h.tags.clone(),
         duration_s: h.duration_s,
         segments: h.segments.iter().map(|s| (s.start_tick, s.end_tick)).collect(),
         clip: None,
+        thumb: None,
+        render_error: None,
     }
 }
 

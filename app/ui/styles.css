@@ -1,3 +1,9 @@
+@font-face {
+  font-family: "Nunito";
+  src: url("assets/fonts/Nunito-Variable.ttf") format("truetype");
+  font-weight: 200 1000;
+  font-display: swap;
+}
 /* CS2-inspired look: dark slate panels over a soft vignette, condensed uppercase type
    (Bahnschrift ships with Windows), green/red result accents, gold for highlights. */
 :root {
@@ -49,8 +55,9 @@ a { color: inherit; text-decoration: none; }
   border-bottom: 1px solid var(--line);
   backdrop-filter: blur(8px);
 }
-.brand { display: flex; align-items: center; gap: 10px; font-weight: 700; letter-spacing: 0.18em; font-size: 15px; color: var(--text); }
-.brand-logo { width: 26px; height: 26px; color: #fff; }
+.brand { display: flex; align-items: center; gap: 10px; color: var(--text); }
+.brand-logo { width: 30px; height: 30px; color: #fff; }
+.wordmark { font-family: "Nunito", var(--font); font-weight: 800; font-size: 24px; letter-spacing: -0.01em; line-height: 1; }
 .tabs { display: flex; gap: 4px; margin: 0 auto; }
 .tabs a {
   padding: 8px 18px; text-transform: uppercase; letter-spacing: 0.08em; font-size: 15px;
@@ -181,30 +188,55 @@ table.sb { width: 100%; border-collapse: collapse; font-variant-numeric: tabular
 .note { color: var(--faint); font-size: 12px; margin-top: 14px; }
 
 /* ---- highlights ------------------------------------------------------------------------- */
-.hl-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 12px; }
+.hl-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 16px; }
 .hl-card {
-  background: rgba(255, 255, 255, 0.04); border: 1px solid var(--line); border-radius: var(--radius);
-  padding: 12px 14px; display: grid; gap: 6px; cursor: pointer;
+  background: rgba(255, 255, 255, 0.04); border: 1px solid var(--line); border-radius: 6px;
+  overflow: hidden; display: flex; flex-direction: column; cursor: pointer; transition: transform 0.12s, background 0.12s;
 }
-.hl-card:hover { background: var(--panel-hi); }
-.hl-card.pending { cursor: default; opacity: 0.75; }
-.hl-title { font-size: 16px; font-weight: 600; }
+.hl-card:hover { background: var(--panel-hi); transform: translateY(-2px); }
+.hl-card.pending { cursor: default; }
+.hl-card.pending:hover { transform: none; }
+.hl-thumb {
+  position: relative; aspect-ratio: 16 / 9; background: var(--map-bg, #2b333c) center / cover no-repeat;
+  display: flex; align-items: center; justify-content: center;
+}
+.hl-thumb .play {
+  width: 54px; height: 54px; border-radius: 50%; background: rgba(0, 0, 0, 0.55); display: flex; align-items: center;
+  justify-content: center; font-size: 22px; color: #fff; padding-left: 4px; opacity: 0.85; transition: opacity 0.12s, transform 0.12s;
+}
+.hl-card:hover .play { opacity: 1; transform: scale(1.08); }
+.hl-thumb .dur {
+  position: absolute; right: 8px; bottom: 8px; background: rgba(0, 0, 0, 0.75); color: #fff; font-size: 12px;
+  padding: 2px 6px; border-radius: 3px; font-variant-numeric: tabular-nums;
+}
+.hl-thumb .state { color: rgba(255, 255, 255, 0.8); font-size: 13px; letter-spacing: 0.06em; text-transform: uppercase; text-align: center; padding: 0 16px; }
+.hl-info { padding: 12px 14px; display: grid; gap: 6px; }
+.hl-title { font-size: 17px; font-weight: 600; }
 .hl-meta { font-size: 12px; color: var(--muted); display: flex; gap: 10px; }
 .tags { display: flex; gap: 4px; flex-wrap: wrap; }
 .tag { font-size: 11px; padding: 2px 6px; border-radius: 3px; background: rgba(231, 184, 74, 0.14); color: #f0d08a; letter-spacing: 0.04em; }
-.hl-group { margin-bottom: 22px; }
+.hl-group { margin-bottom: 26px; }
 .hl-group .h2 { margin-bottom: 10px; }
 
 /* ---- player modal ------------------------------------------------------------------------ */
-.player-modal { position: fixed; inset: 0; background: rgba(5, 7, 9, 0.82); display: flex; align-items: center; justify-content: center; z-index: 50; }
+.player-modal { position: fixed; inset: 0; background: rgba(5, 7, 9, 0.86); display: flex; align-items: center; justify-content: center; z-index: 50; }
 .player-modal[hidden] { display: none; }
-.player-box { width: min(1280px, 92vw); background: var(--panel-solid); border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
-.player-head { display: flex; align-items: center; padding: 12px 16px; gap: 12px; }
+/* Default: about 85% of the window, limited by height so the 16:9 video always fits. */
+.player-box {
+  width: min(86vw, calc((100vh - 170px) * 16 / 9)); background: var(--panel-solid); border: 1px solid var(--line);
+  border-radius: 6px; overflow: hidden; display: flex; flex-direction: column;
+}
+.player-head { display: flex; align-items: center; padding: 10px 16px; gap: 12px; }
 .player-head > div { flex: 1; }
 .player-title { font-size: 18px; font-weight: 600; }
 .player-sub { font-size: 13px; color: var(--muted); }
 .player-box video { display: block; width: 100%; background: #000; aspect-ratio: 16 / 9; }
 .player-actions { display: flex; gap: 8px; padding: 10px 16px; }
+/* Theater: edge to edge, video as large as the window allows. */
+.player-modal.theater { background: #000; }
+.player-modal.theater .player-box { width: 100vw; height: 100vh; border: 0; border-radius: 0; background: #000; }
+.player-modal.theater video { flex: 1; min-height: 0; aspect-ratio: auto; object-fit: contain; }
+.player-modal.theater #player-theater { background: rgba(127, 178, 232, 0.25); }
 
 @media (max-width: 1000px) {
   .home, .day { grid-template-columns: 1fr; }

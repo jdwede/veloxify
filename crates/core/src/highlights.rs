@@ -89,6 +89,9 @@ pub struct Highlight {
     pub tier: u8,
     /// Ranking score within and across tiers.
     pub score: f64,
+    /// "Poker hand" strength for render priority: kills first (x100), then flashiness (0-99).
+    /// An ACE beats any 4K, a 4K beats any 3K; within a kill count the flashier moment wins.
+    pub hand: u32,
     pub title: String,
     pub tags: Vec<String>,
     /// Indices into `Match::kills`.
@@ -414,6 +417,7 @@ pub fn detect(m: &Match, a: &Analysis, player: u64, flicks: &HashMap<usize, f64>
             round_number: round.number,
             tier,
             score: (score * 10.0).round() / 10.0,
+            hand: hand(n, &ks, &tags, clutch),
             title: title(&tags, n, most_used_weapon(m, &kills), round.number),
             tags,
             kills,
@@ -423,6 +427,46 @@ pub fn detect(m: &Match, a: &Analysis, player: u64, flicks: &HashMap<usize, f64>
     }
     out.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
     out
+}
+
+/// Kill count x100 plus a flashiness kicker (capped at 99).
+fn hand(n: usize, ks: &[&Kill], tags: &[String], clutch: Option<&Clutch>) -> u32 {
+    let has = |t: &str| tags.iter().any(|x| x.contains(t));
+    let mut flash = 0u32;
+    for k in ks {
+        if (k.noscope && SNIPERS.contains(&k.weapon.as_str()))
+            || k.weapon.starts_with("knife")
+            || k.weapon == "bayonet"
+            || IMPACT_NADES.contains(&k.weapon.as_str())
+            || k.attacker_in_air
+        {
+            flash += 30;
+        }
+        flash += 10 * (k.penetrated > 0) as u32 + 10 * k.through_smoke as u32 + 10 * k.attacker_blind as u32;
+        flash += k.headshot as u32;
+    }
+    if has("collateral") {
+        flash += 20;
+    }
+    if let Some(c) = clutch {
+        flash += 15 + 5 * c.vs;
+    }
+    if has("ninja defuse") {
+        flash += 25;
+    }
+    if has("multi-kill") {
+        flash += 15;
+    }
+    if has("reaction flick") {
+        flash += 15;
+    }
+    if has("critical round") {
+        flash += 10;
+    }
+    if has("entry 2K") {
+        flash += 5;
+    }
+    n as u32 * 100 + flash.min(99)
 }
 
 /// Headline priority: ACE > 4K > clutch > ninja defuse > rare kill > 3K > precision multi-kill >

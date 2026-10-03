@@ -64,9 +64,25 @@ class VConsole:
         payload = cmd.encode() + b"\x00"
         self.sock.sendall(HEADER.pack(b"CMND", VERSION, HEADER.size + len(payload), 0) + payload)
 
-    def wait_for(self, needle, timeout):
+    def mark(self):
+        """Position in the output, for wait_for(since=...) to ignore older lines."""
+        return len(self.lines)
+
+    def wait_for_any(self, needles, timeout, since=0):
+        """First line (after `since`) containing any of `needles`, or None on timeout."""
         deadline = time.time() + timeout
-        seen = 0
+        seen = since
+        while time.time() < deadline:
+            for line in self.lines[seen:]:
+                if any(n in line for n in needles):
+                    return line
+            seen = len(self.lines)
+            time.sleep(0.1)
+        return None
+
+    def wait_for(self, needle, timeout, since=0):
+        deadline = time.time() + timeout
+        seen = since
         while time.time() < deadline:
             for line in self.lines[seen:]:
                 if needle in line:

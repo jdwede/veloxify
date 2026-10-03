@@ -15,8 +15,9 @@ Priorities, in order. Each phase ships something usable before the next starts.
   - When it matters: 2K including the opening kill in a won round; 2K in a critical round
     (overtime, 10-10+ within one, enemy match point, our match point vs 10+); reaction flick
     (hit first, then a fast snap onto the enemy). Eco kills don't count toward a 2K.
-  - Never: plain single kills.
-  - Open questions: lost clutches with kills? Eco cutoff ($2,000 equipment) right?
+  - Never: plain single kills; lost clutches (even with kills).
+  - "Clutch" = a won 1vX round, by any means. Eco = enemy equipment under $2,000 (not in
+    pistol rounds).
 
 ## 2. Stats (Leetify, minus the clutter)
 

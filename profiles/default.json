@@ -6,9 +6,11 @@
     "fps": 60,
     "capture_bitrate_mbps": 40,
     "final_codec": "h264",
-    "final_crf": 20,
+    "final_crf": 23,
     "transition": "cut",
-    "transition_seconds": 0.35
+    "transition_seconds": 0.35,
+    "max_bitrate_mbps": 12,
+    "final_encoder": "nvenc"
   },
   "video": {
     "_comment": "Written to cs2_video.txt for the render only; your own file is restored afterwards.",
