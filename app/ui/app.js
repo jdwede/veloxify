@@ -3,24 +3,30 @@
 // Runs inside the Tauri window; for development it also works from any static file server.
 "use strict";
 
-// Dev preview serves the repo root, so the library sits two levels up from app/ui/.
-const LIB = window.CS2HL_LIBRARY || (location.pathname.includes("/app/ui/") ? "../../library" : "library");
+// In the desktop app the library lives wherever the app keeps it (asked over IPC) and files are
+// served through Tauri's asset protocol; the dev preview serves the repo root instead.
 const tauri = window.__TAURI__;
-const assetUrl = (rel) => (tauri ? tauri.core.convertFileSrc(`${LIB}/${rel}`) : `${LIB}/${rel}`);
+let LIB = null;
+async function initLib() {
+  if (LIB) return;
+  LIB = tauri ? await tauri.core.invoke("library_root")
+    : window.CS2HL_LIBRARY || (location.pathname.includes("/app/ui/") ? "../../library" : "library");
+}
+const assetUrl = (rel) => (tauri ? tauri.core.convertFileSrc(`${LIB}\\${rel.replaceAll("/", "\\")}`) : `${LIB}/${rel}`);
 
 const state = { index: null, matches: new Map(), month: null, playlist: [], playing: -1 };
 
 // ---- data ----------------------------------------------------------------------------------------
 
 async function loadIndex() {
-  const res = await fetch(`${LIB}/index.json`, { cache: "no-store" });
+  const res = await fetch(assetUrl("index.json"), { cache: "no-store" });
   if (!res.ok) throw new Error(`index.json: ${res.status}`);
   state.index = await res.json();
 }
 
 async function loadMatch(id, fresh = false) {
   if (fresh || !state.matches.has(id)) {
-    const res = await fetch(`${LIB}/matches/${encodeURIComponent(id)}.json`, { cache: "no-store" });
+    const res = await fetch(assetUrl(`matches/${id}.json`), { cache: "no-store" });
     state.matches.set(id, await res.json());
   }
   return state.matches.get(id);
@@ -68,6 +74,7 @@ async function route() {
   const parts = location.hash.replace(/^#\/?/, "").split("/").filter(Boolean);
   document.querySelectorAll("[data-nav]").forEach((a) => a.classList.remove("active"));
   const view = document.getElementById("view");
+  await initLib();
   if (!state.index) {
     try { await loadIndex(); } catch (e) {
       view.innerHTML = `<div class="empty">No library yet. Play a match and it will show up here.<br><span class="sub">${esc(e.message)}</span></div>`;
@@ -361,8 +368,45 @@ document.getElementById("player").addEventListener("click", (e) => { if (e.targe
 document.getElementById("player-prev").onclick = () => play(state.playing - 1);
 document.getElementById("player-next").onclick = () => play(state.playing + 1);
 document.getElementById("player-video").addEventListener("ended", () => play(state.playing + 1));
-document.getElementById("player-folder").onclick = () => tauri?.core.invoke("show_in_folder", { path: state.playlist[state.playing]?.clip });
-document.getElementById("player-copy").onclick = () => tauri?.core.invoke("copy_file_to_clipboard", { path: state.playlist[state.playing]?.clip });
+document.getElementById("player-folder").onclick = () => tauri?.core.invoke("show_in_folder", { rel: state.playlist[state.playing]?.clip });
+document.getElementById("player-copy").onclick = async (e) => {
+  const btn = e.currentTarget;
+  try {
+    await tauri?.core.invoke("copy_file", { rel: state.playlist[state.playing]?.clip });
+    btn.textContent = "Copied";
+  } catch (err) {
+    btn.textContent = "Copy failed";
+  }
+  setTimeout(() => (btn.textContent = "Copy file"), 1500);
+};
+
+// ---- live status and library updates from the background worker --------------------------------
+
+function showStatus(st) {
+  const el = document.getElementById("status");
+  if (!st) return;
+  const busy = st.state === "importing" || st.state === "rendering";
+  el.classList.toggle("busy", busy);
+  el.textContent = st.state === "rendering" && st.total ? `Rendering ${Math.min(st.done + 1, st.total)} of ${st.total}`
+    : st.state === "importing" && st.total ? `Reading matches ${st.done + 1}/${st.total}`
+    : st.state === "waiting" ? "CS2 running · waiting"
+    : st.state === "error" ? "Needs attention" : "Up to date";
+  el.title = st.message || "";
+}
+
+if (tauri) {
+  tauri.core.invoke("get_status").then(showStatus);
+  tauri.event.listen("veloxify://status", (e) => showStatus(e.payload));
+  let pendingReload = false;
+  const reload = () => {
+    if (!document.getElementById("player").hidden) { pendingReload = true; return; } // don't disturb a playing clip
+    state.index = null;
+    state.matches.clear();
+    route();
+  };
+  tauri.event.listen("veloxify://library", reload);
+  document.getElementById("player-close").addEventListener("click", () => { if (pendingReload) { pendingReload = false; reload(); } });
+}
 document.addEventListener("keydown", (e) => {
   if (document.getElementById("player").hidden) return;
   if (e.key === "Escape") closePlayer();

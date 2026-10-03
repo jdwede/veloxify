@@ -137,75 +137,17 @@ fn library(args: &[String]) -> Result<()> {
         skip.extend([i, i + 1]);
     }
     let demos: Vec<&String> = args.iter().enumerate().skip(1).filter(|(i, _)| !skip.contains(i)).map(|(_, a)| a).collect();
-    let matches_dir = root.join("matches");
-    std::fs::create_dir_all(&matches_dir)?;
-
+    use cs2hl_core::ingest::{self, Added};
     for path in demos {
-        let p = Path::new(path);
-        let name = p.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
-        let id = library::demo_id(&name);
-        let out = matches_dir.join(format!("{id}.json"));
-        // --refresh re-analyzes cached matches (e.g. after rule changes) but keeps rendered clips.
-        let previous: Option<library::MatchEntry> = if out.exists() {
-            if !refresh {
-                println!("cached  {id}");
-                continue;
+        match ingest::add_demo(&root, Path::new(path), me, &policy, refresh)? {
+            Added::Added { id, map, score, result, seconds } => {
+                println!("added   {id}  {map} {}-{} {result}  ({seconds:.1}s)", score.0, score.1)
             }
-            serde_json::from_str(&std::fs::read_to_string(&out)?).ok()
-        } else {
-            None
-        };
-        // Until a FACEIT/Valve match time is known, the demo file's timestamp stands in for it.
-        let mtime = std::fs::metadata(p)?.modified()?;
-        let local: chrono::DateTime<chrono::Local> = mtime.into();
-        let t = Instant::now();
-        let demo = demo_io::read_demo(p)?;
-        let m = match model::load_match(&demo) {
-            Ok(m) => m,
-            Err(e) => {
-                println!("skip    {id}: {e}");
-                continue;
-            }
-        };
-        let a = analysis::analyze(&m);
-        let st = stats::player_stats(&m, &a, true);
-        let Some(entry) = library::match_entry(&id, path, local.timestamp(), &local.format("%Y-%m-%dT%H:%M:%S").to_string(), &m, &a, &st, me, &policy, Some(&demo)) else {
-            println!("skip    {id}: player {me} not in this match");
-            continue;
-        };
-        let mut entry = entry;
-        if let Some(prev) = previous {
-            for h in entry.highlights.iter_mut() {
-                if let Some(old) = prev.highlights.iter().find(|o| o.id == h.id) {
-                    h.clip = old.clip.clone();
-                    h.render_error = old.render_error.clone();
-                    h.thumb = old.thumb.clone();
-                }
-            }
-            entry.played_ts = prev.played_ts;
-            entry.played_at = prev.played_at.clone();
-        }
-        std::fs::write(&out, serde_json::to_string_pretty(&entry)?)?;
-        println!("added   {id}  {} {}-{} {}  ({:.1}s)", entry.map, entry.score_mine, entry.score_theirs, entry.result, t.elapsed().as_secs_f64());
-    }
-
-    let mut all: Vec<library::MatchEntry> = vec![];
-    for f in std::fs::read_dir(&matches_dir)? {
-        let f = f?.path();
-        if f.extension().is_some_and(|e| e == "json") {
-            all.push(serde_json::from_str(&std::fs::read_to_string(&f)?)?);
+            Added::Cached { id } => println!("cached  {id}"),
+            Added::Skipped { id, reason } => println!("skip    {id}: {reason}"),
         }
     }
-    let index = library::build_index(me, &mut all, |ts| {
-        chrono::DateTime::from_timestamp(ts, 0)
-            .map(|d| d.with_timezone(&chrono::Local).format("%Y-%m-%d").to_string())
-            .unwrap_or_default()
-    });
-    // Party flags are decided per session, so write them back into the match files.
-    for m in &all {
-        std::fs::write(matches_dir.join(format!("{}.json", m.id)), serde_json::to_string_pretty(m)?)?;
-    }
-    std::fs::write(root.join("index.json"), serde_json::to_string_pretty(&index)?)?;
+    let index = ingest::rebuild_index(&root, me)?;
     println!("index: {} matches over {} days", index.matches.len(), index.days.len());
     Ok(())
 }

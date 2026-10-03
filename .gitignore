@@ -5,3 +5,4 @@
 *.dem.bz2
 /out
 /library
+/app/src-tauri/gen
