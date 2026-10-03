@@ -194,6 +194,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "cs2hl-core",
+ "cs2hl-render",
  "parser",
  "serde_json",
 ]
@@ -210,6 +211,18 @@ dependencies = [
  "serde",
  "serde_json",
  "zstd",
+]
+
+[[package]]
+name = "cs2hl-render"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "cs2hl-capture",
+ "cs2hl-core",
+ "serde",
+ "serde_json",
+ "windows 0.62.2",
 ]
 
 [[package]]

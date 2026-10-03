@@ -10,6 +10,8 @@ const USAGE: &str = "usage:
   cs2hl library <library dir> --player <steamid64> [--also <steamid64>]... [--refresh]
         [--selectivity everything|solid-plays|highlights-only] [--max-per-match N] <demo>...
       (add demos and rebuild index.json; highlights only for --player and any --also players)
+  cs2hl render <library dir> [--all | --match <id>]... [--limit N] [--profile p.json]
+      (render pending highlights in the background, best first; default: latest session)
   cs2hl validate <demo>...   (compare computed stats with CS2's in-demo scoreboard)";
 
 fn main() -> Result<()> {
@@ -19,6 +21,7 @@ fn main() -> Result<()> {
         Some("events") => events(&args[1..]),
         Some("validate") => validate(&args[1..]),
         Some("library") => library(&args[1..]),
+        Some("render") => render(&args[1..]),
         Some("extract") => {
             let (src, dst) = (args.get(1).context(USAGE)?, args.get(2).context(USAGE)?);
             std::fs::write(dst, demo_io::read_demo(&PathBuf::from(src))?)?;
@@ -204,6 +207,34 @@ fn library(args: &[String]) -> Result<()> {
     }
     std::fs::write(root.join("index.json"), serde_json::to_string_pretty(&index)?)?;
     println!("index: {} matches over {} days", index.matches.len(), index.days.len());
+    Ok(())
+}
+
+fn render(args: &[String]) -> Result<()> {
+    use cs2hl_render::batch::{self, Event, Scope};
+    let lib = PathBuf::from(args.first().context(USAGE)?);
+    let opt = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
+    let matches: Vec<String> = args.iter().enumerate().filter(|(_, a)| *a == "--match").filter_map(|(i, _)| args.get(i + 1).cloned()).collect();
+    let scope = if !matches.is_empty() {
+        Scope::Matches(matches)
+    } else if args.iter().any(|a| a == "--all") {
+        Scope::All
+    } else {
+        Scope::LatestSession
+    };
+    let limit = opt("--limit").map(|s| s.parse()).transpose()?;
+    let profile_path = opt("--profile").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("profiles/default.json"));
+    let profile = cs2hl_render::profile::Profile::load(&profile_path)?;
+    let index: cs2hl_core::library::Index = serde_json::from_str(&std::fs::read_to_string(lib.join("index.json"))?)?;
+    let work = lib.join(".work");
+    let t = |s: &str| println!("{} {s}", chrono::Local::now().format("%H:%M:%S"));
+    batch::render(&lib, index.me.parse()?, profile, &work, scope, limit, &mut |e| match e {
+        Event::Plan { total } => t(&format!("{total} highlights to render")),
+        Event::Rendered { title, clip_s, took_s, .. } => t(&format!("rendered {title} ({clip_s:.0}s clip in {took_s:.0}s)")),
+        Event::Failed { title, error, .. } => t(&format!("failed {title}: {error}")),
+        Event::Done { rendered, minutes } => t(&format!("rendered {rendered} highlights in {minutes:.1} min")),
+        Event::Log(s) => t(&s),
+    })?;
     Ok(())
 }
 

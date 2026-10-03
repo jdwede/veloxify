@@ -1,3 +1,5 @@
+// Vendored code: upstream warnings are not ours to fix.
+#![allow(warnings)]
 #[cfg(test)]
 pub mod e2e_test;
 pub mod first_pass;

@@ -9,3 +9,4 @@ Local changes:
   the generated `src/protobuf.rs` is already committed upstream).
 - Removed `parser/src/bin/parse_bench.rs`.
 - Removed csgoproto codegen tool (`src/main.rs`, `src/parser.rs`, `update_protos.py`).
+- `#![allow(warnings)]` added to both crate roots (upstream warnings drowned out ours).
