@@ -184,6 +184,8 @@ pub fn render(
             }
         }
         save(&path, &m)?;
+        // Keep index.json (and so the Highlights tab) current as each clip finishes.
+        let _ = cs2hl_core::ingest::rebuild_index(lib, steamid64);
     }
     let wants_cs2 = renderer.wants_cs2();
     renderer.close();

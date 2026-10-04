@@ -120,6 +120,35 @@ pub struct Index {
     pub days: Vec<Day>,
     /// Lightweight per-match summaries for the match lists (full data lives in matches/<id>.json).
     pub matches: Vec<MatchSummary>,
+    /// Every highlight in the library, for the Highlights browser (newest first).
+    #[serde(default)]
+    pub highlights: Vec<HighlightRef>,
+}
+
+/// A highlight plus the match context the Highlights browser sorts and filters on.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HighlightRef {
+    pub id: String,
+    pub match_id: String,
+    pub player: String,
+    pub player_name: String,
+    pub title: String,
+    pub tags: Vec<String>,
+    pub tier: u8,
+    pub hand: u32,
+    pub score: f64,
+    pub round: u32,
+    pub duration_s: f64,
+    pub clip: Option<String>,
+    pub thumb: Option<String>,
+    pub render_error: Option<String>,
+    pub map: String,
+    pub source: String,
+    pub result: String,
+    pub score_mine: u32,
+    pub score_theirs: u32,
+    pub played_at: String,
+    pub played_ts: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -336,7 +365,36 @@ pub fn build_index(me: u64, matches: &mut [MatchEntry], date_of: impl Fn(i64) ->
             highlight_count: counted(m),
         })
         .collect();
-    Index { me: me_s, me_name, days, matches: summaries }
+    let mut highlights: Vec<HighlightRef> = matches
+        .iter()
+        .flat_map(|m| {
+            m.highlights.iter().map(move |h| HighlightRef {
+                id: h.id.clone(),
+                match_id: m.id.clone(),
+                player: h.player.clone(),
+                player_name: m.players.iter().find(|p| p.steamid == h.player).map(|p| p.name.clone()).unwrap_or_default(),
+                title: h.title.clone(),
+                tags: h.tags.clone(),
+                tier: h.tier,
+                hand: h.hand,
+                score: h.score,
+                round: h.round,
+                duration_s: h.duration_s,
+                clip: h.clip.clone(),
+                thumb: h.thumb.clone(),
+                render_error: h.render_error.clone(),
+                map: m.map.clone(),
+                source: m.source.clone(),
+                result: m.result.clone(),
+                score_mine: m.score_mine,
+                score_theirs: m.score_theirs,
+                played_at: m.played_at.clone(),
+                played_ts: m.played_ts,
+            })
+        })
+        .collect();
+    highlights.sort_by_key(|h| std::cmp::Reverse((h.played_ts, h.hand)));
+    Index { me: me_s, me_name, days, matches: summaries, highlights }
 }
 
 /// Library id for a demo file: FACEIT `1-<uuid>-1-1.dem.zst` keeps `1-<uuid>-1` (match + map

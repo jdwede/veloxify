@@ -221,6 +221,31 @@ table.sb { width: 100%; border-collapse: collapse; font-variant-numeric: tabular
 .hl-group { margin-bottom: 26px; }
 .hl-group .h2 { margin-bottom: 10px; }
 
+/* ---- highlights tab ------------------------------------------------------------------------ */
+.hero { margin-bottom: 22px; }
+.hero-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; margin-bottom: 14px; }
+.hero-grid { display: grid; grid-template-columns: 2fr 1fr 1fr; grid-auto-rows: auto; gap: 16px; }
+.hero-grid .hl-card.big { grid-row: span 2; }
+.hero-grid .hl-card.big .hl-title { font-size: 22px; }
+.hero-grid .hl-card.big .play { width: 72px; height: 72px; font-size: 30px; }
+.seg { display: inline-flex; background: rgba(255, 255, 255, 0.05); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; vertical-align: middle; }
+.seg button { border: 0; background: transparent; color: var(--muted); padding: 6px 12px; cursor: pointer; font-size: 13px; letter-spacing: 0.04em; }
+.seg button:hover { color: var(--text); }
+.seg button.on { background: rgba(127, 178, 232, 0.22); color: var(--text); }
+.browser .controls { display: flex; flex-wrap: wrap; align-items: center; gap: 14px 22px; padding: 14px 18px; border-bottom: 1px solid var(--line); }
+.browser .controls label { display: inline-flex; align-items: center; gap: 8px; font-size: 12px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--faint); }
+.browser .controls label.check { text-transform: none; letter-spacing: 0; font-size: 13px; color: var(--muted); }
+.browser select, .browser input[type=date] {
+  background: var(--panel-solid); color: var(--text); border: 1px solid var(--line); border-radius: var(--radius); padding: 5px 8px; font: inherit; font-size: 13px;
+}
+.chips { display: flex; gap: 6px; flex-wrap: wrap; }
+.chip { border: 1px solid var(--line); background: transparent; color: var(--muted); border-radius: 999px; padding: 4px 12px; cursor: pointer; font-size: 13px; }
+.chip.on { background: rgba(231, 184, 74, 0.18); border-color: rgba(231, 184, 74, 0.5); color: #f0d08a; }
+.browser-body { padding: 18px; }
+.day-head { font-size: 13px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); margin: 18px 0 10px; }
+.day-head:first-child { margin-top: 0; }
+.src-chip { position: absolute; left: 8px; top: 8px; }
+
 /* ---- player modal ------------------------------------------------------------------------ */
 .player-modal { position: fixed; inset: 0; background: rgba(5, 7, 9, 0.86); display: flex; align-items: center; justify-content: center; z-index: 50; }
 .player-modal[hidden] { display: none; }

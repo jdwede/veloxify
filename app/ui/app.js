@@ -15,6 +15,10 @@ async function initLib() {
 const assetUrl = (rel) => (tauri ? tauri.core.convertFileSrc(`${LIB}\\${rel.replaceAll("/", "\\")}`) : `${LIB}/${rel}`);
 
 const state = { index: null, matches: new Map(), month: null, playlist: [], playing: -1 };
+const BROWSER_DEFAULTS = { heroPeriod: "week", sort: "best", when: "all", from: "", to: "", source: "all", map: "all", types: [], playableOnly: true };
+let browser = { ...BROWSER_DEFAULTS };
+try { browser = { ...BROWSER_DEFAULTS, ...JSON.parse(localStorage.getItem("veloxify.browser") || "{}") }; } catch (e) { /* defaults */ }
+const saveBrowser = () => { try { localStorage.setItem("veloxify.browser", JSON.stringify(browser)); } catch (e) { /* not persisted */ } };
 
 // ---- data ----------------------------------------------------------------------------------------
 
@@ -50,7 +54,12 @@ const mapColor = (m) => (MAPS[m] ? MAPS[m][1] : "#3b4652");
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const parseLocal = (s) => new Date(s); // backend writes local time without offset
 const fmtTime = (s) => parseLocal(s).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
-const fmtDate = (d) => new Date(`${d}T12:00:00`).toLocaleDateString([], { weekday: "long", month: "long", day: "numeric" });
+const fmtDate = (d) => {
+  const date = new Date(`${d}T12:00:00`);
+  const opts = { weekday: "long", month: "long", day: "numeric" };
+  if (date.getFullYear() !== new Date().getFullYear()) opts.year = "numeric"; // older matches need the year
+  return date.toLocaleDateString([], opts);
+};
 const fmtDur = (s) => `${Math.round(s / 60)} min`;
 const fmtClip = (s) => { const t = Math.round(s); return `${Math.floor(t / 60)}:${String(t % 60).padStart(2, "0")}`; };
 const iso = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
@@ -87,6 +96,14 @@ async function route() {
     if (last) { location.hash = `#/day/${last.date}`; return; }
   }
   if (parts[0] === "settings") return renderSettings(view);
+  if (parts[0] === "highlights") {
+    document.querySelector('[data-nav="highlights"]').classList.add("active");
+    return renderHighlightsTab(view);
+  }
+  if (parts[0] !== "calendar" && !parts.length && state.index.highlights?.some((h) => h.clip)) {
+    location.hash = "#/highlights";
+    return;
+  }
   document.querySelector('[data-nav="home"]').classList.add("active");
   renderHome(view);
 }
@@ -185,7 +202,7 @@ async function renderDay(view, date, matchId, tab) {
   }).join("");
   const w = sum(day.sessions.map((s) => s.wins)), l = sum(day.sessions.map((s) => s.losses));
   view.innerHTML = `
-    <a class="day-back" href="#/">◀ Calendar</a>
+    <a class="day-back" href="#/calendar">◀ Calendar</a>
     <div class="day">
       <div class="mlist">
         <a class="mcard overview ${matchId ? "" : "selected"}" href="#/day/${date}">
@@ -342,6 +359,152 @@ function closePlayer() {
   const v = document.getElementById("player-video");
   v.pause(); v.removeAttribute("src"); v.load();
   document.getElementById("player").hidden = true;
+}
+
+// ---- highlights tab ---------------------------------------------------------------------------
+
+const DAY_S = 86400;
+const TYPE_FILTERS = [
+  ["ace", "ACE", (h) => h.tags.includes("ACE")],
+  ["4k", "4K", (h) => h.tags.includes("4K")],
+  ["3k", "3K", (h) => h.tags.includes("3K")],
+  ["clutch", "Clutch", (h) => h.tags.some((t) => t.endsWith("clutch"))],
+  ["flashy", "Flashy", (h) => h.hand % 100 >= 25 || h.tags.some((t) => /noscope|knife|grenade impact|jumping|collateral|ninja/.test(t))],
+];
+const playable = (h) => !!h.clip;
+
+function lastSessionIds() {
+  const day = state.index.days[state.index.days.length - 1];
+  return new Set(day ? day.sessions[day.sessions.length - 1].match_ids : []);
+}
+
+function inWhen(h) {
+  const now = Date.now() / 1000;
+  switch (browser.when) {
+    case "session": return lastSessionIds().has(h.match_id);
+    case "7d": return h.played_ts >= now - 7 * DAY_S;
+    case "30d": return h.played_ts >= now - 30 * DAY_S;
+    case "custom": {
+      const d = h.played_at.slice(0, 10);
+      return (!browser.from || d >= browser.from) && (!browser.to || d <= browser.to);
+    }
+    default: return true;
+  }
+}
+
+function filtered() {
+  let list = state.index.highlights.filter((h) =>
+    inWhen(h) && (browser.source === "all" || h.source === browser.source) && (browser.map === "all" || h.map === browser.map)
+    && (!browser.types.length || TYPE_FILTERS.some(([k, , f]) => browser.types.includes(k) && f(h)))
+    && (!browser.playableOnly || playable(h)));
+  const best = (a, b) => b.hand - a.hand || b.score - a.score;
+  if (browser.sort === "best") list.sort(best);
+  else if (browser.sort === "newest") list.sort((a, b) => b.played_ts - a.played_ts || best(a, b));
+  else list.sort((a, b) => a.played_ts - b.played_ts || a.round - b.round);
+  return list;
+}
+
+function heroPicks() {
+  const now = Date.now() / 1000;
+  const since = { week: now - 7 * DAY_S, month: now - 30 * DAY_S, all: 0 }[browser.heroPeriod] ?? 0;
+  return state.index.highlights.filter((h) => playable(h) && h.played_ts >= since)
+    .sort((a, b) => b.hand - a.hand || b.score - a.score).slice(0, 5);
+}
+
+function cardHtml(h, big = false) {
+  const when = `${relDay(h.played_at.slice(0, 10))}`;
+  return `
+    <div class="hl-card ${h.clip ? "" : "pending"} ${big ? "big" : ""}" data-hl="${esc(h.id)}">
+      <div class="hl-thumb" style="--map-bg:${mapColor(h.map)};${h.thumb ? `background-image:url('${assetUrl(h.thumb)}')` : ""}">
+        ${h.clip ? `<span class="play">▶</span>` : `<span class="state">${h.render_error ? "Demo too old to replay" : "Rendering…"}</span>`}
+        <span class="dur">${fmtClip(h.duration_s)}</span>
+        <span class="src-chip src ${h.source}">${h.source === "valve" ? "PREMIER" : h.source.toUpperCase()}</span>
+      </div>
+      <div class="hl-info">
+        <div class="hl-title">${esc(h.title)}</div>
+        <div class="hl-meta"><span>${esc(mapName(h.map))} · ${h.score_mine}-${h.score_theirs}</span><span>${when}</span></div>
+        <div class="tags">${h.tags.map((t) => `<span class="tag">${esc(t)}</span>`).join("")}</div>
+      </div>
+    </div>`;
+}
+
+function renderHighlightsTab(view) {
+  const hero = heroPicks();
+  const list = filtered();
+  const maps = [...new Set(state.index.highlights.map((h) => h.map))].sort();
+  const seg = (key, opts) => `<div class="seg" data-key="${key}">${opts.map(([v, label]) =>
+    `<button data-v="${v}" class="${browser[key] === v ? "on" : ""}">${label}</button>`).join("")}</div>`;
+  const heroLabel = { week: "this week", month: "this month", all: "ever" }[browser.heroPeriod];
+
+  // Group by day when browsing chronologically.
+  let grid = "";
+  if (browser.sort === "best") {
+    grid = `<div class="hl-grid">${list.map((h) => cardHtml(h)).join("")}</div>`;
+  } else {
+    let day = null;
+    for (const h of list) {
+      const d = h.played_at.slice(0, 10);
+      if (d !== day) {
+        grid += `${day ? "</div>" : ""}<div class="day-head">${fmtDate(d)}</div><div class="hl-grid">`;
+        day = d;
+      }
+      grid += cardHtml(h);
+    }
+    if (day) grid += "</div>";
+  }
+
+  view.innerHTML = `
+    <section class="hero">
+      <div class="hero-head">
+        <div><div class="h2">Your best</div><div class="h1">Top highlights ${heroLabel}</div></div>
+        ${seg("heroPeriod", [["week", "This week"], ["month", "This month"], ["all", "All time"]])}
+      </div>
+      ${hero.length ? `<div class="hero-grid">${hero.map((h, i) => cardHtml(h, i === 0)).join("")}</div>`
+        : `<div class="empty">No playable highlights ${heroLabel} yet. They appear here as soon as a session is rendered.</div>`}
+    </section>
+    <section class="panel browser">
+      <div class="controls">
+        <label>Sort ${seg("sort", [["best", "Best"], ["newest", "Newest"], ["oldest", "Oldest"]])}</label>
+        <label>When ${seg("when", [["session", "Last session"], ["7d", "7 days"], ["30d", "30 days"], ["all", "All time"], ["custom", "Dates"]])}</label>
+        ${browser.when === "custom" ? `<span class="dates"><input type="date" id="from" value="${browser.from}"> – <input type="date" id="to" value="${browser.to}"></span>` : ""}
+        <label>Source ${seg("source", [["all", "All"], ["faceit", "FACEIT"], ["valve", "Premier"]])}</label>
+        <label>Map <select id="map"><option value="all">All maps</option>${maps.map((m) => `<option value="${m}" ${browser.map === m ? "selected" : ""}>${esc(mapName(m))}</option>`).join("")}</select></label>
+      </div>
+      <div class="controls">
+        <div class="chips">${TYPE_FILTERS.map(([k, label]) => `<button class="chip ${browser.types.includes(k) ? "on" : ""}" data-type="${k}">${label}</button>`).join("")}</div>
+        <label class="check"><input type="checkbox" id="playable" ${browser.playableOnly ? "checked" : ""}> Playable only</label>
+        <span class="grow"></span>
+        <span class="sub">${list.length} highlight${list.length === 1 ? "" : "s"}</span>
+        <button class="btn ghost" id="reset">Reset filters</button>
+      </div>
+      <div class="browser-body">${list.length ? grid : `<div class="empty">Nothing matches these filters.</div>`}</div>
+    </section>`;
+
+  const rerender = () => { saveBrowser(); renderHighlightsTab(view); };
+  view.querySelectorAll(".seg").forEach((el) => el.querySelectorAll("button").forEach((b) => (b.onclick = () => { browser[el.dataset.key] = b.dataset.v; rerender(); })));
+  view.querySelectorAll("[data-type]").forEach((b) => (b.onclick = () => {
+    const k = b.dataset.type;
+    browser.types = browser.types.includes(k) ? browser.types.filter((x) => x !== k) : [...browser.types, k];
+    rerender();
+  }));
+  view.querySelector("#map").onchange = (e) => { browser.map = e.target.value; rerender(); };
+  view.querySelector("#playable").onchange = (e) => { browser.playableOnly = e.target.checked; rerender(); };
+  view.querySelector("#reset").onclick = () => { browser = { ...BROWSER_DEFAULTS, heroPeriod: browser.heroPeriod }; rerender(); };
+  for (const id of ["from", "to"]) {
+    const el = view.querySelector(`#${id}`);
+    if (el) el.onchange = (e) => { browser[id] = e.target.value; rerender(); };
+  }
+  // Clicking a hero card plays the hero reel; clicking in the browser plays the filtered list.
+  const toPlay = (h) => ({ ...h, name: h.player_name, match: { map: h.map } });
+  view.querySelectorAll(".hero [data-hl]").forEach((c) => (c.onclick = () => {
+    state.playlist = hero.map(toPlay);
+    play(state.playlist.findIndex((h) => h.id === c.dataset.hl));
+  }));
+  view.querySelectorAll(".browser [data-hl]").forEach((c) => (c.onclick = () => {
+    state.playlist = list.filter(playable).map(toPlay);
+    const i = state.playlist.findIndex((h) => h.id === c.dataset.hl);
+    if (i >= 0) play(i);
+  }));
 }
 
 // ---- settings -----------------------------------------------------------------------------------
