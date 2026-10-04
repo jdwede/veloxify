@@ -67,6 +67,9 @@ a { color: inherit; text-decoration: none; }
 .tabs a.active { color: var(--text); background: rgba(127, 178, 232, 0.16); }
 .status { font-size: 13px; color: var(--faint); min-width: 120px; text-align: right; }
 .status.busy { color: var(--gold); }
+.status.stoppable { cursor: pointer; }
+.status.stoppable::after { content: "  ■ Stop"; color: var(--muted); }
+.status.stoppable:hover::after { color: var(--text); }
 
 .view { padding: 24px; max-width: 1500px; margin: 0 auto; }
 .empty { color: var(--muted); padding: 60px; text-align: center; }

@@ -97,18 +97,20 @@ impl Protector {
         Ok(false)
     }
 
-    /// Reads the current values of every setting about to change (keeping originals from a
-    /// crashed run's journal), journals them, then applies `wanted`.
-    pub fn apply_console(&self, vc: &VConsole, wanted: &BTreeMap<String, String>) -> Result<BTreeMap<String, String>> {
-        let mut originals: BTreeMap<String, String> = std::fs::read_to_string(self.journal())
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default();
-        for name in wanted.keys() {
-            if !originals.contains_key(name) {
-                if let Some(v) = vc.read_cvar(name) {
-                    originals.insert(name.clone(), v);
-                }
+    /// Reads the current values of the settings about to change (keeping originals from a crashed
+    /// run's journal), journals them, then applies `wanted` in order. Returns the originals in the
+    /// same order; [`revert_console`] undoes them in reverse.
+    pub fn apply_console(&self, vc: &VConsole, wanted: &[(String, String)]) -> Result<Vec<(String, String)>> {
+        let journaled: Vec<(String, String)> =
+            std::fs::read_to_string(self.journal()).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+        let mut originals = vec![];
+        for (name, _) in wanted {
+            let value = match journaled.iter().find(|(n, _)| n == name) {
+                Some((_, v)) => Some(v.clone()),
+                None => vc.read_cvar(name),
+            };
+            if let Some(v) = value {
+                originals.push((name.clone(), v));
             }
         }
         std::fs::create_dir_all(&self.work_dir)?;
@@ -119,11 +121,11 @@ impl Protector {
         Ok(originals)
     }
 
-    pub fn revert_console(&self, vc: &VConsole, originals: &BTreeMap<String, String>) {
-        for (name, val) in originals {
+    pub fn revert_console(&self, vc: &VConsole, originals: &[(String, String)]) {
+        for (name, val) in originals.iter().rev() {
             vc.send(&format!("{name} \"{val}\""));
         }
-        std::thread::sleep(std::time::Duration::from_millis(500));
+        std::thread::sleep(std::time::Duration::from_millis(400));
         let _ = std::fs::remove_file(self.journal());
     }
 

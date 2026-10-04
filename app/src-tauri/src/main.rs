@@ -7,6 +7,7 @@ mod system;
 mod worker;
 
 use settings::Settings;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use tauri::menu::{Menu, MenuItem};
@@ -18,6 +19,7 @@ struct AppState {
     settings: Arc<Mutex<Settings>>,
     status: Arc<Mutex<Status>>,
     jobs: Mutex<Sender<Job>>,
+    abort: Arc<AtomicBool>,
 }
 
 #[tauri::command]
@@ -33,6 +35,11 @@ fn get_status(state: State<AppState>) -> Status {
 #[tauri::command]
 fn process_now(state: State<AppState>) {
     let _ = state.jobs.lock().unwrap().send(Job::Now);
+}
+
+#[tauri::command]
+fn stop_rendering(state: State<AppState>) {
+    state.abort.store(true, Ordering::SeqCst);
 }
 
 #[tauri::command]
@@ -77,11 +84,14 @@ fn main() {
     let status = Arc::new(Mutex::new(Status { state: "idle".into(), message: "Starting".into(), ..Default::default() }));
     let (tx, rx) = std::sync::mpsc::channel();
     let (s2, st2) = (settings.clone(), status.clone());
+    let abort = Arc::new(AtomicBool::new(false));
+    let abort_menu = abort.clone();
+    let abort_worker = abort.clone();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
-        .manage(AppState { settings: settings.clone(), status: status.clone(), jobs: Mutex::new(tx.clone()) })
-        .invoke_handler(tauri::generate_handler![library_root, get_status, process_now, render_matches, show_in_folder, copy_file])
+        .manage(AppState { settings: settings.clone(), status: status.clone(), jobs: Mutex::new(tx.clone()), abort: abort.clone() })
+        .invoke_handler(tauri::generate_handler![library_root, get_status, process_now, stop_rendering, render_matches, show_in_folder, copy_file])
         .setup(move |app| {
             // Clips, thumbnails and match data are served from the library folder only.
             let lib = settings.lock().unwrap().library_dir.clone();
@@ -89,8 +99,9 @@ fn main() {
 
             let open = MenuItem::with_id(app, "open", "Open Veloxify", true, None::<&str>)?;
             let now = MenuItem::with_id(app, "now", "Process now", true, None::<&str>)?;
+            let stop = MenuItem::with_id(app, "stop", "Stop rendering (hand CS2 back)", false, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&open, &now, &quit])?;
+            let menu = Menu::with_items(app, &[&open, &now, &stop, &quit])?;
             let tx_menu = tx.clone();
             TrayIconBuilder::with_id("tray")
                 .icon(app.default_window_icon().cloned().expect("app icon"))
@@ -102,7 +113,12 @@ fn main() {
                     "now" => {
                         let _ = tx_menu.send(Job::Now);
                     }
-                    "quit" => app.exit(0),
+                    "stop" => abort_menu.store(true, Ordering::SeqCst),
+                    "quit" => {
+                        // Quitting mid-render still hands CS2 back with the user's settings.
+                        abort_menu.store(true, Ordering::SeqCst);
+                        app.exit(0)
+                    }
                     _ => {}
                 })
                 .on_tray_icon_event(|tray, e| {
@@ -112,7 +128,7 @@ fn main() {
                 })
                 .build(app)?;
 
-            let worker = Worker::new(app.handle().clone(), s2.clone(), st2.clone());
+            let worker = Worker::new(app.handle().clone(), s2.clone(), st2.clone(), abort_worker.clone(), Some(stop.clone()));
             std::thread::Builder::new().name("veloxify-worker".into()).spawn(move || worker.run(rx))?;
             Ok(())
         })

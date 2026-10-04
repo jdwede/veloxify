@@ -8,11 +8,13 @@
 
 use crate::assemble::make_thumb;
 use crate::profile::Profile;
-use crate::session::{DemoIncompatible, Renderer};
+use crate::session::{Aborted, DemoIncompatible, Renderer};
 use anyhow::{Context, Result};
 use cs2hl_core::library::{HighlightEntry, Index, MatchEntry};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 use std::time::Instant;
 
 pub enum Scope {
@@ -26,6 +28,8 @@ pub enum Event {
     Rendered { match_id: String, title: String, clip_s: f64, took_s: f64 },
     Failed { match_id: String, title: String, error: String },
     Done { rendered: usize, minutes: f64 },
+    /// Stopped early; `wants_cs2` when it was because someone opened CS2 (hand it back).
+    Stopped { rendered: usize, wants_cs2: bool },
     Log(String),
 }
 
@@ -79,8 +83,18 @@ pub fn plan(lib: &Path, scope: &Scope) -> Result<Vec<(String, String)>> {
     Ok(order)
 }
 
-/// Renders the planned highlights. `limit` caps how many clips this run makes.
-pub fn render(lib: &Path, steamid64: u64, profile: Profile, work_dir: &Path, scope: Scope, limit: Option<usize>, on: &mut dyn FnMut(Event)) -> Result<usize> {
+/// Renders the planned highlights. `limit` caps how many clips this run makes; setting `abort`
+/// stops at the next safe point (settings restored, CS2 closed, nothing marked as failed).
+pub fn render(
+    lib: &Path,
+    steamid64: u64,
+    profile: Profile,
+    work_dir: &Path,
+    scope: Scope,
+    limit: Option<usize>,
+    abort: Arc<AtomicBool>,
+    on: &mut dyn FnMut(Event),
+) -> Result<usize> {
     let mut order = plan(lib, &scope)?;
     if let Some(n) = limit {
         order.truncate(n);
@@ -91,9 +105,18 @@ pub fn render(lib: &Path, steamid64: u64, profile: Profile, work_dir: &Path, sco
     }
     let t0 = Instant::now();
     let (log_tx, log_rx) = std::sync::mpsc::channel::<String>();
-    let renderer = Renderer::start(steamid64, profile, work_dir, Box::new(move |s| {
+    let started = Renderer::start(steamid64, profile, work_dir, abort, Box::new(move |s| {
         let _ = log_tx.send(s.to_string());
-    }))?;
+    }));
+    let renderer = match started {
+        Ok(r) => r,
+        Err(e) if e.downcast_ref::<Aborted>().is_some() => {
+            let wants_cs2 = e.downcast_ref::<Aborted>().unwrap().wants_cs2;
+            on(Event::Stopped { rendered: 0, wants_cs2 });
+            return Ok(0);
+        }
+        Err(e) => return Err(e),
+    };
     let drain = |on: &mut dyn FnMut(Event)| {
         while let Ok(s) = log_rx.try_recv() {
             on(Event::Log(s));
@@ -105,6 +128,7 @@ pub fn render(lib: &Path, steamid64: u64, profile: Profile, work_dir: &Path, sco
     let mut loaded: Option<String> = None;
     let mut broken: Vec<String> = vec![];
     let mut rendered = 0;
+    let mut stopped = false;
     for (mid, hid) in order {
         if broken.contains(&mid) {
             continue;
@@ -119,6 +143,10 @@ pub fn render(lib: &Path, steamid64: u64, profile: Profile, work_dir: &Path, sco
             }
             match renderer.load_demo(&dem) {
                 Ok(()) => loaded = Some(mid.clone()),
+                Err(e) if e.downcast_ref::<Aborted>().is_some() => {
+                    stopped = true;
+                    break;
+                }
                 Err(e) if e.downcast_ref::<DemoIncompatible>().is_some() => {
                     for h in m.highlights.iter_mut().filter(|h| h.clip.is_none()) {
                         h.render_error = Some("Recorded on an older CS2 version; CS2 can no longer play this demo.".into());
@@ -146,6 +174,10 @@ pub fn render(lib: &Path, steamid64: u64, profile: Profile, work_dir: &Path, sco
                 rendered += 1;
                 on(Event::Rendered { match_id: mid.clone(), title: h.title.clone(), clip_s: h.duration_s, took_s: ts.elapsed().as_secs_f64() });
             }
+            Err(e) if e.downcast_ref::<Aborted>().is_some() => {
+                stopped = true;
+                break;
+            }
             Err(e) => {
                 h.render_error = Some(e.to_string());
                 on(Event::Failed { match_id: mid.clone(), title: h.title.clone(), error: e.to_string() });
@@ -153,9 +185,14 @@ pub fn render(lib: &Path, steamid64: u64, profile: Profile, work_dir: &Path, sco
         }
         save(&path, &m)?;
     }
+    let wants_cs2 = renderer.wants_cs2();
     renderer.close();
     drain(on);
     let _ = std::fs::remove_dir_all(&demos);
-    on(Event::Done { rendered, minutes: t0.elapsed().as_secs_f64() / 60.0 });
+    if stopped {
+        on(Event::Stopped { rendered, wants_cs2 });
+    } else {
+        on(Event::Done { rendered, minutes: t0.elapsed().as_secs_f64() / 60.0 });
+    }
     Ok(rendered)
 }

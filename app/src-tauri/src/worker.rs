@@ -9,10 +9,13 @@ use cs2hl_render::batch::{self, Event, Scope};
 use cs2hl_render::profile::Profile;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tauri::{AppHandle, Emitter};
+use tauri::image::Image;
+use tauri::menu::MenuItem;
+use tauri::{AppHandle, Emitter, Wry};
 use tauri_plugin_notification::NotificationExt;
 
 const DEMO_EXTS: &[&str] = &[".dem", ".dem.gz", ".dem.zst", ".dem.bz2"];
@@ -40,17 +43,49 @@ pub struct Worker {
     settings: Arc<Mutex<Settings>>,
     status: Arc<Mutex<Status>>,
     seen: Seen,
+    /// Set by "Stop rendering" (tray/window); the render stops at the next safe point.
+    pub abort: Arc<AtomicBool>,
+    stop_item: Option<MenuItem<Wry>>,
 }
 
+const TRAY_IDLE: &[u8] = include_bytes!("../icons/tray-idle.png");
+const TRAY_BUSY: &[u8] = include_bytes!("../icons/tray-busy.png");
+
 impl Worker {
-    pub fn new(app: AppHandle, settings: Arc<Mutex<Settings>>, status: Arc<Mutex<Status>>) -> Self {
-        Self { app, settings, status, seen: Seen::load() }
+    pub fn new(app: AppHandle, settings: Arc<Mutex<Settings>>, status: Arc<Mutex<Status>>, abort: Arc<AtomicBool>, stop_item: Option<MenuItem<Wry>>) -> Self {
+        Self { app, settings, status, seen: Seen::load(), abort, stop_item }
     }
 
     fn set(&self, state: &str, message: impl Into<String>, done: usize, total: usize) {
         let s = Status { state: state.into(), message: message.into(), done, total };
+        let changed_state = self.status.lock().unwrap().state != s.state;
         *self.status.lock().unwrap() = s.clone();
-        let _ = self.app.emit("veloxify://status", s);
+        let _ = self.app.emit("veloxify://status", s.clone());
+        // The tray shows at a glance when CS2 is in use by Veloxify.
+        if let Some(tray) = self.app.tray_by_id("tray") {
+            let busy = s.state == "rendering";
+            let tip = match s.state.as_str() {
+                "rendering" if s.total > 0 => format!("Veloxify: rendering highlights {}/{} (CS2 in use)", (s.done + 1).min(s.total), s.total),
+                "rendering" => "Veloxify: starting CS2 to render highlights".to_string(),
+                "importing" => format!("Veloxify: {}", s.message),
+                "waiting" => "Veloxify: waiting for CS2 to close".to_string(),
+                "error" => format!("Veloxify: {}", s.message),
+                _ => "Veloxify: up to date".to_string(),
+            };
+            let _ = tray.set_tooltip(Some(tip));
+            if changed_state {
+                if let Ok(img) = Image::from_bytes(if busy { TRAY_BUSY } else { TRAY_IDLE }) {
+                    let _ = tray.set_icon(Some(img));
+                }
+                if let Some(item) = &self.stop_item {
+                    let _ = item.set_enabled(busy);
+                }
+            }
+        }
+    }
+
+    fn notify(&self, title: &str, body: &str) {
+        let _ = self.app.notification().builder().title(title).body(body).show();
     }
 
     fn library_changed(&self) {
@@ -179,12 +214,22 @@ impl Worker {
             }
         };
         let work = data_dir().join("work");
+        self.abort.store(false, Ordering::SeqCst);
         let mut total = 0;
         let mut done = 0;
-        let result = batch::render(&lib, me, profile, &work, scope, None, &mut |e| match e {
+        let mut hand_back = false;
+        let abort = self.abort.clone();
+        let result = batch::render(&lib, me, profile, &work, scope, None, abort, &mut |e| match e {
             Event::Plan { total: t } => {
                 total = t;
                 self.set("rendering", format!("Rendering {t} highlights"), 0, t);
+                self.notify(
+                    "Rendering your highlights",
+                    &format!(
+                        "{t} clip{} from your session. CS2 runs hidden for a few minutes; opening CS2 or \"Stop rendering\" in the tray hands it back.",
+                        if t == 1 { "" } else { "s" }
+                    ),
+                );
             }
             Event::Rendered { title, .. } => {
                 done += 1;
@@ -198,17 +243,27 @@ impl Worker {
             }
             Event::Done { rendered, .. } => {
                 if rendered > 0 {
-                    let _ = self
-                        .app
-                        .notification()
-                        .builder()
-                        .title("Your highlights are ready")
-                        .body(format!("{rendered} new highlight{} from your session", if rendered == 1 { "" } else { "s" }))
-                        .show();
+                    self.notify("Your highlights are ready", &format!("{rendered} new highlight{} from your session", if rendered == 1 { "" } else { "s" }));
                 }
+            }
+            Event::Stopped { rendered, wants_cs2 } => {
+                hand_back = wants_cs2;
+                let left = total.saturating_sub(rendered);
+                self.notify(
+                    if wants_cs2 { "CS2 is yours" } else { "Rendering stopped" },
+                    &format!(
+                        "{}{rendered} clip{} done; {left} more after your next game.",
+                        if wants_cs2 { "Starting CS2 for you. " } else { "" },
+                        if rendered == 1 { "" } else { "s" }
+                    ),
+                );
             }
             Event::Log(_) => {}
         });
+        if hand_back {
+            // Someone opened CS2 while it was busy rendering: give them a normal CS2.
+            let _ = std::process::Command::new(cs2hl_render::steam::steam_exe()).args(["-applaunch", "730"]).spawn();
+        }
         if let Err(e) = result {
             self.set("error", format!("Rendering stopped: {e}"), done, total);
         }

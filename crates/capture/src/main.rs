@@ -57,6 +57,7 @@ fn main() -> Result<()> {
         bitrate_mbps: args.get(3).map(|s| s.parse()).transpose()?.unwrap_or(20),
         fps: args.get(4).map(|s| s.parse()).transpose()?.unwrap_or(60),
         audio_pid,
+        abort: None,
     };
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {

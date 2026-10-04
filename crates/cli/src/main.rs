@@ -170,11 +170,21 @@ fn render(args: &[String]) -> Result<()> {
     let index: cs2hl_core::library::Index = serde_json::from_str(&std::fs::read_to_string(lib.join("index.json"))?)?;
     let work = lib.join(".work");
     let t = |s: &str| println!("{} {s}", chrono::Local::now().format("%H:%M:%S"));
-    batch::render(&lib, index.me.parse()?, profile, &work, scope, limit, &mut |e| match e {
+    let abort = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // Testing aid: simulate "Stop rendering" after N seconds.
+    if let Some(secs) = opt("--abort-after").map(|s| s.parse::<u64>()).transpose()? {
+        let a = abort.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(secs));
+            a.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+    }
+    batch::render(&lib, index.me.parse()?, profile, &work, scope, limit, abort, &mut |e| match e {
         Event::Plan { total } => t(&format!("{total} highlights to render")),
         Event::Rendered { title, clip_s, took_s, .. } => t(&format!("rendered {title} ({clip_s:.0}s clip in {took_s:.0}s)")),
         Event::Failed { title, error, .. } => t(&format!("failed {title}: {error}")),
         Event::Done { rendered, minutes } => t(&format!("rendered {rendered} highlights in {minutes:.1} min")),
+        Event::Stopped { rendered, wants_cs2 } => t(&format!("stopped after {rendered} highlights{}", if wants_cs2 { " (CS2 was opened)" } else { "" })),
         Event::Log(s) => t(&s),
     })?;
     Ok(())

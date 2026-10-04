@@ -34,6 +34,8 @@ pub struct CaptureOptions {
     pub fps: u32,
     /// Also record this process's audio to `<out>.wav`.
     pub audio_pid: Option<u32>,
+    /// Set from another thread to stop recording early (the outcome reports `aborted`).
+    pub abort: Option<Arc<AtomicBool>>,
 }
 
 #[derive(Debug, Clone)]
@@ -43,6 +45,7 @@ pub struct CaptureOutcome {
     pub audio: Option<String>,
     /// How long the audio started before the first video frame (trim this much off the audio).
     pub audio_offset_s: f64,
+    pub aborted: bool,
 }
 
 struct Job {
@@ -55,6 +58,8 @@ struct Job {
     first_frame: Arc<Mutex<Option<Instant>>>,
     frames: Arc<Mutex<u64>>,
     started: Option<Sender<()>>,
+    abort: Option<Arc<AtomicBool>>,
+    aborted: Arc<AtomicBool>,
 }
 
 struct Recorder {
@@ -94,7 +99,11 @@ impl GraphicsCaptureApiHandler for Recorder {
             enc.send_frame(frame)?;
             *self.job.frames.lock().unwrap() += 1;
         }
-        if self.started.unwrap().elapsed().as_secs_f64() >= self.job.seconds {
+        let aborted = self.job.abort.as_ref().is_some_and(|a| a.load(Ordering::SeqCst));
+        if aborted {
+            self.job.aborted.store(true, Ordering::SeqCst);
+        }
+        if aborted || self.started.unwrap().elapsed().as_secs_f64() >= self.job.seconds {
             if let Some(enc) = self.encoder.take() {
                 enc.finish()?;
             }
@@ -118,6 +127,7 @@ pub fn record_window(opts: &CaptureOptions, started: Option<Sender<()>>) -> Resu
     let rect = window.rect().context("window rect")?;
     let first_frame = Arc::new(Mutex::new(None));
     let frames = Arc::new(Mutex::new(0u64));
+    let aborted = Arc::new(AtomicBool::new(false));
     let job = Job {
         out: opts.out.clone(),
         seconds: opts.seconds,
@@ -128,6 +138,8 @@ pub fn record_window(opts: &CaptureOptions, started: Option<Sender<()>>) -> Resu
         first_frame: first_frame.clone(),
         frames: frames.clone(),
         started,
+        abort: opts.abort.clone(),
+        aborted: aborted.clone(),
     };
     // Start audio first so it's already running when the first video frame arrives.
     let stop = Arc::new(AtomicBool::new(false));
@@ -149,7 +161,8 @@ pub fn record_window(opts: &CaptureOptions, started: Option<Sender<()>>) -> Resu
     );
     let result = Recorder::start(settings).map_err(|e| anyhow::anyhow!("capture failed: {e}"));
     stop.store(true, Ordering::SeqCst);
-    let mut outcome = CaptureOutcome { frames: *frames.lock().unwrap(), audio: None, audio_offset_s: 0.0 };
+    let mut outcome =
+        CaptureOutcome { frames: *frames.lock().unwrap(), audio: None, audio_offset_s: 0.0, aborted: aborted.load(Ordering::SeqCst) };
     if let Some(t) = audio_thread {
         let audio_started = t.join().map_err(|_| anyhow::anyhow!("audio thread panicked"))??;
         if let Some(video_started) = *first_frame.lock().unwrap() {

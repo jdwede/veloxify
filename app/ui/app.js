@@ -392,6 +392,10 @@ function showStatus(st) {
     : st.state === "waiting" ? "CS2 running · waiting"
     : st.state === "error" ? "Needs attention" : "Up to date";
   el.title = st.message || "";
+  // While CS2 is busy rendering, the status doubles as a stop button.
+  el.classList.toggle("stoppable", st.state === "rendering");
+  el.onclick = st.state === "rendering" ? () => tauri?.core.invoke("stop_rendering") : null;
+  if (st.state === "rendering") el.title = "CS2 is rendering your highlights in the background. Click to stop and hand CS2 back.";
 }
 
 if (tauri) {
