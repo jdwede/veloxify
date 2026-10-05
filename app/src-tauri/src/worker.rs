@@ -2,17 +2,19 @@
 //! latest session's highlights (best first), then notify.
 
 use crate::settings::{data_dir, Seen, Settings};
-use crate::system;
+use crate::{faceit, mapicons, system};
+use cs2hl_core::faceit::Faceit;
 use cs2hl_core::ingest::{self, Added};
-use cs2hl_core::library::ClipPolicy;
+use cs2hl_core::library::{Index, MatchEntry};
 use cs2hl_render::batch::{self, Event, Scope};
 use cs2hl_render::profile::Profile;
 use serde::Serialize;
+use std::cell::Cell;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::image::Image;
 use tauri::menu::MenuItem;
 use tauri::{AppHandle, Emitter, Wry};
@@ -21,12 +23,19 @@ use tauri_plugin_notification::NotificationExt;
 const DEMO_EXTS: &[&str] = &[".dem", ".dem.gz", ".dem.zst", ".dem.bz2"];
 /// How often to look for new demos while idle.
 const POLL: Duration = Duration::from_secs(30);
+/// How often to refresh FACEIT level, ELO and matches while idle (also right after CS2 closes).
+const FACEIT_EVERY: Duration = Duration::from_secs(15 * 60);
+/// While CS2 is open: a light refresh (newest matches only) so a session's finished matches show
+/// up between games.
+const FACEIT_WHILE_PLAYING: Duration = Duration::from_secs(2 * 60);
 
 pub enum Job {
     /// Check for new demos and render now instead of waiting for the next poll.
     Now,
     /// Render these matches' pending highlights (e.g. an older day opened in the app).
     Render(Vec<String>),
+    /// Refresh FACEIT data now (settings changed).
+    Faceit,
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -46,14 +55,21 @@ pub struct Worker {
     /// Set by "Stop rendering" (tray/window); the render stops at the next safe point.
     pub abort: Arc<AtomicBool>,
     stop_item: Option<MenuItem<Wry>>,
+    /// Which of `TRAY_ICONS` the tray shows now.
+    tray_icon: Cell<Option<usize>>,
 }
 
-const TRAY_IDLE: &[u8] = include_bytes!("../icons/tray-idle.png");
-const TRAY_BUSY: &[u8] = include_bytes!("../icons/tray-busy.png");
+/// The tray icon tells at a glance what CS2 is up to: green = CS2 closed (Veloxify is free to
+/// work), red = Veloxify has CS2 open, clipping, plain = you're playing (Veloxify waits).
+const TRAY_ICONS: [&[u8]; 3] = [
+    include_bytes!("../icons/tray-ready.png"),
+    include_bytes!("../icons/tray-clipping.png"),
+    include_bytes!("../icons/tray-playing.png"),
+];
 
 impl Worker {
     pub fn new(app: AppHandle, settings: Arc<Mutex<Settings>>, status: Arc<Mutex<Status>>, abort: Arc<AtomicBool>, stop_item: Option<MenuItem<Wry>>) -> Self {
-        Self { app, settings, status, seen: Seen::load(), abort, stop_item }
+        Self { app, settings, status, seen: Seen::load(), abort, stop_item, tray_icon: Cell::new(None) }
     }
 
     fn set(&self, state: &str, message: impl Into<String>, done: usize, total: usize) {
@@ -61,7 +77,6 @@ impl Worker {
         let changed_state = self.status.lock().unwrap().state != s.state;
         *self.status.lock().unwrap() = s.clone();
         let _ = self.app.emit("veloxify://status", s.clone());
-        // The tray shows at a glance when CS2 is in use by Veloxify.
         if let Some(tray) = self.app.tray_by_id("tray") {
             let busy = s.state == "rendering";
             let tip = match s.state.as_str() {
@@ -73,10 +88,18 @@ impl Worker {
                 _ => "Veloxify: up to date".to_string(),
             };
             let _ = tray.set_tooltip(Some(tip));
-            if changed_state {
-                if let Ok(img) = Image::from_bytes(if busy { TRAY_BUSY } else { TRAY_IDLE }) {
+            let icon = match s.state.as_str() {
+                "rendering" => 1,
+                "waiting" => 2,
+                _ => 0,
+            };
+            if self.tray_icon.get() != Some(icon) {
+                if let Ok(img) = Image::from_bytes(TRAY_ICONS[icon]) {
                     let _ = tray.set_icon(Some(img));
+                    self.tray_icon.set(Some(icon));
                 }
+            }
+            if changed_state {
                 if let Some(item) = &self.stop_item {
                     let _ = item.set_enabled(busy);
                 }
@@ -94,12 +117,33 @@ impl Worker {
 
     pub fn run(mut self, jobs: Receiver<Job>) {
         let mut pending_render: Vec<String> = vec![];
+        let mut last_faceit: Option<Instant> = None;
+        let mut icons_checked = false;
+        let mut was_playing = false;
+        // FACEIT data the index hasn't caught up with (changed while CS2 was open). Starts true so
+        // the index is rebuilt once per launch, e.g. after an update changed how it's built.
+        let mut faceit_dirty = true;
+        // Right tray color from the start (the first import can take a while).
+        self.set(if system::cs2_running() { "waiting" } else { "idle" }, "Starting", 0, 0);
         loop {
             if system::cs2_running() {
-                // Never do anything while the user may be playing.
-                self.set("waiting", "CS2 is running. Veloxify will process your games after you close it.", 0, 0);
+                // Nothing heavy while the user may be playing: no demo parsing, rendering or
+                // re-indexing. Only FACEIT's newest matches, so finished games show between games.
+                was_playing = true;
+                self.set("waiting", "CS2 is running. Finished matches show up as you play; demos and clips are processed after you close CS2.", 0, 0);
+                let settings = self.settings.lock().unwrap().clone();
+                if settings.faceit_enabled && last_faceit.map_or(true, |t| t.elapsed() > FACEIT_WHILE_PLAYING) {
+                    if let Some(me) = settings.steamid64.or_else(system::active_steam_user) {
+                        if self.refresh_faceit(&settings, me, true) {
+                            faceit_dirty = true;
+                            self.library_changed();
+                        }
+                    }
+                    last_faceit = Some(Instant::now());
+                }
                 match jobs.recv_timeout(Duration::from_secs(20)) {
                     Ok(Job::Render(ids)) => pending_render.extend(ids),
+                    Ok(Job::Faceit) => last_faceit = None,
                     Err(RecvTimeoutError::Disconnected) => return,
                     _ => {}
                 }
@@ -114,6 +158,20 @@ impl Worker {
                 continue;
             };
             let imported = self.import(&settings, me);
+            if !icons_checked || imported {
+                self.map_icons(&settings);
+                icons_checked = true;
+            }
+            if settings.faceit_enabled && (was_playing || imported || last_faceit.map_or(true, |t| t.elapsed() > FACEIT_EVERY)) {
+                // Real match times and ELO go into the index (and so the calendar and sessions).
+                if self.refresh_faceit(&settings, me, false) || faceit_dirty {
+                    let _ = ingest::rebuild_index(&settings.library_dir, me);
+                    self.library_changed();
+                    faceit_dirty = false;
+                }
+                last_faceit = Some(Instant::now());
+            }
+            was_playing = false;
             if settings.auto_render || !pending_render.is_empty() {
                 let scope =
                     if pending_render.is_empty() { Scope::LatestSession } else { Scope::Matches(std::mem::take(&mut pending_render)) };
@@ -126,10 +184,69 @@ impl Worker {
             }
             match jobs.recv_timeout(POLL) {
                 Ok(Job::Render(ids)) => pending_render.extend(ids),
+                Ok(Job::Faceit) => last_faceit = None,
                 Err(RecvTimeoutError::Disconnected) => return,
                 _ => {}
             }
         }
+    }
+
+    /// Names the user may go by on FACEIT: the one set in Settings, the names they played under
+    /// in FACEIT demos (FACEIT servers use the FACEIT nickname), and their Steam name.
+    fn faceit_names(&self, settings: &Settings, me: u64) -> Vec<String> {
+        let lib = &settings.library_dir;
+        let mut names = vec![settings.faceit_nickname.trim().to_string()];
+        let index: Option<Index> = std::fs::read_to_string(lib.join("index.json")).ok().and_then(|t| serde_json::from_str(&t).ok());
+        if let Some(index) = index {
+            let me_s = me.to_string();
+            for m in index.matches.iter().rev().filter(|m| m.source == "faceit").take(10) {
+                let entry: Option<MatchEntry> =
+                    std::fs::read_to_string(lib.join("matches").join(format!("{}.json", m.id))).ok().and_then(|t| serde_json::from_str(&t).ok());
+                if let Some(p) = entry.as_ref().and_then(|e| e.players.iter().find(|p| p.steamid == me_s)) {
+                    names.push(p.name.clone());
+                }
+            }
+            names.push(index.me_name);
+        }
+        names.extend(system::steam_persona_name());
+        let mut seen = std::collections::HashSet::new();
+        names.retain(|n| !n.trim().is_empty() && seen.insert(n.to_lowercase()));
+        names
+    }
+
+    /// Refreshes `faceit.json`; returns whether it changed. Light refreshes (while CS2 is open)
+    /// skip reading the library for nickname hints once the account is known.
+    fn refresh_faceit(&self, settings: &Settings, me: u64, light: bool) -> bool {
+        let lib = &settings.library_dir;
+        let known = Faceit::load(lib).is_some_and(|f| f.steamid == me.to_string() && !f.player_id.is_empty());
+        let names = if light && known { vec![settings.faceit_nickname.clone()] } else { self.faceit_names(settings, me) };
+        match faceit::refresh(lib, me, &names, light) {
+            Ok((_, changed)) => changed,
+            Err(e) => {
+                eprintln!("faceit: {e:#}");
+                // Keep what we had through network hiccups; otherwise tell the app why it's empty.
+                let same = Faceit::load(lib).is_some_and(|f| f.steamid == me.to_string() && f.error.as_deref() == Some(e.to_string().as_str()));
+                if known || same {
+                    return false;
+                }
+                let f = Faceit { steamid: me.to_string(), fetched_at: chrono::Utc::now().timestamp(), error: Some(e.to_string()), ..Default::default() };
+                let _ = f.save(lib);
+                true
+            }
+        }
+    }
+
+    fn map_icons(&self, settings: &Settings) {
+        let lib = &settings.library_dir;
+        let mut maps: Vec<String> = std::fs::read_to_string(lib.join("index.json"))
+            .ok()
+            .and_then(|t| serde_json::from_str::<Index>(&t).ok())
+            .map(|i| i.matches.into_iter().map(|m| m.map).collect())
+            .unwrap_or_default();
+        maps.extend(Faceit::load(lib).into_iter().flat_map(|f| f.matches.into_iter().map(|m| m.map)));
+        maps.sort();
+        maps.dedup();
+        mapicons::ensure(lib, &maps);
     }
 
     /// New demo files in the watched folders, newest first, skipping ones still downloading.
@@ -169,7 +286,7 @@ impl Worker {
         if demos.is_empty() {
             return false;
         }
-        let policy = ClipPolicy::default();
+        let policy = settings.clip_policy();
         let total = demos.len();
         let mut added = 0;
         for (i, (path, key)) in demos.into_iter().enumerate() {

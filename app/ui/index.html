@@ -6,6 +6,14 @@
   <title>Veloxify</title>
   <link rel="icon" type="image/png" href="assets/favicon.png">
   <link rel="stylesheet" href="styles.css">
+  <script>
+    // Saved theme (Settings > Appearance), applied before the first paint.
+    try {
+      const t = JSON.parse(localStorage.getItem("veloxify.theme") || "{}");
+      if (t.preset && t.preset !== "faceit") document.documentElement.dataset.theme = t.preset;
+      if (t.accent) document.documentElement.style.setProperty("--accent", t.accent);
+    } catch (e) { /* default theme */ }
+  </script>
 </head>
 <body>
   <header class="topbar">
@@ -14,6 +22,8 @@
       <span class="wordmark">veloxify</span>
     </div>
     <nav class="tabs">
+      <a href="#/profile" data-nav="profile">Profile</a>
+      <a href="#/matches" data-nav="matches">Match history</a>
       <a href="#/highlights" data-nav="highlights">Highlights</a>
       <a href="#/calendar" data-nav="home">Calendar</a>
       <a href="#/latest" data-nav="latest">Latest session</a>

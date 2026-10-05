@@ -70,6 +70,13 @@ pub fn add_demo(root: &Path, path: &Path, me: u64, policy: &ClipPolicy, refresh:
     })
 }
 
+/// Local time as the library writes it (RFC 3339 without offset).
+pub fn local_time(ts: i64) -> String {
+    chrono::DateTime::from_timestamp(ts, 0)
+        .map(|d| d.with_timezone(&chrono::Local).format("%Y-%m-%dT%H:%M:%S").to_string())
+        .unwrap_or_default()
+}
+
 /// Rebuilds `index.json` from every match file, writing back per-session party flags.
 pub fn rebuild_index(root: &Path, me: u64) -> Result<Index> {
     let dir = root.join("matches");
@@ -79,6 +86,20 @@ pub fn rebuild_index(root: &Path, me: u64) -> Result<Index> {
         let f = f?.path();
         if f.extension().is_some_and(|e| e == "json") {
             all.push(serde_json::from_str(&std::fs::read_to_string(&f)?)?);
+        }
+    }
+    // FACEIT knows when each match really started (demo files only carry the download time)
+    // and the ELO it brought.
+    if let Some(f) = crate::faceit::Faceit::load(root) {
+        for m in all.iter_mut() {
+            if let Some(fm) = f.find(&m.id) {
+                if fm.finished_ts > 0 {
+                    m.played_ts = fm.started(m.duration_s);
+                    m.played_at = local_time(m.played_ts);
+                }
+                m.elo = fm.elo;
+                m.elo_delta = fm.elo_delta;
+            }
         }
     }
     let index = library::build_index(me, &mut all, |ts| {

@@ -18,6 +18,8 @@ serde_json.workspace = true
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 tauri = { version = "2", features = ["tray-icon", "protocol-asset", "image-png"] }
 tauri-plugin-notification = "2"
+tauri-plugin-dialog = "2"
+ureq = { version = "2", features = ["json"] }
 cs2hl-core = { path = "../../crates/core" }
 cs2hl-render = { path = "../../crates/render" }
 

@@ -128,6 +128,18 @@ pub struct Damage {
     /// Health actually removed (capped at the victim's remaining health).
     pub health_removed: i32,
     pub weapon: String,
+    /// "head", "chest", "stomach", "left_arm", ... ("generic" for utility/fall damage).
+    #[serde(default)]
+    pub hitgroup: String,
+}
+
+/// A weapon being fired: gun shots, and grenade throws (weapon names like `weapon_smokegrenade`).
+#[derive(Debug, Clone, Serialize)]
+pub struct Shot {
+    pub tick: i32,
+    pub round: usize,
+    pub player: u64,
+    pub weapon: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -159,6 +171,11 @@ pub struct ScoreboardRow {
     pub enemies_flashed: i64,
     pub mvps: i64,
     pub score: i64,
+    /// Competitive rank shown on the scoreboard (Premier rating when `rank_type` is 11).
+    pub rank: i64,
+    pub rank_type: i64,
+    pub rank_if_win: i64,
+    pub rank_if_loss: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -172,6 +189,7 @@ pub struct Match {
     pub damages: Vec<Damage>,
     pub blinds: Vec<Blind>,
     pub bomb: Vec<BombEvent>,
+    pub shots: Vec<Shot>,
     pub score_a: u32,
     pub score_b: u32,
     pub scoreboard: HashMap<u64, ScoreboardRow>,
@@ -358,6 +376,7 @@ pub fn load_match(demo: &[u8]) -> Result<Match> {
     let mut damages = vec![];
     let mut blinds = vec![];
     let mut bomb = vec![];
+    let mut shots = vec![];
     // Health tracking so damage is capped at what the victim actually had.
     let mut health: HashMap<u64, i32> = HashMap::new();
     let mut health_round = usize::MAX;
@@ -406,6 +425,7 @@ pub fn load_match(demo: &[u8]) -> Result<Match> {
                     victim,
                     health_removed: removed,
                     weapon: get_str(e, "weapon").unwrap_or("").to_string(),
+                    hitgroup: get_str(e, "hitgroup").unwrap_or("").to_string(),
                 });
             }
             "player_blind" => {
@@ -419,6 +439,11 @@ pub fn load_match(demo: &[u8]) -> Result<Match> {
                         victim,
                         duration: get_float(e, "blind_duration").unwrap_or(0.0),
                     });
+                }
+            }
+            "weapon_fire" => {
+                if let Some(player) = get_steamid(e, "user_steamid") {
+                    shots.push(Shot { tick: e.tick, round, player, weapon: get_str(e, "weapon").unwrap_or("").to_string() });
                 }
             }
             "bomb_planted" | "bomb_defused" => {
@@ -448,12 +473,16 @@ pub fn load_match(demo: &[u8]) -> Result<Match> {
                 enemies_flashed: g("enemies_flashed_total"),
                 mvps: g("mvps"),
                 score: g("score"),
+                rank: g("rank"),
+                rank_type: g("CCSPlayerController.m_iCompetitiveRankType"),
+                rank_if_win: g("rank_if_win"),
+                rank_if_loss: g("rank_if_loss"),
             };
             (sid, row)
         })
         .collect();
 
-    Ok(Match { map, server_name, source, players, rounds, kills, damages, blinds, bomb, score_a, score_b, scoreboard })
+    Ok(Match { map, server_name, source, players, rounds, kills, damages, blinds, bomb, shots, score_a, score_b, scoreboard })
 }
 
 // ---- Event field helpers --------------------------------------------------------------------------

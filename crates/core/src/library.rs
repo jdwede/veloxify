@@ -37,6 +37,19 @@ pub struct PlayerRow {
     pub party: bool,
     pub counts: Counts,
     pub derived: Derived,
+    /// The same counts restricted to T-side and CT-side rounds.
+    #[serde(default)]
+    pub t: Counts,
+    #[serde(default)]
+    pub ct: Counts,
+    /// Competitive rank from CS2's scoreboard: `rank_type` 11 is Premier (rating), and
+    /// `rank_after` the rating after this match when CS2 reported it.
+    #[serde(default)]
+    pub rank: i64,
+    #[serde(default)]
+    pub rank_type: i64,
+    #[serde(default)]
+    pub rank_after: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -82,6 +95,11 @@ pub struct MatchEntry {
     pub demo_path: String,
     pub players: Vec<PlayerRow>,
     pub highlights: Vec<HighlightEntry>,
+    /// FACEIT ELO after this match and its change, once known from FACEIT.
+    #[serde(default)]
+    pub elo: Option<u32>,
+    #[serde(default)]
+    pub elo_delta: Option<i32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -123,6 +141,12 @@ pub struct Index {
     /// Every highlight in the library, for the Highlights browser (newest first).
     #[serde(default)]
     pub highlights: Vec<HighlightRef>,
+    /// Profile for each window (last 10/30/50/all matches) and source (all/faceit/valve).
+    #[serde(default)]
+    pub profiles: Vec<crate::profile::Profile>,
+    /// Latest Premier rating seen in a Premier demo, with when.
+    #[serde(default)]
+    pub premier: Option<(i64, String)>,
 }
 
 /// A highlight plus the match context the Highlights browser sorts and filters on.
@@ -163,6 +187,33 @@ pub struct MatchSummary {
     pub score_theirs: u32,
     pub result: String,
     pub highlight_count: u32,
+    /// The owner's line from the scoreboard, so match lists don't need every match file.
+    #[serde(default)]
+    pub line: Option<Line>,
+    /// FACEIT: ELO after the match, its change, and the level that ELO is.
+    #[serde(default)]
+    pub elo: Option<u32>,
+    #[serde(default)]
+    pub elo_delta: Option<i32>,
+    #[serde(default)]
+    pub level: Option<u32>,
+    /// Premier: rating after the match (or before it, when CS2 didn't report the result) and
+    /// the change.
+    #[serde(default)]
+    pub premier: Option<i64>,
+    #[serde(default)]
+    pub premier_delta: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct Line {
+    pub kills: u32,
+    pub assists: u32,
+    pub deaths: u32,
+    pub adr: f64,
+    pub kast: f64,
+    pub rws: f64,
+    pub rating2: f64,
 }
 
 /// Builds the library entry for one match from the perspective of `me`. `played_ts` comes from
@@ -200,6 +251,19 @@ pub fn match_entry(
             party: false, // filled in once sessions are known
             counts: s.counts.clone(),
             derived: s.derived.clone(),
+            t: s.t.clone(),
+            ct: s.ct.clone(),
+            rank: m.scoreboard.get(&s.steamid).map(|r| r.rank).unwrap_or(0),
+            rank_type: m.scoreboard.get(&s.steamid).map(|r| r.rank_type).unwrap_or(0),
+            rank_after: m
+                .scoreboard
+                .get(&s.steamid)
+                .map(|r| {
+                    let won = (s.team == my_team) == (result == "win") && result != "tie";
+                    let after = if won { r.rank_if_win } else { r.rank_if_loss };
+                    if after > 0 { after } else { r.rank }
+                })
+                .unwrap_or(0),
         })
         .collect();
     let mut hls: Vec<HighlightEntry> = m
@@ -233,6 +297,8 @@ pub fn match_entry(
         demo_path: demo_path.to_string(),
         players,
         highlights: hls,
+        elo: None,
+        elo_delta: None,
     })
 }
 
@@ -363,6 +429,30 @@ pub fn build_index(me: u64, matches: &mut [MatchEntry], date_of: impl Fn(i64) ->
             score_theirs: m.score_theirs,
             result: m.result.clone(),
             highlight_count: counted(m),
+            elo: m.elo,
+            elo_delta: m.elo_delta,
+            level: m.elo.map(crate::faceit::level_for),
+            premier: m.players.iter().find(|p| p.steamid == me_s && p.rank_type == 11 && p.rank > 0).map(|p| {
+                if p.rank_after > 0 {
+                    p.rank_after
+                } else {
+                    p.rank
+                }
+            }),
+            premier_delta: m
+                .players
+                .iter()
+                .find(|p| p.steamid == me_s && p.rank_type == 11 && p.rank > 0 && p.rank_after > 0)
+                .map(|p| p.rank_after - p.rank),
+            line: m.players.iter().find(|p| p.steamid == me_s).map(|p| Line {
+                kills: p.counts.kills,
+                assists: p.counts.assists,
+                deaths: p.counts.deaths,
+                adr: p.derived.adr,
+                kast: p.derived.kast,
+                rws: p.derived.rws,
+                rating2: p.derived.rating2,
+            }),
         })
         .collect();
     let mut highlights: Vec<HighlightRef> = matches
@@ -394,7 +484,17 @@ pub fn build_index(me: u64, matches: &mut [MatchEntry], date_of: impl Fn(i64) ->
         })
         .collect();
     highlights.sort_by_key(|h| std::cmp::Reverse((h.played_ts, h.hand)));
-    Index { me: me_s, me_name, days, matches: summaries, highlights }
+    let mut profiles = vec![];
+    for last in [10, 30, 50, 0] {
+        for source in ["all", "faceit", "valve"] {
+            profiles.extend(crate::profile::build(&me_s, matches, last, source));
+        }
+    }
+    let premier = matches.iter().rev().find_map(|m| {
+        let row = m.players.iter().find(|p| p.steamid == me_s)?;
+        (m.source == "valve" && row.rank_type == 11 && row.rank_after > 0).then(|| (row.rank_after, m.played_at.clone()))
+    });
+    Index { me: me_s, me_name, days, matches: summaries, highlights, profiles, premier }
 }
 
 /// Library id for a demo file: FACEIT `1-<uuid>-1-1.dem.zst` keeps `1-<uuid>-1` (match + map

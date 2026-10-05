@@ -25,6 +25,19 @@ Priorities, in order. Each phase ships something usable before the next starts.
 - Default window: last 30 matches; any period selectable.
 - HLTV-style numbers people already understand (Rating 1.0 exact, Rating 2.0 est., ADR, KAST,
   K/D, HS%, entries, clutches, multi-kills).
+- **Profile page** (main page, old-Leetify layout): Aim / Utility / Positioning / Opening duels /
+  Clutching bars scored against the players in your own lobbies (50 = lobby average); dials for
+  win rate, rating and RWS; T and CT ratings; solo / 2-4 stack / 5 stack mix; Premier rating;
+  per-match form chart. Done; still to come:
+  - Rating 3.0 est. replacing 2.0 est. (round-swing model from a win-probability table).
+  - Aim from tick data: reaction time and crosshair placement (Aim is "beta" until then).
+- **FACEIT, found automatically** (done): the account linked to the user's Steam ID is looked up on
+  FACEIT's public profile endpoints, so there is nothing to connect (no key, no login). Level,
+  ELO, ELO trend and FACEIT stats show on the profile; match history lists every recent FACEIT
+  match, with FACEIT's stats until the demo is in the library; demos get FACEIT's real start
+  times and ELO change. Still to come: stats-only matches in the calendar/day views, and
+  semi-automatic demo download through an embedded FACEIT login (the user signs in themselves;
+  FACEIT's demo links need a signed-in download).
 - **Platform weighting:** FACEIT stats matter most (especially level 10+ and Challenger,
   top 1,000). Premier counts less. Anything that isn't FACEIT, Premier or Competitive is
   "casual": hidden or greyed out, never mixed into ratings.
@@ -60,3 +73,17 @@ Legit score = **Reputation** + **Overwatch**.
       in flight) and flag players who keep acting on information their team didn't have:
       prefiring/tracking through walls and smokes, rotating early with no info, always facing
       where the action will be.
+
+## Later
+
+- **Grenade lineups:** extract every throw (position, view angles, movement and jump state, where
+  it landed), classify the technique (standing, jump-throw, run-throw, crouch), tell real
+  lineups (repeated across games) from on-the-fly throws, show them on a 2D map, and render each
+  unique lineup once while the PC is idle.
+- **Pro lineups browser:** T1 events only (Valve's VRS standings on GitHub for team tiers,
+  Liquipedia's API for events). Demos come from HLTV through a download the user starts in their
+  own browser; no scraping.
+- **FACEIT / ESEA league browser:** season leaders (RWS, ADR, kills), top teams, and a division
+  browser with each team's average ELO and record, opened on the user's own team and division.
+- **Drag-and-drop demo import** for any .dem (scrims, other platforms).
+- **Start with Windows** and a Start-menu shortcut; a Settings page.

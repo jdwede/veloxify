@@ -28,6 +28,10 @@ pub const SCOREBOARD_PROPS: &[&str] = &[
     "ace_rounds_total",
     "mvps",
     "score",
+    "rank",
+    "rank_if_win",
+    "rank_if_loss",
+    "CCSPlayerController.m_iCompetitiveRankType",
 ];
 
 fn friendly_to_real(friendly: &[&str]) -> Result<(Vec<String>, AHashMap<String, String>)> {
