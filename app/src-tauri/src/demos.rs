@@ -1,224 +1,170 @@
-//! Getting FACEIT demos with one click each.
+//! Getting FACEIT demos with one click each, in your own browser.
 //!
-//! FACEIT only gives demos to a signed-in account, and asks Cloudflare Turnstile to confirm a
-//! person clicked the download, so Veloxify doesn't fetch them on its own. Instead it opens the
-//! match room in its own FACEIT window (you sign in there yourself, once; the session persists like
-//! a browser's and Veloxify never sees your password), you click FACEIT's download button, and
-//! Veloxify saves the file to its demo folder, imports it, and moves on to the next match that's
-//! missing its demo.
+//! FACEIT only gives demos to a signed-in account and asks Cloudflare Turnstile to confirm a
+//! person clicked the download, so Veloxify doesn't fetch them by itself. Instead it opens each
+//! match room in your default browser (where you're already signed in), you click FACEIT's
+//! download, and Veloxify spots the file in your Downloads folder (or any watched folder) by its
+//! match id, analyzes it, and opens the next match that's missing its demo. It never touches your
+//! browser's logins or cookies.
 
-use crate::settings::data_dir;
+use crate::settings::Settings;
 use crate::worker::Job;
 use crate::AppState;
+use serde::Serialize;
 use std::path::PathBuf;
-use std::sync::Mutex;
-use tauri::webview::{DownloadEvent, NewWindowResponse, PageLoadEvent};
-use tauri::{AppHandle, Manager, Url, WebviewUrl, WebviewWindowBuilder};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_notification::NotificationExt;
 
-const LABEL: &str = "faceit";
-/// Links in the banner Veloxify adds to the page; intercepted, never loaded.
-const CONTROL_HOST: &str = "veloxify.invalid";
+/// Give up waiting for one demo after this long (you closed the tab, or the demo is gone).
+const WAIT_PER_DEMO: Duration = Duration::from_secs(10 * 60);
 
-#[derive(Clone)]
+#[derive(Clone, Serialize)]
 pub struct Item {
     pub match_id: String,
-    /// e.g. "Mirage · Sun 4 Oct 23:00"
+    /// e.g. "Mirage 13-10 · Sun 4 Oct 23:00"
     pub label: String,
 }
 
-/// Matches waiting for their demo in the FACEIT window, in order.
-#[derive(Default)]
+/// Matches waiting for their demo, in order; shown in the app as a banner.
+#[derive(Default, Clone, Serialize)]
 pub struct Queue {
-    items: Vec<Item>,
-    pos: usize,
-    saved: usize,
+    pub items: Vec<Item>,
+    pub pos: usize,
+    pub saved: usize,
+    /// Bumped on every new run so an old watcher thread stops.
+    #[serde(skip)]
+    pub run: u64,
 }
 
+/// Veloxify's own demo folder (also watched for new demos).
 pub fn demos_dir() -> PathBuf {
-    data_dir().join("demos")
+    crate::settings::data_dir().join("demos")
 }
 
-fn room_url(match_id: &str) -> Url {
-    Url::parse(&format!("https://www.faceit.com/en/cs2/room/{match_id}")).expect("room url")
+fn room_url(match_id: &str) -> String {
+    format!("https://www.faceit.com/en/cs2/room/{match_id}")
 }
 
-fn is_demo(url: &Url) -> bool {
-    let path = url.path().to_ascii_lowercase();
-    [".dem", ".dem.zst", ".dem.gz", ".dem.bz2"].iter().any(|x| path.ends_with(x))
+fn open_in_browser(url: &str) {
+    let _ = std::process::Command::new("rundll32").args(["url.dll,FileProtocolHandler", url]).spawn();
 }
 
-/// Opens the FACEIT window on the first of `items` (or FACEIT's home page to sign in).
-pub fn start(app: &AppHandle, items: Vec<Item>) -> tauri::Result<()> {
-    let url = items.first().map(|i| room_url(&i.match_id)).unwrap_or_else(|| Url::parse("https://www.faceit.com/en").unwrap());
-    *app.state::<Mutex<Queue>>().lock().unwrap() = Queue { items, pos: 0, saved: 0 };
-    if let Some(w) = app.get_webview_window(LABEL) {
-        w.navigate(url)?;
-        w.show()?;
-        w.unminimize()?;
-        return w.set_focus();
-    }
-    build(app, url)
-}
-
-fn build(app: &AppHandle, url: Url) -> tauri::Result<()> {
-    let (nav_app, dl_app, popup_app) = (app.clone(), app.clone(), app.clone());
-    WebviewWindowBuilder::new(app, LABEL, WebviewUrl::External(url))
-        .title("Veloxify · FACEIT demos")
-        .inner_size(1280.0, 880.0)
-        .center()
-        .on_page_load(|window, payload| {
-            if payload.event() == PageLoadEvent::Finished {
-                let js = banner_js(&window.app_handle().state::<Mutex<Queue>>().lock().unwrap());
-                let _ = window.eval(&js);
-            }
-        })
-        .on_navigation(move |url| {
-            if url.host_str() != Some(CONTROL_HOST) {
-                return true;
-            }
-            let app = nav_app.clone();
-            match url.path() {
-                "/skip" => {
-                    std::thread::spawn(move || advance(&app, false));
-                }
-                _ => {
-                    std::thread::spawn(move || stop(&app));
+/// A finished demo file for this match in the watched folders (FACEIT names demos
+/// `1-<match uuid>-<map>-1.dem.zst`).
+fn demo_file(dirs: &[PathBuf], match_id: &str) -> Option<(PathBuf, u64)> {
+    let key = match_id.to_ascii_lowercase();
+    for dir in dirs {
+        let Ok(entries) = std::fs::read_dir(dir) else { continue };
+        for e in entries.flatten() {
+            let name = e.file_name().to_string_lossy().to_ascii_lowercase();
+            if name.contains(&key) && [".dem", ".dem.zst", ".dem.gz", ".dem.bz2"].iter().any(|x| name.ends_with(x)) {
+                if let Ok(m) = e.metadata() {
+                    return Some((e.path(), m.len()));
                 }
             }
-            false
-        })
-        .on_new_window(move |url, _| {
-            // A demo link opened in a new tab: download it in this window instead.
-            if is_demo(&url) {
-                let app = popup_app.clone();
-                std::thread::spawn(move || {
-                    if let Some(w) = app.get_webview_window(LABEL) {
-                        let _ = w.navigate(url);
-                    }
-                });
-                return NewWindowResponse::Deny;
-            }
-            NewWindowResponse::Allow // e.g. "Sign in with Steam"
-        })
-        .on_download(move |_webview, event| {
-            match event {
-                DownloadEvent::Requested { url, destination } => {
-                    let current = {
-                        let q = dl_app.state::<Mutex<Queue>>();
-                        let q = q.lock().unwrap();
-                        q.items.get(q.pos).map(|i| i.match_id.clone())
-                    };
-                    let name = url
-                        .path_segments()
-                        .and_then(|mut s| s.next_back().map(str::to_string))
-                        .filter(|n| n.contains(".dem"))
-                        .or_else(|| current.map(|id| format!("{id}-1-1.dem.zst")))
-                        .unwrap_or_else(|| "faceit-demo.dem.zst".into());
-                    let _ = std::fs::create_dir_all(demos_dir());
-                    *destination = demos_dir().join(name);
-                }
-                DownloadEvent::Finished { success, .. } => {
-                    let app = dl_app.clone();
-                    if success {
-                        // Import right away (the worker waits if CS2 is open).
-                        let _ = app.state::<AppState>().jobs.lock().unwrap().send(Job::Now);
-                        std::thread::spawn(move || advance(&app, true));
-                    } else if let Some(w) = app.get_webview_window(LABEL) {
-                        let _ = w.eval(&message_js("The download didn't finish. Click download again, or Skip."));
-                    }
-                }
-                _ => {}
-            }
-            true
-        })
-        .build()?;
-    Ok(())
-}
-
-/// Next match in the queue, or done.
-fn advance(app: &AppHandle, saved: bool) {
-    let next = {
-        let q = app.state::<Mutex<Queue>>();
-        let mut q = q.lock().unwrap();
-        if saved {
-            q.saved += 1;
         }
-        q.pos += 1;
-        q.items.get(q.pos).map(|i| room_url(&i.match_id))
+    }
+    None
+}
+
+fn emit(app: &AppHandle, q: &Queue) {
+    let _ = app.emit("veloxify://demos", q.clone());
+}
+
+/// Starts (or restarts) the queue: opens the first room and watches for each download.
+pub fn start(app: &AppHandle, items: Vec<Item>, settings: &Settings) {
+    let dirs = settings.watch_dirs.clone();
+    // Matches whose demo is already on disk don't need a room opened.
+    let items: Vec<Item> = items.into_iter().filter(|i| demo_file(&dirs, i.match_id.trim_start_matches("1-")).is_none()).collect();
+    let state = app.state::<Arc<Mutex<Queue>>>().inner().clone();
+    let run = {
+        let mut q = state.lock().unwrap();
+        let run = q.run + 1;
+        *q = Queue { items, pos: 0, saved: 0, run };
+        emit(app, &q);
+        run
     };
-    match next {
-        Some(url) => {
-            if let Some(w) = app.get_webview_window(LABEL) {
-                let _ = w.navigate(url);
+    let app = app.clone();
+    std::thread::spawn(move || watch(app, state, dirs, run));
+}
+
+/// Skip the current match, or stop.
+pub fn control(app: &AppHandle, action: &str) {
+    let state = app.state::<Arc<Mutex<Queue>>>().inner().clone();
+    let mut q = state.lock().unwrap();
+    match action {
+        "skip" => {
+            q.pos += 1;
+            if let Some(next) = q.items.get(q.pos) {
+                open_in_browser(&room_url(&next.match_id));
             }
         }
-        None => finish(app),
+        _ => {
+            let n = q.items.len();
+            q.pos = n;
+        }
+    }
+    emit(app, &q);
+}
+
+fn watch(app: AppHandle, state: Arc<Mutex<Queue>>, dirs: Vec<PathBuf>, run: u64) {
+    let mut opened: Option<(usize, Instant)> = None;
+    let mut last_size: Option<u64> = None;
+    loop {
+        std::thread::sleep(Duration::from_secs(2));
+        let (pos, item) = {
+            let q = state.lock().unwrap();
+            if q.run != run {
+                return; // a newer run took over
+            }
+            (q.pos, q.items.get(q.pos).cloned())
+        };
+        let Some(item) = item else {
+            finish(&app, &state);
+            return;
+        };
+        if opened.map(|(p, _)| p) != Some(pos) {
+            open_in_browser(&room_url(&item.match_id));
+            opened = Some((pos, Instant::now()));
+            last_size = None;
+            continue;
+        }
+        if let Some((_, size)) = demo_file(&dirs, item.match_id.trim_start_matches("1-")) {
+            // Downloaded once its size stops changing.
+            if last_size == Some(size) && size > 0 {
+                let mut q = state.lock().unwrap();
+                if q.run != run || q.pos != pos {
+                    continue;
+                }
+                q.saved += 1;
+                q.pos += 1;
+                emit(&app, &q);
+                drop(q);
+                let _ = app.state::<AppState>().jobs.lock().unwrap().send(Job::Now);
+                continue;
+            }
+            last_size = Some(size);
+        } else if opened.is_some_and(|(_, t)| t.elapsed() > WAIT_PER_DEMO) {
+            // Waited long enough: move on.
+            let mut q = state.lock().unwrap();
+            if q.run == run && q.pos == pos {
+                q.pos += 1;
+                emit(&app, &q);
+            }
+        }
     }
 }
 
-fn finish(app: &AppHandle) {
-    let saved = app.state::<Mutex<Queue>>().lock().unwrap().saved;
-    if let Some(w) = app.get_webview_window(LABEL) {
-        let _ = w.close();
-    }
+fn finish(app: &AppHandle, state: &Arc<Mutex<Queue>>) {
+    let saved = state.lock().unwrap().saved;
     if saved > 0 {
         let _ = app
             .notification()
             .builder()
-            .title("Demos saved")
-            .body(format!("{saved} demo{} saved. Veloxify is analyzing them now.", if saved == 1 { "" } else { "s" }))
+            .title("Demos downloaded")
+            .body(format!("{saved} demo{} found in Downloads. Veloxify is analyzing them now.", if saved == 1 { "" } else { "s" }))
             .show();
     }
 }
-
-fn stop(app: &AppHandle) {
-    let q = app.state::<Mutex<Queue>>();
-    let n = q.lock().unwrap().items.len();
-    q.lock().unwrap().pos = n;
-    finish(app);
-}
-
-/// The banner Veloxify shows at the bottom of the FACEIT page.
-fn banner_js(q: &Queue) -> String {
-    let (text, controls) = match q.items.get(q.pos) {
-        Some(item) => (
-            format!(
-                "Veloxify · demo {} of {} · {} — click Watch demo / download on this page. Not signed in? Sign in once (top right) first.",
-                q.pos + 1,
-                q.items.len(),
-                item.label
-            ),
-            true,
-        ),
-        None => ("Veloxify · sign in to FACEIT here once. Your login stays in this window; Veloxify never sees your password.".into(), false),
-    };
-    BANNER_JS.replace("__TEXT__", &serde_json::to_string(&text).unwrap_or_default()).replace("__CONTROLS__", if controls { "true" } else { "false" })
-}
-
-fn message_js(text: &str) -> String {
-    format!("(() => {{ const s = document.querySelector('#veloxify-banner span'); if (s) s.textContent = {}; }})()", serde_json::to_string(text).unwrap_or_default())
-}
-
-const BANNER_JS: &str = r#"(() => {
-  const old = document.getElementById("veloxify-banner");
-  if (old) old.remove();
-  const d = document.createElement("div");
-  d.id = "veloxify-banner";
-  d.style.cssText = "position:fixed;z-index:2147483647;left:50%;bottom:18px;transform:translateX(-50%);max-width:min(900px,92vw);" +
-    "background:#1e88c7;color:#fff;font:600 14px/1.35 'Segoe UI',system-ui,sans-serif;padding:10px 16px;border-radius:8px;" +
-    "box-shadow:0 8px 28px rgba(0,0,0,.55);display:flex;gap:14px;align-items:center";
-  const s = document.createElement("span");
-  s.textContent = __TEXT__;
-  d.appendChild(s);
-  if (__CONTROLS__) {
-    for (const [label, path] of [["Skip", "skip"], ["Stop", "stop"]]) {
-      const a = document.createElement("a");
-      a.href = "https://veloxify.invalid/" + path;
-      a.textContent = label;
-      a.style.cssText = "color:#fff;text-decoration:underline;white-space:nowrap";
-      d.appendChild(a);
-    }
-  }
-  document.documentElement.appendChild(d);
-})()"#;

@@ -583,6 +583,14 @@ code { font-family: Consolas, monospace; font-size: 12px; background: var(--row)
 .theme .sw i:last-child { right: 8px; top: 8px; width: 14px; height: 14px; border-radius: 50%; }
 input[type=color] { width: 44px; height: 30px; padding: 2px; background: var(--row); border: 1px solid var(--line-2); border-radius: var(--radius-sm); cursor: pointer; }
 
+#demo-queue {
+  position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%); z-index: 40; max-width: min(1000px, 94vw);
+  display: flex; align-items: center; gap: 14px; padding: 10px 14px 10px 18px; border-radius: var(--radius);
+  background: var(--row-hi); border: 1px solid var(--accent-line); box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5); font-size: 13.5px;
+}
+#demo-queue b { white-space: nowrap; color: var(--accent-text); }
+#demo-queue span { color: #d4d4d4; }
+
 /* ---- player modal ------------------------------------------------------------------------ */
 .player-modal { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.88); display: flex; align-items: center; justify-content: center; z-index: 50; }
 .player-modal[hidden] { display: none; }

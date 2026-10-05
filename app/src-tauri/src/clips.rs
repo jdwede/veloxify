@@ -80,7 +80,7 @@ pub struct Usage {
     pub highlight_bytes: u64,
     pub lowlight_clips: u32,
     pub lowlight_bytes: u64,
-    /// Demos in Veloxify's own folder (saved from its FACEIT window).
+    /// Demo files Veloxify has imported (e.g. from Downloads).
     pub demos: u32,
     pub demo_bytes: u64,
     /// Match data, index and map emblems.
@@ -93,23 +93,32 @@ fn dir_size(p: &Path) -> u64 {
         .unwrap_or(0)
 }
 
-/// Demo files in Veloxify's own folder, oldest first: (path, bytes).
-fn own_demos() -> Vec<(PathBuf, u64, std::time::SystemTime)> {
-    let mut out: Vec<_> = std::fs::read_dir(crate::demos::demos_dir())
+/// Demo files Veloxify has imported (wherever they are, e.g. Downloads) plus any in its own
+/// folder, oldest first: (path, bytes, modified).
+fn own_demos(lib: &Path) -> Vec<(PathBuf, u64, std::time::SystemTime)> {
+    let mut paths: Vec<PathBuf> = std::fs::read_dir(lib.join("matches"))
         .map(|d| {
             d.flatten()
-                .filter(|e| e.file_name().to_string_lossy().to_lowercase().contains(".dem"))
-                .filter_map(|e| e.metadata().ok().map(|m| (e.path(), m.len(), m.modified().unwrap_or(std::time::UNIX_EPOCH))))
+                .filter_map(|e| std::fs::read_to_string(e.path()).ok())
+                .filter_map(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+                .filter_map(|v| v["demo_path"].as_str().map(PathBuf::from))
                 .collect()
         })
         .unwrap_or_default();
+    if let Ok(d) = std::fs::read_dir(crate::demos::demos_dir()) {
+        paths.extend(d.flatten().map(|e| e.path()).filter(|p| p.to_string_lossy().to_lowercase().contains(".dem")));
+    }
+    paths.sort();
+    paths.dedup();
+    let mut out: Vec<_> =
+        paths.into_iter().filter_map(|p| std::fs::metadata(&p).ok().map(|m| (p, m.len(), m.modified().unwrap_or(std::time::UNIX_EPOCH)))).collect();
     out.sort_by_key(|(_, _, t)| *t);
     out
 }
 
 pub fn usage(lib: &Path) -> Usage {
     let ((hc, hb), (lc, lb)) = cs2hl_core::ingest::clip_usage(lib).unwrap_or_default();
-    let demos = own_demos();
+    let demos = own_demos(lib);
     Usage {
         highlight_clips: hc,
         highlight_bytes: hb,
@@ -122,7 +131,7 @@ pub fn usage(lib: &Path) -> Usage {
 }
 
 /// Applies the storage limits in settings (0 = no limit): the oldest clips that aren't in a folder
-/// and the oldest demos in Veloxify's own folder go first. Returns (clips removed, demos removed).
+/// and the oldest demos Veloxify has imported go first. Returns (clips removed, demos removed).
 pub fn enforce(settings: &Settings) -> (usize, usize) {
     let gb = 1024.0 * 1024.0 * 1024.0;
     let clips = if settings.max_clips_gb > 0.0 {
@@ -133,7 +142,7 @@ pub fn enforce(settings: &Settings) -> (usize, usize) {
     let mut demos = 0;
     if settings.max_demos_gb > 0.0 {
         let limit = (settings.max_demos_gb * gb) as u64;
-        let files = own_demos();
+        let files = own_demos(&settings.library_dir);
         let mut total: u64 = files.iter().map(|f| f.1).sum();
         // Never a demo from the last day: it may still be waiting to be analyzed or clipped.
         let recent = std::time::SystemTime::now() - std::time::Duration::from_secs(24 * 3600);

@@ -177,15 +177,17 @@ fn open_faceit(path: String) -> Result<(), String> {
     Ok(())
 }
 
-/// Opens Veloxify's FACEIT window on these matches' rooms, one after another (newest first as
-/// given); click FACEIT's download on each and the demo is saved and analyzed.
+/// Opens these matches' rooms in your browser one after another (newest first as given): click
+/// FACEIT's download on each and Veloxify picks the file up from Downloads and opens the next.
 #[tauri::command]
 fn get_demos(app: tauri::AppHandle, state: State<AppState>, match_ids: Vec<String>) -> Result<(), String> {
-    let lib = state.settings.lock().unwrap().library_dir.clone();
+    let settings = state.settings.lock().unwrap().clone();
+    let lib = settings.library_dir.clone();
+    let mut seen = std::collections::HashSet::new();
     let faceit = cs2hl_core::faceit::Faceit::load(&lib);
     let items = match_ids
         .into_iter()
-        .filter(|id| id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))
+        .filter(|id| id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') && seen.insert(id.clone()))
         .map(|id| {
             let label = faceit
                 .as_ref()
@@ -200,13 +202,19 @@ fn get_demos(app: tauri::AppHandle, state: State<AppState>, match_ids: Vec<Strin
             demos::Item { match_id: id, label }
         })
         .collect();
-    demos::start(&app, items).map_err(|e| e.to_string())
+    demos::start(&app, items, &settings);
+    Ok(())
 }
 
-/// Opens Veloxify's FACEIT window to sign in (once).
+/// The demo queue's banner: "skip" this match or "stop".
 #[tauri::command]
-fn open_faceit_window(app: tauri::AppHandle) -> Result<(), String> {
-    demos::start(&app, vec![]).map_err(|e| e.to_string())
+fn demo_queue(app: tauri::AppHandle, action: String) {
+    demos::control(&app, &action);
+}
+
+#[tauri::command]
+fn demo_queue_state(app: tauri::AppHandle) -> demos::Queue {
+    app.state::<std::sync::Arc<std::sync::Mutex<demos::Queue>>>().lock().unwrap().clone()
 }
 
 fn library_and_me(state: &State<AppState>) -> (std::path::PathBuf, Option<u64>) {
@@ -385,7 +393,7 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
-        .manage(std::sync::Mutex::new(demos::Queue::default()))
+        .manage(std::sync::Arc::new(std::sync::Mutex::new(demos::Queue::default())))
         .manage(AppState { settings: settings.clone(), status: status.clone(), jobs: Mutex::new(tx.clone()), abort: abort.clone() })
         .invoke_handler(tauri::generate_handler![
             library_root,
@@ -402,7 +410,8 @@ fn main() {
             open_faceit,
             open_library,
             get_demos,
-            open_faceit_window,
+            demo_queue,
+            demo_queue_state,
             render_clips,
             delete_clips,
             create_folder,
@@ -459,10 +468,13 @@ fn main() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            // Closing the window keeps Veloxify running in the tray.
+            // Closing the main window keeps Veloxify running in the tray (other windows, like
+            // the FACEIT one, really close; its sign-in stays saved).
             if let WindowEvent::CloseRequested { api, .. } = event {
-                let _ = window.hide();
-                api.prevent_close();
+                if window.label() == "main" {
+                    let _ = window.hide();
+                    api.prevent_close();
+                }
             }
         })
         .run(tauri::generate_context!())
