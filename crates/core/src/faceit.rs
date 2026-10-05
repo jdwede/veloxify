@@ -73,6 +73,8 @@ pub struct FaceitMatch {
     pub enemy_elo: Option<u32>,
     /// A placement match of a new season: FACEIT shows no ELO until placements are done.
     pub calibrating: bool,
+    /// The competition: a matchmaking queue (e.g. "North America 5V5 Queue") or a league season.
+    pub competition: String,
     /// Whether the match room was read (start time, team ELO, placement).
     pub detailed: bool,
 }

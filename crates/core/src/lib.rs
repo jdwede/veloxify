@@ -1,9 +1,11 @@
 pub mod analysis;
+pub mod curation;
 pub mod demo_io;
 pub mod faceit;
 pub mod highlights;
 pub mod ingest;
 pub mod library;
+pub mod lowlights;
 pub mod model;
 pub mod profile;
 pub mod raw;

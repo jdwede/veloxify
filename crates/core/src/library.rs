@@ -5,6 +5,7 @@
 
 use crate::analysis::Analysis;
 use crate::highlights::{self, Highlight};
+use crate::lowlights::{self, Lowlight};
 use crate::model::{Match, Source, TeamId, TICKRATE};
 use crate::stats::{Counts, Derived, PlayerStats};
 use serde::{Deserialize, Serialize};
@@ -42,6 +43,11 @@ pub struct PlayerRow {
     pub t: Counts,
     #[serde(default)]
     pub ct: Counts,
+    /// Rating 3.0 est. on each side.
+    #[serde(default)]
+    pub t_rating3: f64,
+    #[serde(default)]
+    pub ct_rating3: f64,
     /// Competitive rank from CS2's scoreboard: `rank_type` 11 is Premier (rating), and
     /// `rank_after` the rating after this match when CS2 reported it.
     #[serde(default)]
@@ -76,6 +82,27 @@ pub struct HighlightEntry {
     /// Why rendering failed (e.g. the demo is from an older CS2 version), if it did.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub render_error: Option<String>,
+    #[serde(flatten)]
+    pub details: HighlightDetails,
+}
+
+/// What a highlight is made of, for presets and filters (pistol rounds, one-deags, AWP, clutches,
+/// rifle multi-kills, entries).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HighlightDetails {
+    pub kills: u32,
+    pub headshots: u32,
+    /// Kill weapons (CS2 names, e.g. `ak47`), most used first.
+    pub weapons: Vec<String>,
+    /// Family of the most used weapon (see `highlights::weapon_class`).
+    pub weapon_class: String,
+    pub pistol_round: bool,
+    /// Includes the round's opening kill.
+    pub entry: bool,
+    /// 1vN clutch won (0 if not a clutch).
+    pub clutch_vs: u32,
+    pub eco_kills: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -95,6 +122,12 @@ pub struct MatchEntry {
     pub demo_path: String,
     pub players: Vec<PlayerRow>,
     pub highlights: Vec<HighlightEntry>,
+    /// Misses you were punished for (see `lowlights`), worst first.
+    #[serde(default)]
+    pub lowlights: Vec<Lowlight>,
+    /// FACEIT competition (e.g. a matchmaking queue or an ESEA league season), from FACEIT.
+    #[serde(default)]
+    pub competition: Option<String>,
     /// FACEIT ELO after this match and its change, once known from FACEIT.
     #[serde(default)]
     pub elo: Option<u32>,
@@ -141,6 +174,9 @@ pub struct Index {
     /// Every highlight in the library, for the Highlights browser (newest first).
     #[serde(default)]
     pub highlights: Vec<HighlightRef>,
+    /// Every lowlight in the library (newest first).
+    #[serde(default)]
+    pub lowlights: Vec<LowlightRef>,
     /// Profile for each window (last 10/30/50/all matches) and source (all/faceit/valve).
     #[serde(default)]
     pub profiles: Vec<crate::profile::Profile>,
@@ -173,6 +209,74 @@ pub struct HighlightRef {
     pub score_theirs: u32,
     pub played_at: String,
     pub played_ts: i64,
+    #[serde(flatten)]
+    pub details: HighlightDetails,
+    /// "FACEIT", "Premier" or e.g. "ESEA S60" (see `source_label`).
+    #[serde(default)]
+    pub source_label: String,
+}
+
+/// A lowlight with its match context, for the Lowlights tab (per-shot details stay in the match).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LowlightRef {
+    pub id: String,
+    pub match_id: String,
+    pub kind: String,
+    pub title: String,
+    pub weapon: String,
+    pub weapon_class: String,
+    pub reason: String,
+    pub verdict: String,
+    pub tags: Vec<String>,
+    pub severity: f64,
+    pub round: u32,
+    pub killer_name: String,
+    pub shots: u32,
+    pub hits: u32,
+    pub pistol_round: bool,
+    pub duration_s: f64,
+    pub clip: Option<String>,
+    pub thumb: Option<String>,
+    pub map: String,
+    pub source: String,
+    pub source_label: String,
+    pub result: String,
+    pub score_mine: u32,
+    pub score_theirs: u32,
+    pub played_at: String,
+    pub played_ts: i64,
+}
+
+/// Where a match was played, as shown on tags and filters: "Premier", "FACEIT", or the FACEIT
+/// league and season (e.g. "ESEA S60") when the competition is an ESEA league.
+pub fn source_label(source: &str, competition: Option<&str>) -> String {
+    match source {
+        "valve" => "Premier".into(),
+        "faceit" => match competition.filter(|c| c.to_ascii_uppercase().contains("ESEA")) {
+            Some(c) => {
+                let digits = |s: &str| s.chars().take_while(|ch| ch.is_ascii_digit()).collect::<String>();
+                let season = c.split_whitespace().zip(c.split_whitespace().skip(1)).find_map(|(a, b)| {
+                    if a.eq_ignore_ascii_case("season") {
+                        Some(digits(b))
+                    } else {
+                        None
+                    }
+                });
+                let season = season.or_else(|| {
+                    c.split(|ch: char| !ch.is_ascii_alphanumeric()).find_map(|w| {
+                        let d = w.strip_prefix('S').or_else(|| w.strip_prefix('s')).map(digits).filter(|d| !d.is_empty());
+                        d
+                    })
+                });
+                match season.filter(|s| !s.is_empty()) {
+                    Some(s) => format!("ESEA S{s}"),
+                    None => "ESEA".into(),
+                }
+            }
+            None => "FACEIT".into(),
+        },
+        _ => "Other".into(),
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -187,6 +291,12 @@ pub struct MatchSummary {
     pub score_theirs: u32,
     pub result: String,
     pub highlight_count: u32,
+    #[serde(default)]
+    pub lowlight_count: u32,
+    #[serde(default)]
+    pub source_label: String,
+    #[serde(default)]
+    pub competition: Option<String>,
     /// The owner's line from the scoreboard, so match lists don't need every match file.
     #[serde(default)]
     pub line: Option<Line>,
@@ -214,6 +324,11 @@ pub struct Line {
     pub kast: f64,
     pub rws: f64,
     pub rating2: f64,
+    /// Rating 3.0 est. and Round Swing (% per round).
+    #[serde(default)]
+    pub rating3: f64,
+    #[serde(default)]
+    pub swing: f64,
 }
 
 /// Builds the library entry for one match from the perspective of `me`. `played_ts` comes from
@@ -253,6 +368,8 @@ pub fn match_entry(
             derived: s.derived.clone(),
             t: s.t.clone(),
             ct: s.ct.clone(),
+            t_rating3: s.t.derived().rating3,
+            ct_rating3: s.ct.derived().rating3,
             rank: m.scoreboard.get(&s.steamid).map(|r| r.rank).unwrap_or(0),
             rank_type: m.scoreboard.get(&s.steamid).map(|r| r.rank_type).unwrap_or(0),
             rank_after: m
@@ -274,7 +391,14 @@ pub fn match_entry(
             let flicks = demo.and_then(|d| highlights::reaction_flicks(d, m, p.steamid).ok()).unwrap_or_default();
             highlights::select(highlights::detect(m, a, p.steamid, &flicks), policy.selectivity, policy.max_per_player)
         })
-        .map(|h| highlight_entry(id, &h))
+        .map(|h| highlight_entry(id, &h, m, a))
+        .collect();
+    let lls: Vec<Lowlight> = lowlights::detect(m, me, demo)
+        .into_iter()
+        .map(|mut l| {
+            l.id = format!("{id}-ll-r{}", l.round);
+            l
+        })
         .collect();
     hls.sort_by(|x, y| y.score.partial_cmp(&x.score).unwrap());
     let duration_ticks = m.rounds.last().map(|r| r.end_tick).unwrap_or(0) - m.rounds.first().map(|r| r.live_tick).unwrap_or(0);
@@ -297,13 +421,40 @@ pub fn match_entry(
         demo_path: demo_path.to_string(),
         players,
         highlights: hls,
+        lowlights: lls,
+        competition: None,
         elo: None,
         elo_delta: None,
     })
 }
 
-fn highlight_entry(match_id: &str, h: &Highlight) -> HighlightEntry {
+fn highlight_entry(match_id: &str, h: &Highlight, m: &Match, a: &Analysis) -> HighlightEntry {
+    let kills: Vec<&crate::model::Kill> = h.kills.iter().map(|&i| &m.kills[i]).collect();
+    let mut weapons: Vec<(String, usize)> = vec![];
+    for k in &kills {
+        match weapons.iter_mut().find(|(w, _)| *w == k.weapon) {
+            Some((_, n)) => *n += 1,
+            None => weapons.push((k.weapon.clone(), 1)),
+        }
+    }
+    weapons.sort_by(|x, y| y.1.cmp(&x.1));
+    let pistol_round = crate::analysis::pistol_rounds(m).contains(&h.round);
+    let details = HighlightDetails {
+        kills: kills.len() as u32,
+        headshots: kills.iter().filter(|k| k.headshot).count() as u32,
+        weapon_class: weapons.first().map(|(w, _)| highlights::weapon_class(w).to_string()).unwrap_or_default(),
+        weapons: weapons.into_iter().map(|(w, _)| w).collect(),
+        pistol_round,
+        entry: a.rounds[h.round].opening_kill.is_some_and(|ki| h.kills.contains(&ki)),
+        clutch_vs: a.rounds[h.round].clutches.iter().find(|c| c.player == h.player && c.won).map(|c| c.vs).unwrap_or(0),
+        eco_kills: if pistol_round {
+            0
+        } else {
+            kills.iter().filter(|k| k.victim_equip_value.is_some_and(|v| v < highlights::ECO_EQUIP_VALUE)).count() as u32
+        },
+    };
     HighlightEntry {
+        details,
         id: format!("{match_id}-{}-r{}", h.player, h.round_number),
         player: h.player.to_string(),
         round: h.round_number,
@@ -429,6 +580,9 @@ pub fn build_index(me: u64, matches: &mut [MatchEntry], date_of: impl Fn(i64) ->
             score_theirs: m.score_theirs,
             result: m.result.clone(),
             highlight_count: counted(m),
+            lowlight_count: m.lowlights.len() as u32,
+            source_label: source_label(&m.source, m.competition.as_deref()),
+            competition: m.competition.clone(),
             elo: m.elo,
             elo_delta: m.elo_delta,
             level: m.elo.map(crate::faceit::level_for),
@@ -452,6 +606,8 @@ pub fn build_index(me: u64, matches: &mut [MatchEntry], date_of: impl Fn(i64) ->
                 kast: p.derived.kast,
                 rws: p.derived.rws,
                 rating2: p.derived.rating2,
+                rating3: p.derived.rating3,
+                swing: p.derived.swing,
             }),
         })
         .collect();
@@ -480,10 +636,46 @@ pub fn build_index(me: u64, matches: &mut [MatchEntry], date_of: impl Fn(i64) ->
                 score_theirs: m.score_theirs,
                 played_at: m.played_at.clone(),
                 played_ts: m.played_ts,
+                details: h.details.clone(),
+                source_label: source_label(&m.source, m.competition.as_deref()),
             })
         })
         .collect();
     highlights.sort_by_key(|h| std::cmp::Reverse((h.played_ts, h.hand)));
+    let mut lowlight_refs: Vec<LowlightRef> = matches
+        .iter()
+        .flat_map(|m| {
+            m.lowlights.iter().map(move |l| LowlightRef {
+                id: l.id.clone(),
+                match_id: m.id.clone(),
+                kind: l.kind.clone(),
+                title: l.title.clone(),
+                weapon: l.weapon.clone(),
+                weapon_class: l.weapon_class.clone(),
+                reason: l.reason.clone(),
+                verdict: l.verdict.clone(),
+                tags: l.tags.clone(),
+                severity: l.severity,
+                round: l.round,
+                killer_name: l.killer_name.clone(),
+                shots: l.shots,
+                hits: l.hits,
+                pistol_round: l.pistol_round,
+                duration_s: l.duration_s,
+                clip: l.clip.clone(),
+                thumb: l.thumb.clone(),
+                map: m.map.clone(),
+                source: m.source.clone(),
+                source_label: source_label(&m.source, m.competition.as_deref()),
+                result: m.result.clone(),
+                score_mine: m.score_mine,
+                score_theirs: m.score_theirs,
+                played_at: m.played_at.clone(),
+                played_ts: m.played_ts,
+            })
+        })
+        .collect();
+    lowlight_refs.sort_by_key(|l| std::cmp::Reverse(l.played_ts));
     let mut profiles = vec![];
     for last in [10, 30, 50, 0] {
         for source in ["all", "faceit", "valve"] {
@@ -494,7 +686,7 @@ pub fn build_index(me: u64, matches: &mut [MatchEntry], date_of: impl Fn(i64) ->
         let row = m.players.iter().find(|p| p.steamid == me_s)?;
         (m.source == "valve" && row.rank_type == 11 && row.rank_after > 0).then(|| (row.rank_after, m.played_at.clone()))
     });
-    Index { me: me_s, me_name, days, matches: summaries, highlights, profiles, premier }
+    Index { me: me_s, me_name, days, matches: summaries, highlights, lowlights: lowlight_refs, profiles, premier }
 }
 
 /// Library id for a demo file: FACEIT `1-<uuid>-1-1.dem.zst` keeps `1-<uuid>-1` (match + map

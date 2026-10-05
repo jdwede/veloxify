@@ -15,7 +15,7 @@ async function initLib() {
 const assetUrl = (rel) => (tauri ? tauri.core.convertFileSrc(`${LIB}\\${rel.replaceAll("/", "\\")}`) : `${LIB}/${rel}`);
 
 const state = { index: null, faceit: null, matches: new Map(), month: null, playlist: [], playing: -1 };
-const BROWSER_DEFAULTS = { heroPeriod: "week", sort: "best", when: "all", from: "", to: "", source: "all", map: "all", types: [], playableOnly: true };
+const BROWSER_DEFAULTS = { heroPeriod: "week", sort: "best", when: "all", from: "", to: "", source: "all", map: "all", types: [], playableOnly: true, preset: "", tags: [], folder: "" };
 let browser = { ...BROWSER_DEFAULTS };
 try { browser = { ...BROWSER_DEFAULTS, ...JSON.parse(localStorage.getItem("veloxify.browser") || "{}") }; } catch (e) { /* defaults */ }
 const saveBrowser = () => { try { localStorage.setItem("veloxify.browser", JSON.stringify(browser)); } catch (e) { /* not persisted */ } };
@@ -33,6 +33,14 @@ async function loadIndex() {
   } catch (e) {
     state.faceit = null;
   }
+  // Your folders and deleted clips (written by the app; absent until you make a folder).
+  try {
+    const c = await fetch(assetUrl("curation.json"), { cache: "no-store" });
+    state.curation = c.ok ? await c.json() : null;
+  } catch (e) {
+    state.curation = null;
+  }
+  state.curation = { folders: [], deleted: [], evicted: [], ...(state.curation || {}) };
   mergeFaceit();
 }
 
@@ -135,7 +143,15 @@ const fmtClip = (s) => { const t = Math.round(s); return `${Math.floor(t / 60)}:
 const iso = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 const f1 = (x) => x.toFixed(1);
 const f2 = (x) => x.toFixed(2);
-const ratingClass = (r) => (r >= 1.1 ? "good" : r < 0.9 ? "bad" : "");
+// How good a number is, as a class g0 (great, green) .. g4 (poor, red).
+const GRADES = { rating: [1.2, 1.05, 0.95, 0.85], rws: [13, 11, 9, 7], win: [0.6, 0.53, 0.47, 0.4] };
+const GRADE_COLORS = ["#2fd36f", "#9ddb8c", "var(--text)", "#f3a5a0", "#ff5252"];
+const gradeOf = (kind, v) => GRADES[kind].filter((t) => v < t).length;
+const ratingClass = (r) => `g${gradeOf("rating", r)}`;
+const gradeClass = (kind, v) => `g${gradeOf(kind, v)}`;
+// HLTV Rating 3.0 est. (falls back to 2.0 est. for anything analyzed before 3.0 existed).
+const r3 = (d) => (d && d.rating3 ? d.rating3 : d ? d.rating2 : 0);
+const fmtSwing = (x) => `${x >= 0 ? "+" : ""}${x.toFixed(2)}%`;
 const resultWord = (r) => ({ win: "Victory", loss: "Defeat", tie: "Tied" }[r] || r);
 const sum = (a) => a.reduce((x, y) => x + y, 0);
 
@@ -186,6 +202,24 @@ function openFaceitRoom(matchId) {
   else window.open(`https://www.faceit.com/${path}`, "_blank");
 }
 
+// FACEIT demos: Veloxify's FACEIT window opens each match room in turn; one click on FACEIT's
+// download per match, then Veloxify saves and analyzes it. (Preview: opens the room in a browser.)
+function getDemos(matchIds) {
+  if (!matchIds.length) return;
+  if (tauri) tauri.core.invoke("get_demos", { matchIds });
+  else openFaceitRoom(matchIds[0]);
+}
+// Stats-only FACEIT matches, newest first, recent enough that FACEIT still has the demo.
+const missingDemos = (ms, days = 30) =>
+  ms.filter((m) => m.stats_only && m.played_ts > Date.now() / 1000 - days * DAY_S).sort((a, b) => b.played_ts - a.played_ts).map((m) => m.faceit.match_id);
+const demoButton = (ids, cls = "btn") =>
+  ids.length ? `<button class="${cls}" data-get-demos="${esc(ids.join(","))}">${ICONS.download} Get ${ids.length === 1 ? "the demo" : `${ids.length} demos`}</button>` : "";
+// Buttons made by demoButton() anywhere on the page.
+document.addEventListener("click", (e) => {
+  const b = e.target.closest("[data-get-demos]");
+  if (b) { e.stopPropagation(); getDemos(b.dataset.getDemos.split(",")); }
+});
+
 function relDay(date) {
   const today = iso(new Date());
   const y = new Date(); y.setDate(y.getDate() - 1);
@@ -212,9 +246,17 @@ async function route() {
   if (parts[0] === "day" && parts[1]) return renderDay(view, parts[1], parts[2] === "m" ? decodeURIComponent(parts[3]) : null, parts[4]);
   if (parts[0] === "latest") {
     const last = state.days[state.days.length - 1];
-    if (last) { location.hash = `#/day/${last.date}`; return; }
+    if (last) { location.hash = `#/session/${last.date}/${last.sessions.length - 1}`; return; }
+  }
+  if (parts[0] === "session" && parts[1]) {
+    document.querySelector('[data-nav="latest"]').classList.add("active");
+    return renderSession(view, parts[1], Number(parts[2] || 0));
   }
   if (parts[0] === "settings") return renderSettings(view);
+  if (parts[0] === "practice") {
+    document.querySelector('[data-nav="practice"]').classList.add("active");
+    return renderPractice(view);
+  }
   if (parts[0] === "profile" || !parts.length) {
     document.querySelector('[data-nav="profile"]').classList.add("active");
     return renderProfile(view);
@@ -223,88 +265,17 @@ async function route() {
     document.querySelector('[data-nav="matches"]').classList.add("active");
     return renderMatchHistory(view);
   }
-  if (parts[0] === "highlights") {
-    document.querySelector('[data-nav="highlights"]').classList.add("active");
-    return renderHighlightsTab(view);
+  // Highlights and lowlights live under Clips (old links still work).
+  if (parts[0] === "highlights") { location.replace("#/clips/highlights"); return; }
+  if (parts[0] === "lowlights") { location.replace(parts[1] ? `#/clips/lowlights/${parts[1]}/${parts[2]}` : "#/clips/lowlights"); return; }
+  if (parts[0] === "clips") {
+    document.querySelector('[data-nav="clips"]').classList.add("active");
+    const sub = parts[1] || "highlights";
+    if (sub === "lowlights" && parts[2] && parts[3]) return renderLowlight(view, decodeURIComponent(parts[2]), decodeURIComponent(parts[3]));
+    return renderClips(view, sub);
   }
-  document.querySelector('[data-nav="home"]').classList.add("active");
-  renderHome(view);
-}
-
-// ---- home: calendar + latest session -----------------------------------------------------------
-
-function renderHome(view) {
-  const days = new Map(state.days.map((d) => [d.date, d]));
-  if (!state.month) {
-    const last = state.days[state.days.length - 1];
-    const base = last ? new Date(`${last.date}T12:00:00`) : new Date();
-    state.month = new Date(base.getFullYear(), base.getMonth(), 1);
-  }
-  const m = state.month;
-  const first = new Date(m.getFullYear(), m.getMonth(), 1);
-  const start = new Date(first); start.setDate(1 - ((first.getDay() + 6) % 7)); // weeks start Monday
-  const today = iso(new Date());
-  let cells = "";
-  for (let i = 0; i < 42; i++) {
-    const d = new Date(start); d.setDate(start.getDate() + i);
-    const key = iso(d);
-    const day = days.get(key);
-    const cls = ["cal-day", d.getMonth() !== m.getMonth() && "other", day && "has", key === today && "today"].filter(Boolean).join(" ");
-    let dots = "";
-    if (day) {
-      const results = day.sessions.flatMap((s) => [...Array(s.wins).fill("win"), ...Array(s.losses).fill("loss")]);
-      dots = results.slice(0, 5).map((r) => `<span class="dot ${r}"></span>`).join("");
-      if (day.highlight_count) dots += `<span class="dot hl" title="${day.highlight_count} highlights"></span>`;
-    }
-    cells += `<div class="${cls}" ${day ? `data-day="${key}"` : ""}><span>${d.getDate()}</span><span class="dots">${dots}</span></div>`;
-  }
-  const dow = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].map((x) => `<div class="cal-dow">${x}</div>`).join("");
-  const monthLabel = m.toLocaleDateString([], { month: "long", year: "numeric" });
-
-  view.innerHTML = `
-    <div class="home">
-      <section class="panel">
-        <div class="cal-head">
-          <div class="h1">${monthLabel}</div>
-          <button class="btn ghost" id="prev">◀</button>
-          <button class="btn ghost" id="todayBtn">Today</button>
-          <button class="btn ghost" id="next">▶</button>
-        </div>
-        <div class="cal-grid">${dow}${cells}</div>
-        <div class="cal-legend">
-          <span><i class="dot win"></i> Win</span><span><i class="dot loss"></i> Loss</span><span><i class="dot hl"></i> Highlights</span>
-        </div>
-      </section>
-      ${latestPanel()}
-    </div>`;
-  view.querySelectorAll("[data-day]").forEach((el) => el.addEventListener("click", () => (location.hash = `#/day/${el.dataset.day}`)));
-  view.querySelector("#prev").onclick = () => { state.month = new Date(m.getFullYear(), m.getMonth() - 1, 1); renderHome(view); };
-  view.querySelector("#next").onclick = () => { state.month = new Date(m.getFullYear(), m.getMonth() + 1, 1); renderHome(view); };
-  view.querySelector("#todayBtn").onclick = () => { const t = new Date(); state.month = new Date(t.getFullYear(), t.getMonth(), 1); renderHome(view); };
-}
-
-function latestPanel() {
-  const day = state.days[state.days.length - 1];
-  if (!day) return `<section class="panel latest"><div class="empty">No matches yet</div></section>`;
-  const me = day.players.find((p) => p.is_me);
-  const ms = dayMatchIds(day).map(summaryOf);
-  const w = sum(day.sessions.map((s) => s.wins)), l = sum(day.sessions.map((s) => s.losses));
-  const party = day.players.filter((p) => !p.is_me).map((p) => esc(p.name)).join(", ") || "Solo";
-  const adr = me ? me.derived.adr : sum(ms.map((m) => m.line?.adr || 0)) / Math.max(1, ms.length);
-  return `
-    <section class="panel latest">
-      <div class="panel-head"><div class="h2">Latest session</div><div class="h1">${relDay(day.date)}</div><div class="sub">${fmtDate(day.date)}</div></div>
-      <div class="latest-body">
-        <div class="kpis">
-          <div class="kpi"><div class="v">${w}-${l}</div><div class="l">Record</div></div>
-          <div class="kpi"><div class="v rating ${me ? ratingClass(me.derived.rating2) : ""}">${me ? f2(me.derived.rating2) : "–"}</div><div class="l">Rating 2.0 est.</div></div>
-          <div class="kpi"><div class="v">${f1(adr)}</div><div class="l">ADR</div></div>
-        </div>
-        <div class="sub">Party: ${party}</div>
-        <div class="sub"><span class="star">★</span> ${day.highlight_count} highlights${day.stats_only ? ` · ${day.stats_only} match${day.stats_only === 1 ? "" : "es"} waiting for the demo` : ""}</div>
-        <a class="btn" href="#/day/${day.date}">Open session</a>
-      </div>
-    </section>`;
+  // Anything else (old calendar links included) goes to the profile.
+  location.replace("#/profile");
 }
 
 // ---- day view ------------------------------------------------------------------------------------
@@ -327,7 +298,7 @@ async function renderDay(view, date, matchId, tab) {
   }).join("");
   const w = sum(day.sessions.map((s) => s.wins)), l = sum(day.sessions.map((s) => s.losses));
   view.innerHTML = `
-    <a class="day-back" href="#/calendar">◀ Calendar</a>
+    <a class="day-back" href="#/matches">◀ Match history</a>
     <div class="day">
       <div class="mlist">
         <a class="mcard overview ${matchId ? "" : "selected"}" href="#/day/${date}">
@@ -364,7 +335,7 @@ async function renderOverview(el, day, tab) {
 
   const waiting = ids.map(summaryOf).filter((m) => m.stats_only);
   const waitingHtml = waiting.length ? `
-    <div class="h2" style="margin:${day.players.length ? "26px" : "0"} 0 10px">Waiting for the demo · stats from FACEIT</div>
+    <div style="display:flex;align-items:center;gap:12px;margin:${day.players.length ? "26px" : "0"} 0 10px"><div class="h2">Waiting for the demo · stats from FACEIT</div><span class="grow"></span>${demoButton(missingDemos(waiting, 3650), "btn primary")}</div>
     <table class="sb">
       <thead><tr><th>Map</th><th>Time</th><th>Score</th><th>K / D / A</th><th>ADR</th><th>HS%</th><th>ELO</th></tr></thead>
       <tbody>${waiting.map((m) => { const fm = m.faceit; return `<tr class="clickable" data-href="#/day/${day.date}/m/${encodeURIComponent(m.id)}">
@@ -372,7 +343,7 @@ async function renderOverview(el, day, tab) {
         <td>${fm.kills} / ${fm.deaths} / ${fm.assists}</td><td>${f1(fm.adr)}</td><td>${Math.round(fm.hs_pct)}%</td>
         <td>${fm.elo ? `${fm.elo.toLocaleString("en-US")} ${deltaHtml(fm.elo_delta)}` : fm.calibrating ? "Placement" : "–"}</td></tr>`; }).join("")}</tbody>
     </table>
-    <div class="note">These join the totals above, with HLTV rating, RWS and highlights, once their demos are processed (after you close CS2).</div>` : "";
+    <div class="note">Get the demos and these join the totals above, with HLTV rating, RWS, highlights and lowlights. Veloxify opens each match room in its FACEIT window; click FACEIT's download there and the rest is automatic (processing waits until CS2 is closed).</div>` : "";
   const rows = day.players.map((p) => {
     const c = p.counts, d = p.derived;
     const mk = sum(c.multikill_rounds.slice(2));
@@ -380,10 +351,10 @@ async function renderOverview(el, day, tab) {
     const diff = c.kills - c.deaths;
     return `<tr class="${p.is_me ? "me" : "party"}">
       <td>${esc(p.name)}</td><td>${c.matches}</td><td>${c.wins}-${c.matches - c.wins}</td>
-      <td class="rating ${ratingClass(d.rating2)}">${f2(d.rating2)}</td>
+      <td class="rating ${ratingClass(r3(d))}">${f2(r3(d))}</td><td class="${gradeClass("rws", d.rws)}">${f1(d.rws)}</td>
       <td>${c.kills}-${c.deaths} <span class="sub">(${diff > 0 ? "+" : ""}${diff})</span></td>
       <td>${f2(d.kd)}</td><td>${f1(d.adr)}</td><td>${f1(d.kast)}%</td><td>${Math.round(d.hs_pct)}%</td>
-      <td>${c.opening_kills}-${c.opening_deaths}</td><td>${cw}/${ca}</td><td>${mk}</td><td>${f2(d.rating1)}</td></tr>`;
+      <td>${c.opening_kills}-${c.opening_deaths}</td><td>${cw}/${ca}</td><td>${mk}</td><td>${fmtSwing(d.swing || 0)}</td></tr>`;
   }).join("");
   if (!day.players.length) {
     body.innerHTML = waitingHtml;
@@ -393,10 +364,10 @@ async function renderOverview(el, day, tab) {
   body.innerHTML = `
     <div class="h2" style="margin-bottom:10px">You${day.players.length > 1 ? " and your party" : ""}</div>
     <table class="sb">
-      <thead><tr><th>Player</th><th>Maps</th><th>W-L</th><th>Rating 2.0*</th><th>K-D</th><th>K/D</th><th>ADR</th><th>KAST</th><th>HS%</th><th>Entries</th><th>Clutches</th><th>Multi-kills</th><th>Rating 1.0</th></tr></thead>
+      <thead><tr><th>Player</th><th>Maps</th><th>W-L</th><th>HLTV 3.0*</th><th>RWS</th><th>K-D</th><th>K/D</th><th>ADR</th><th>KAST</th><th>HS%</th><th>Entries</th><th>Clutches</th><th>Multi-kills</th><th>Swing</th></tr></thead>
       <tbody>${rows}</tbody>
     </table>
-    <div class="note">*Rating 2.0 est. uses the public community approximation of HLTV's formula; Rating 1.0 is HLTV's exact published formula.
+    <div class="note">*HLTV Rating 3.0, estimated: HLTV's six sub-ratings and weights, eco-adjusted with HLTV's published duel matrix, with Round Swing from Veloxify's win-probability model; 1.00 = the average player in your lobbies. Swing = average change in your team's chance to win each round.
     Party = teammates who played at least two of the session's matches with you. Totals are summed across matches before rates are computed.</div>
     ${waitingHtml}`;
   wireRowLinks(body);
@@ -434,11 +405,10 @@ function renderStatsOnly(el, date, m) {
       ${fm.team_elo && fm.enemy_elo ? `<div class="sub" style="margin-top:14px">Average ELO: your team ${fm.team_elo.toLocaleString("en-US")} · enemy team ${fm.enemy_elo.toLocaleString("en-US")}</div>` : ""}
       <div class="stats-only-note">
         <div><b>The full scoreboard, HLTV rating, RWS and highlights come from the demo.</b>
-          <span>Download it from the match room; Veloxify processes it after you close CS2.</span></div>
-        <button class="btn primary" id="open-room">Open match room</button>
+          <span>Veloxify opens the match room in its FACEIT window: click FACEIT's download there and Veloxify saves and analyzes it (after you close CS2 if it's open).</span></div>
+        ${demoButton([fm.match_id], "btn primary")}
       </div>
     </div>`;
-  el.querySelector("#open-room").onclick = () => openFaceitRoom(fm.match_id);
 }
 
 async function renderMatch(el, date, id, tab) {
@@ -453,11 +423,16 @@ async function renderMatch(el, date, id, tab) {
       <div><div class="k">Date</div><div class="v">${relDay(date)}, ${fmtTime(m.played_at)}</div></div>
       <div><div class="k">Source</div><div class="v"><span class="src ${m.source}">${m.source === "valve" ? "PREMIER" : m.source.toUpperCase()}</span></div></div>
     </div>
-    ${tabsHtml([["scoreboard", "Scoreboard"], ["highlights", `Highlights (${m.highlights.length})`]], tab)}
+    ${tabsHtml([["scoreboard", "Scoreboard"], ["highlights", `Highlights (${m.highlights.length})`], ["lowlights", `Lowlights (${(m.lowlights || []).length})`]], tab)}
     <div class="dbody" id="dbody"></div>`;
   el.querySelectorAll("[data-tab]").forEach((b) => (b.onclick = () => (location.hash = `#/day/${date}/m/${encodeURIComponent(id)}/${b.dataset.tab}`)));
   const body = el.querySelector("#dbody");
   if (tab === "highlights") return renderHighlights(body, [id]);
+  if (tab === "lowlights") {
+    const list = (m.lowlights || []).map((l) => ({ ...l, match_id: id, map: m.map, played_at: m.played_at, source: m.source, source_label: summaryOf(id)?.source_label || "", score_mine: m.score_mine, score_theirs: m.score_theirs }));
+    body.innerHTML = list.length ? `<div class="ll-grid">${list.map(lowlightCard).join("")}</div>` : `<div class="empty">No lowlights: no deaths right after a miss this match.</div>`;
+    return;
+  }
 
   const me = state.index.me;
   const team = (side) => m.players.filter((p) => p.side === side).sort((a, b) => b.counts.score - a.counts.score);
@@ -466,11 +441,11 @@ async function renderMatch(el, date, id, tab) {
     const cls = p.steamid === me ? "me" : p.party ? "party" : "";
     return `<tr class="${cls}"><td>${esc(p.name)}</td><td>${c.kills}</td><td>${c.assists}</td><td>${c.deaths}</td>
       <td>${c.mvps ? `<span class="star">★</span>${c.mvps > 1 ? c.mvps : ""}` : ""}</td><td>${c.score}</td>
-      <td>${f1(d.adr)}</td><td>${f1(d.kast)}%</td><td>${Math.round(d.hs_pct)}%</td><td class="rating ${ratingClass(d.rating2)}">${f2(d.rating2)}</td></tr>`;
+      <td>${f1(d.adr)}</td><td>${f1(d.kast)}%</td><td>${Math.round(d.hs_pct)}%</td><td class="${gradeClass("rws", d.rws)}">${f1(d.rws)}</td><td>${fmtSwing(d.swing || 0)}</td><td class="rating ${ratingClass(r3(d))}">${f2(r3(d))}</td></tr>`;
   };
   body.innerHTML = `
     <table class="sb">
-      <thead><tr><th>Player</th><th>K</th><th>A</th><th>D</th><th>★</th><th>Score</th><th>ADR</th><th>KAST</th><th>HS%</th><th>Rating 2.0*</th></tr></thead>
+      <thead><tr><th>Player</th><th>K</th><th>A</th><th>D</th><th>★</th><th>Score</th><th>ADR</th><th>KAST</th><th>HS%</th><th>RWS</th><th>Swing</th><th title="HLTV Rating 3.0, estimated">HLTV 3.0</th></tr></thead>
       <tbody>
         <tr class="team-row"><td colspan="10"><span class="big">${m.score_mine}</span>Your team · ${resultWord(m.result)}</td></tr>
         ${team("mine").map(row).join("")}
@@ -548,35 +523,36 @@ function closePlayer() {
 const PROFILE_DEFAULTS = { last: 30, source: "all" };
 let prof = { ...PROFILE_DEFAULTS };
 try { prof = { ...PROFILE_DEFAULTS, ...JSON.parse(localStorage.getItem("veloxify.profile") || "{}") }; } catch (e) { /* defaults */ }
-const WIN = "#3aa58f", LOSS = "#e5533d"; // validated pair on the #161616 card (CVD-safe)
+const WIN = "#3aa58f", LOSS = "#e2445f"; // validated pair on the #161616 card (CVD-safe)
 
 // Rating bands (HLTV-style scale, 1.00 = average).
 const ratingWord = (r) => (r >= 1.2 ? "Great" : r >= 1.05 ? "Good" : r >= 0.95 ? "Average" : r >= 0.85 ? "Subpar" : "Poor");
 const scoreWord = (x) => (x >= 75 ? "Great" : x >= 60 ? "Good" : x >= 40 ? "Average" : x >= 25 ? "Subpar" : "Poor");
 
-function dial(value, frac, label, sub, size = 150) {
+function dial(value, frac, label, sub, size = 150, color = "", subClass = "") {
   const r = size / 2 - 10, c = 2 * Math.PI * r, f = Math.max(0, Math.min(1, frac));
   return `
     <div class="dial" style="width:${size}px">
       <svg viewBox="0 0 ${size} ${size}" width="${size}" height="${size}" role="img" aria-label="${esc(label)} ${esc(value)}">
         <circle cx="${size / 2}" cy="${size / 2}" r="${r}" class="dial-track"/>
-        <circle cx="${size / 2}" cy="${size / 2}" r="${r}" class="dial-fill" stroke-dasharray="${(c * f).toFixed(1)} ${c.toFixed(1)}"
+        <circle cx="${size / 2}" cy="${size / 2}" r="${r}" class="dial-fill" ${color ? `style="stroke:${color}"` : ""} stroke-dasharray="${(c * f).toFixed(1)} ${c.toFixed(1)}"
           transform="rotate(-90 ${size / 2} ${size / 2})"/>
       </svg>
       <div class="dial-value" style="font-size:${size / 4.6}px">${value}</div>
       <div class="dial-label">${esc(label)}</div>
-      ${sub ? `<div class="dial-sub">${esc(sub)}</div>` : ""}
+      ${sub ? `<div class="dial-sub ${subClass}">${esc(sub)}</div>` : ""}
     </div>`;
 }
 
 function formChart(form) {
   if (!form.length) return "";
   const w = 900, h = 170, pad = 28, n = form.length, gap = 2;
+  form = form.map((f) => ({ ...f, rating2: f.rating3 || f.rating2 }));
   const max = Math.max(1.6, ...form.map((f) => f.rating2));
   const bw = (w - pad) / n - gap, y = (v) => h - 20 - (v / max) * (h - 34);
   const bars = form.map((f, i) => {
     const x = pad + i * (bw + gap), top = y(f.rating2), bh = h - 20 - top;
-    const tip = `${mapName(f.map)} · ${relDay(f.played_at.slice(0, 10))} · ${f.result === "win" ? "W" : f.result === "loss" ? "L" : "T"} · Rating ${f2(f.rating2)} · ${f1(f.adr)} ADR`;
+    const tip = `${mapName(f.map)} · ${relDay(f.played_at.slice(0, 10))} · ${f.result === "win" ? "W" : f.result === "loss" ? "L" : "T"} · HLTV 3.0 ${f2(f.rating2)} · ${f1(f.adr)} ADR`;
     return `<g class="bar" data-tip="${esc(tip)}" data-m="${esc(f.match_id)}">
       <rect class="hit" x="${x - gap / 2}" y="6" width="${bw + gap}" height="${h - 26}"/>
       <path d="M${x},${top + bh} v${-(bh - 4)} q0,-4 4,-4 h${bw - 8} q4,0 4,4 v${bh - 4} z" fill="${f.result === "win" ? WIN : LOSS}"/></g>`;
@@ -711,12 +687,12 @@ function renderProfile(view) {
       </section>
       <section class="panel dials">
         <div class="dials-row">
-          ${dial(`${Math.round(p.win_rate * 100)}%`, p.win_rate, "Win rate", `${p.wins}-${p.matches - p.wins}`)}
-          ${dial(f2(d.rating2), (d.rating2 - 0.4) / 1.2, "Rating 2.0 est.", ratingWord(d.rating2))}
-          ${dial(f1(d.rws), d.rws / 20, "RWS", d.rws >= 12 ? "Above average" : d.rws >= 9 ? "Average" : "Below average")}
+          ${dial(f2(r3(d)), (r3(d) - 0.4) / 1.2, "HLTV Rating 3.0", ratingWord(r3(d)), 150, GRADE_COLORS[gradeOf("rating", r3(d))], ratingClass(r3(d)))}
+          ${dial(f1(d.rws), d.rws / 20, "RWS", ["Great", "Good", "Average", "Below average", "Poor"][gradeOf("rws", d.rws)], 150, GRADE_COLORS[gradeOf("rws", d.rws)], gradeClass("rws", d.rws))}
+          ${dial(`${Math.round(p.win_rate * 100)}%`, p.win_rate, "Win rate", `${p.wins}-${p.matches - p.wins}`, 150, GRADE_COLORS[gradeOf("win", p.win_rate)], gradeClass("win", p.win_rate))}
           <div class="side-dials">
-            ${dial(f2(p.t.rating2), (p.t.rating2 - 0.4) / 1.2, "T rating", "", 86)}
-            ${dial(f2(p.ct.rating2), (p.ct.rating2 - 0.4) / 1.2, "CT rating", "", 86)}
+            ${dial(f2(r3(p.t)), (r3(p.t) - 0.4) / 1.2, "T rating", "", 86, "var(--t)")}
+            ${dial(f2(r3(p.ct)), (r3(p.ct) - 0.4) / 1.2, "CT rating", "", 86, "var(--ct)")}
           </div>
         </div>
         <div class="stack">
@@ -735,18 +711,18 @@ function renderProfile(view) {
       </section>
       <section class="panel tiles">
         ${[["K/D", f2(d.kd)], ["ADR", f1(d.adr)], ["KAST", `${f1(d.kast)}%`], ["HS%", `${Math.round(d.hs_pct)}%`],
-          ["Rating 1.0", f2(d.rating1)], ["Accuracy", `${f1(d.accuracy)}%`], ["Entries", `${c.opening_kills}-${c.opening_deaths}`],
+          ["Swing / round", fmtSwing(d.swing || 0)], ["Accuracy", `${f1(d.accuracy)}%`], ["Entries", `${c.opening_kills}-${c.opening_deaths}`],
           ["Multi-kills", `${c.multikill_rounds.slice(2).reduce((a, b) => a + b, 0)}`]].map(([l, v]) =>
           `<div class="kpi"><div class="v">${v}</div><div class="l">${l}</div></div>`).join("")}
       </section>
       </div>
     </div>
     <section class="panel form">
-      <div class="panel-head"><div class="h2">Form · Rating 2.0 est. per match</div><span class="grow"></span>
+      <div class="panel-head"><div class="h2">Form · HLTV Rating 3.0 per match</div><span class="grow"></span>
         <span class="legend"><i style="background:${WIN}"></i>Win <i style="background:${LOSS}"></i>Loss</span></div>
       ${formChart(p.form)}
     </section>
-    ${top.length ? `<section class="profile-top"><div class="hero-head"><div class="h2">Top highlights</div><a class="btn ghost" href="#/highlights">All highlights</a></div>
+    ${top.length ? `<section class="profile-top"><div class="hero-head"><div class="h2">Top highlights</div><a class="btn ghost" href="#/clips/highlights">All highlights</a></div>
       <div class="hl-grid">${top.map((h) => cardHtml(h)).join("")}</div></section>` : ""}`;
 
   view.querySelectorAll(".seg[data-pkey]").forEach((el) => el.querySelectorAll("button").forEach((b) => (b.onclick = () => {
@@ -799,19 +775,20 @@ function historyRow(r) {
     : r.source === "valve"
       ? r.premier ? `${premierChip(r.premier)}${deltaHtml(r.delta)}` : `<span class="none">Unranked</span>`
       : `<span class="none">–</span>`;
-  const rating = l?.rating2 != null
-    ? `<span class="rchip ${l.rating2 >= 1.3 ? "hi" : ""}" title="HLTV Rating 2.0 (estimated from the demo)">${f2(l.rating2)}<i style="width:${Math.min(100, (l.rating2 / 2) * 100)}%"></i></span>`
+  const rv = l ? r3(l) : null;
+  const rating = rv
+    ? `<span class="rchip ${ratingClass(rv)}" title="HLTV Rating 3.0 (estimated from the demo)">${f2(rv)}<i style="width:${Math.min(100, (rv / 2) * 100)}%"></i></span>`
     : `<span class="rchip na" title="Needs the demo">–</span>`;
   const actions = r.demo
     ? `<button class="sqbtn ${r.hl ? "hl" : "dim"}" data-act="hl" title="${r.hl ? `${r.hl} highlight${r.hl === 1 ? "" : "s"}` : "No highlights in this match"}">${ICONS.star}${r.hl}</button>`
-    : `<button class="sqbtn" data-act="room" title="Download the demo from the match room; Veloxify adds it automatically">${ICONS.download}</button>`;
+    : `<button class="sqbtn" data-act="demo" title="Get the demo: Veloxify opens the match room, you click FACEIT's download, Veloxify does the rest">${ICONS.download}</button>`;
   return `
     <div class="ml-grid ml-row ${r.result} clickable" data-id="${esc(r.id)}" data-href="#/day/${r.date}/m/${encodeURIComponent(r.id)}" ${r.room ? `data-room="${esc(r.room)}"` : ""}>
       <div class="ml-date">${fcDate(r.when)}</div>
       <div class="ml-score"><span class="wl ${r.result}">${r.result === "win" ? "W" : r.result === "loss" ? "L" : "T"}</span><span><b class="${r.result}">${r.mine}</b> : <span class="theirs">${r.theirs}</span></span></div>
       <div class="ml-elo">${elo}</div>
       <div>${rating}</div>
-      <div>${l?.rws != null ? `<span class="ml-num">${f1(l.rws)}</span>` : `<span class="ml-num na">–</span>`}</div>
+      <div>${l?.rws != null ? `<span class="ml-num ${gradeClass("rws", l.rws)}">${f1(l.rws)}</span>` : `<span class="ml-num na">–</span>`}</div>
       <div class="ml-num">${l ? `${l.kills} / ${l.deaths} / ${l.assists}` : "–"}</div>
       <div class="ml-num">${l ? f1(l.adr) : "–"}</div>
       <div class="ml-map">${mapIcon(r.map)}<span>${esc(mapName(r.map))}</span></div>
@@ -832,6 +809,7 @@ function renderMatchHistory(view) {
         <div class="h1">Match history</div>
         <span class="sub">${rows.length} matches</span>
         <span class="grow"></span>
+        ${demoButton(missingDemos(state.all), "btn primary")}
         <div class="fc-filters">
           ${seg("source", [["all", "All"], ["faceit", "FACEIT"], ["valve", "Premier"]])}
           ${seg("result", [["all", "All"], ["win", "Wins"], ["loss", "Losses"]])}
@@ -839,12 +817,12 @@ function renderMatchHistory(view) {
         </div>
       </div>
       <div class="ml-grid ml-head">
-        <div>Date</div><div>Score</div><div></div><div title="HLTV Rating 2.0, estimated from the demo"><span class="ic">${ICONS.rating}</span>Rating</div>
+        <div>Date</div><div>Score</div><div></div><div title="HLTV Rating 3.0, estimated from the demo"><span class="ic">${ICONS.rating}</span>HLTV 3.0</div>
         <div>RWS</div><div>K/D/A</div><div>ADR</div><div>Map</div><div></div>
       </div>
       ${rows.slice(0, mh.shown).map(historyRow).join("")}
       ${rows.length > mh.shown ? `<div style="text-align:center;margin-top:12px"><button class="btn" id="mhmore">Show more</button></div>` : ""}
-      ${missing ? `<div class="ml-note">${missing} FACEIT match${missing === 1 ? "" : "es"} without a demo show FACEIT's stats only. Download a demo from its match room and Veloxify adds the rating, RWS and highlights.</div>` : ""}
+      ${missing ? `<div class="ml-note">${missing} FACEIT match${missing === 1 ? "" : "es"} without a demo show FACEIT's stats only. Get the demo (download button) and Veloxify adds the rating, RWS, highlights and lowlights. FACEIT keeps demos for a few weeks.</div>` : ""}
     </section>`;
   view.querySelectorAll(".seg[data-mkey]").forEach((el) => el.querySelectorAll("button").forEach((b) => (b.onclick = () => { mh[el.dataset.mkey] = b.dataset.v; mh.shown = 50; renderMatchHistory(view); })));
   view.querySelector("#mhmap").onchange = (e) => { mh.map = e.target.value; mh.shown = 50; renderMatchHistory(view); };
@@ -853,9 +831,503 @@ function renderMatchHistory(view) {
   view.querySelectorAll(".ml-row").forEach((row) => (row.onclick = (e) => {
     const act = e.target.closest("[data-act]")?.dataset.act;
     if (act === "room") return openFaceitRoom(row.dataset.room);
+    if (act === "demo") return getDemos([row.dataset.room]);
     if (!row.dataset.href) return;
     location.hash = act === "hl" ? `${row.dataset.href}/highlights` : row.dataset.href;
   }));
+}
+
+// ---- practice ----------------------------------------------------------------------------------
+
+const ACTIVE_MAPS = ["de_mirage", "de_inferno", "de_dust2", "de_nuke", "de_ancient", "de_anubis", "de_train", "de_overpass"];
+// Only what pros are documented using (researched Oct 2026; ids checked against Steam's API).
+const PRACTICE_PRESETS = [
+  { id: "aimbotz", name: "Aim Botz", desc: "Bots standing or moving: taps, short bursts, flicks, switching guns. 10-20 minutes or 500-1,000 kills.",
+    pros: "s1mple (up to 20 min a day), NiKo (500-1,000 kills before games)", kind: "workshop", target: "3070244462", mode: "none", fixes: ["aim", "late_stop", "moving", "moved_mid_spray", "spray"] },
+  { id: "warmupserver", name: "FFA deathmatch · WarmupServer", desc: "Clean community FFA DM servers (NA, EU, SEA), no skins or extras. Opens their server list; join one, or add its address below to launch it in one click next time.",
+    pros: "NiKo and m0NESY (Falcons); \"most active (and former) pros\" per ProSettings", kind: "link", target: "https://warmupserver.net/", fixes: ["aim", "late_stop", "moving", "spray"] },
+  { id: "kz", name: "KZ movement warm-up", desc: "kz_checkmate: jumps and strafes for 10 minutes to wake up movement before playing. (Pros don't say which KZ maps; this is one of the two most played in CS2.)",
+    pros: "donk (10 min of KZ before matches, no aim maps), ZywOo (KZ and surf instead of individual aim practice)", kind: "workshop", target: "3070194623", mode: "none", fixes: ["jumping"] },
+  { id: "kz2", name: "KZ movement warm-up · Grotto", desc: "kz_grotto: the other most-played CS2 KZ map, a shorter climb.", pros: "As above (donk, ZywOo)", kind: "workshop", target: "3121168339", mode: "none", fixes: [] },
+  { id: "yprac", name: "Yprac Hub · prefires and utility", desc: "Prefire routes to clear every angle, plus 1,400+ smoke, flash, molotov and HE lineups on all active maps. Pick the map you're about to play.",
+    pros: "Reported in pro map prep; no named player on record", kind: "workshop", target: "3070715607", mode: "none", fixes: ["aim"] },
+  { id: "utility", name: "Your own nade practice", desc: "Local server with the standard practice setup: no bots, infinite ammo, grenade trajectories, bullet impacts, buy anywhere, endless round.",
+    pros: "The standard setup teams use to practice utility", kind: "map", target: "de_mirage", mode: "practice", pickMap: true, fixes: [] },
+];
+let practiceMaps = {};
+
+function practiceCustom() {
+  return (settingsData?.settings?.practice || []).map((p) => ({ ...p, custom: true }));
+}
+
+async function renderPractice(view) {
+  if (tauri && !settingsData) settingsData = await tauri.core.invoke("get_settings");
+  const custom = practiceCustom();
+  // What your lowlights say to work on.
+  const recent = (state.index.lowlights || []).filter((l) => l.played_ts > Date.now() / 1000 - 30 * DAY_S);
+  const counts = {};
+  for (const l of recent) counts[l.reason] = (counts[l.reason] || 0) + 1;
+  const top = Object.entries(counts).filter(([r]) => r !== "unknown" && r !== "unlucky").sort((a, b) => b[1] - a[1])[0];
+  const suggested = top ? PRACTICE_PRESETS.filter((p) => p.fixes.includes(top[0])) : [];
+  const card = (p) => `
+    <div class="pr-card ${suggested.includes(p) ? "suggested" : ""}" data-id="${esc(p.id)}">
+      <div class="pr-top"><b>${esc(p.name)}</b><span class="src">${p.kind === "workshop" ? "WORKSHOP" : p.kind === "server" ? "SERVER" : p.kind === "link" ? "COMMUNITY DM" : "LOCAL"}</span>
+        ${suggested.includes(p) ? `<span class="pr-sug">Suggested</span>` : ""}</div>
+      <div class="sub">${esc(p.desc || (p.kind === "server" ? p.target : `${p.target}${p.mode && p.mode !== "none" ? " · " + p.mode : ""}`))}</div>
+      ${p.pros ? `<div class="pr-pros"><b>Used by</b> ${esc(p.pros)}</div>` : ""}
+      <div class="pr-actions">
+        ${p.pickMap ? `<select data-map="${esc(p.id)}">${ACTIVE_MAPS.map((m) => `<option value="${m}" ${(practiceMaps[p.id] || p.target) === m ? "selected" : ""}>${esc(mapName(m))}</option>`).join("")}</select>` : ""}
+        ${p.hsToggle ? `<label class="check"><input type="checkbox" data-hs="${esc(p.id)}"> Headshots only</label>` : ""}
+        <span class="grow"></span>
+        ${p.custom ? `<button class="btn ghost" data-del="${esc(p.id)}">Remove</button>` : ""}
+        <button class="btn primary" data-launch="${esc(p.id)}">${p.kind === "link" ? "Open server list" : "Launch"}</button>
+      </div>
+    </div>`;
+  view.innerHTML = `
+    <div class="profile-head"><div><div class="h2">One click into CS2</div><div class="h1">Practice</div></div><span class="saved" id="pr-msg"></span></div>
+    ${top ? `<div class="why-tip" style="margin:0 0 16px"><b>From your lowlights:</b> most misses in the last 30 days were <b>${esc((LL_REASONS[top[0]] || [top[0]])[0].toLowerCase())}</b> (${top[1]} of ${recent.length}). ${esc(LL_TIPS[top[0]] || "")}</div>` : ""}
+    <div class="pr-grid">${PRACTICE_PRESETS.map(card).join("")}${custom.map(card).join("")}</div>
+    <section class="panel" style="margin-top:20px">
+      <div class="panel-head"><div class="h3">Add your own</div><span class="sub">a Workshop map, any map with practice settings, or a community deathmatch / retake server</span></div>
+      <div class="pr-form">
+        <input type="text" id="pr-name" placeholder="Name (e.g. WarmupServer NA #1)">
+        <select id="pr-kind"><option value="workshop">Workshop map (id)</option><option value="map">Map (e.g. de_mirage)</option><option value="server">Server (address:port)</option></select>
+        <input type="text" id="pr-target" placeholder="3070244462 · de_mirage · 1.2.3.4:27015">
+        <select id="pr-mode"><option value="none">Load as it is</option><option value="practice">Practice settings</option><option value="deathmatch">Bot deathmatch</option></select>
+        <textarea id="pr-cmds" rows="2" placeholder="Extra console commands, one per line (optional)"></textarea>
+        <button class="btn primary" id="pr-add" ${tauri ? "" : "disabled"}>Add</button>
+      </div>
+      <div class="note" style="margin:0 20px 16px">Launches go through Steam like a desktop shortcut. Practice settings are written to <code>cfg/veloxify_practice.cfg</code>; if a map resets them, run <code>exec veloxify_practice</code> in the console. If CS2 is already open, Veloxify copies the commands for you to paste instead.</div>
+    </section>`;
+  const msg = (t, bad) => { const el = view.querySelector("#pr-msg"); el.textContent = t; el.style.color = bad ? "var(--loss)" : ""; el.classList.add("on"); clearTimeout(el._t); el._t = setTimeout(() => el.classList.remove("on"), 6000); };
+  view.querySelectorAll("[data-map]").forEach((s) => (s.onchange = () => { practiceMaps[s.dataset.map] = s.value; }));
+  view.querySelectorAll("[data-launch]").forEach((b) => (b.onclick = async () => {
+    const p = [...PRACTICE_PRESETS, ...custom].find((x) => x.id === b.dataset.launch);
+    if (p.kind === "link") {
+      if (tauri) tauri.core.invoke("open_link", { url: p.target });
+      else window.open(p.target, "_blank");
+      return;
+    }
+    const launch = { kind: p.kind, target: practiceMaps[p.id] || p.target, mode: p.mode || "none", headshot_only: !!view.querySelector(`[data-hs="${p.id}"]`)?.checked, commands: p.commands || "" };
+    if (!tauri) return msg("Launching works in the desktop app.", true);
+    b.disabled = true;
+    try {
+      const r = await tauri.core.invoke("launch_practice", { launch });
+      if (r.launched) msg(`Starting CS2: ${p.name}`);
+      else {
+        try { await navigator.clipboard.writeText(r.console); } catch (e) { /* shown below */ }
+        msg(`CS2 is already open. Copied to paste in the console: ${r.console}`);
+      }
+    } catch (e) { msg(String(e), true); }
+    b.disabled = false;
+  }));
+  view.querySelectorAll("[data-del]").forEach((b) => (b.onclick = async () => {
+    const list = (settingsData.settings.practice || []).filter((p) => p.id !== b.dataset.del);
+    settingsData.settings.practice = list;
+    await tauri.core.invoke("save_practice", { presets: list });
+    renderPractice(view);
+  }));
+  view.querySelector("#pr-add").onclick = async () => {
+    const name = view.querySelector("#pr-name").value.trim(), target = view.querySelector("#pr-target").value.trim();
+    if (!name || !target) return msg("Give it a name and a map, Workshop id or server address.", true);
+    const p = { id: `c${Date.now()}`, name, kind: view.querySelector("#pr-kind").value, target, mode: view.querySelector("#pr-mode").value, commands: view.querySelector("#pr-cmds").value };
+    const list = [...(settingsData.settings.practice || []), p];
+    settingsData.settings.practice = list;
+    await tauri.core.invoke("save_practice", { presets: list });
+    renderPractice(view);
+  };
+}
+
+// ---- session page ------------------------------------------------------------------------------
+
+// Everyone's stats summed over a session's matches. Rates and ratings are per round, so the
+// session value is the round-weighted average of the matches (HLTV computes it the same way).
+function sumPlayers(entries, me) {
+  const by = new Map();
+  for (const m of entries) {
+    for (const p of m.players) {
+      const c = p.counts, d = p.derived;
+      const rounds = c.rounds || 0;
+      let a = by.get(p.steamid);
+      if (!a) {
+        a = { steamid: p.steamid, name: p.name, maps: 0, wins: 0, rounds: 0, mine: 0, enemy: 0, party: false, c: {}, w: { rating3: 0, rws: 0, adr: 0, kast: 0, swing: 0 },
+          t: { rounds: 0, rating3: 0 }, ct: { rounds: 0, rating3: 0 }, results: [] };
+        by.set(p.steamid, a);
+      }
+      a.name = p.name;
+      a.maps += 1;
+      a.rounds += rounds;
+      a.wins += c.wins || 0;
+      a[p.side === "mine" ? "mine" : "enemy"] += 1;
+      a.party = a.party || p.party;
+      a.results.push({ id: m.id, map: m.map, won: (c.wins || 0) > 0 });
+      for (const [k, v] of Object.entries(c)) {
+        if (typeof v === "number") a.c[k] = (a.c[k] || 0) + v;
+        else if (Array.isArray(v)) a.c[k] = (a.c[k] || v.map(() => 0)).map((x, i) => x + (v[i] || 0));
+      }
+      for (const k of Object.keys(a.w)) a.w[k] += (k === "rating3" ? r3(d) : d[k] || 0) * rounds;
+      for (const side of ["t", "ct"]) {
+        const sc = p[side] || {};
+        if (sc.rounds) {
+          a[side].rounds += sc.rounds;
+          // Side rating from side counts isn't stored per match; approximate with the match rating
+          // weighted by side rounds when side ratings aren't available.
+          a[side].rating3 += (p[side + "_rating3"] ?? r3(d)) * sc.rounds;
+        }
+      }
+    }
+  }
+  const out = [...by.values()].map((a) => {
+    const c = a.c, r = Math.max(1, a.rounds);
+    return {
+      ...a,
+      rating3: a.w.rating3 / r, rws: a.w.rws / r, adr: a.w.adr / r, kast: a.w.kast / r, swing: a.w.swing / r,
+      t_rating: a.t.rounds ? a.t.rating3 / a.t.rounds : null, ct_rating: a.ct.rounds ? a.ct.rating3 / a.ct.rounds : null,
+      kd: (c.kills || 0) / Math.max(1, c.deaths || 0), kr: (c.kills || 0) / r, hs: c.kills ? (100 * (c.headshot_kills || 0)) / c.kills : 0,
+      is_me: a.steamid === me,
+    };
+  });
+  return out.sort((x, y) => y.rating3 - x.rating3);
+}
+
+let sessionView = { who: "teammates", sort: "rating3", desc: true };
+
+async function renderSession(view, date, idx) {
+  const day = dayOf(date);
+  const sess = day?.sessions[idx];
+  if (!sess) { view.innerHTML = `<div class="empty">No session on ${esc(date)}</div>`; return; }
+  const summaries = sess.match_ids.map(summaryOf);
+  const withDemo = summaries.filter((m) => !m.stats_only);
+  const entries = await Promise.all(withDemo.map((m) => loadMatch(m.id)));
+  const me = state.index.me;
+  const players = sumPlayers(entries, me);
+  const meRow = players.find((p) => p.is_me);
+  // Cards: you and your party; solo, every teammate you had this session.
+  const party = players.filter((p) => !p.is_me && p.mine > 0 && p.party);
+  const cards = [meRow, ...(party.length ? party : players.filter((p) => !p.is_me && p.mine > 0))].filter(Boolean);
+  const w = sess.wins, l = sess.losses;
+  const first = summaries[0], last = summaries[summaries.length - 1];
+  // First start to last finish (a FACEIT-only match without room data counts as ~40 minutes).
+  const minutes = Math.round((last.played_ts + (last.duration_s || 2400) - first.played_ts) / 60);
+  const dayIdx = state.days.findIndex((d) => d.date === date);
+  const prevSess = idx > 0 ? `#/session/${date}/${idx - 1}` : dayIdx > 0 ? `#/session/${state.days[dayIdx - 1].date}/${state.days[dayIdx - 1].sessions.length - 1}` : null;
+  const nextSess = idx < day.sessions.length - 1 ? `#/session/${date}/${idx + 1}` : dayIdx >= 0 && dayIdx < state.days.length - 1 ? `#/session/${state.days[dayIdx + 1].date}/0` : null;
+
+  const bar = (label, v, color, lo = 0.4, hi = 1.8) => {
+    if (v == null) return "";
+    const f = Math.max(0, Math.min(1, (v - lo) / (hi - lo))), mid = (1 - lo) / (hi - lo);
+    return `<div class="sc-bar"><div class="sc-bar-h"><span>${label}</span><b class="${ratingClass(v)}">${f2(v)}</b></div>
+      <div class="sc-track"><i style="width:${f * 100}%;background:${color}"></i><span style="left:${mid * 100}%"></span></div></div>`;
+  };
+  const card = (p) => `
+    <div class="sc-card ${p.is_me ? "me" : ""}">
+      <div class="sc-name"><b>${esc(p.name)}</b>${p.is_me ? `<span class="sc-you">You</span>` : ""}<span class="grow"></span>
+        <span class="sc-wl"><span class="up">${p.wins}</span>:<span class="down">${p.maps - p.wins}</span></span></div>
+      ${bar("HLTV Rating 3.0", p.rating3, "var(--accent)")}
+      ${bar("T side", p.t_rating, "var(--t)")}
+      ${bar("CT side", p.ct_rating, "var(--ct)")}
+      <div class="sc-stats">
+        <div><b class="${gradeClass("rws", p.rws)}">${f1(p.rws)}</b><span>RWS</span></div>
+        <div><b>${f1(p.adr)}</b><span>ADR</span></div>
+        <div><b>${f2(p.kd)}</b><span>K/D</span></div>
+        <div><b>${fmtSwing(p.swing)}</b><span>Swing</span></div>
+      </div>
+      <div class="sc-maps">${p.results.map((r) => `<span class="${r.won ? "up" : "down"}" title="${esc(mapName(r.map))}">${r.won ? "W" : "L"}</span>`).join("")}</div>
+    </div>`;
+
+  // Full session scoreboard.
+  const COLS = [
+    ["name", "Player"], ["maps", "Maps"], ["wins", "W-L"], ["rating3", "HLTV 3.0"], ["rws", "RWS"], ["kills", "K"], ["deaths", "D"], ["assists", "A"],
+    ["diff", "+/-"], ["kd", "K/D"], ["adr", "ADR"], ["kr", "K/R"], ["kast", "KAST"], ["hs", "HS%"], ["k2", "2K"], ["k3", "3K"], ["k4", "4K"], ["k5", "5K"],
+    ["mvps", "MVPs"], ["entries", "Entries"], ["pistol", "Pistol kills"], ["eco", "Eco kills"], ["clutch", "Clutches"], ["swing", "Swing"],
+  ];
+  const val = (p, k) => ({
+    name: p.name.toLowerCase(), kills: p.c.kills || 0, deaths: p.c.deaths || 0, assists: p.c.assists || 0, diff: (p.c.kills || 0) - (p.c.deaths || 0),
+    k2: (p.c.multikill_rounds || [])[2] || 0, k3: (p.c.multikill_rounds || [])[3] || 0, k4: (p.c.multikill_rounds || [])[4] || 0, k5: (p.c.multikill_rounds || [])[5] || 0,
+    mvps: p.c.mvps || 0, entries: p.c.opening_kills || 0, pistol: p.c.pistol_kills || 0, eco: p.c.eco_kills || 0, clutch: sum(p.c.clutches_won || []),
+  }[k] ?? p[k] ?? 0);
+  const rows = players.filter((p) => sessionView.who === "everyone" || (sessionView.who === "teammates" ? p.mine > 0 : p.enemy > 0))
+    .sort((a, b) => {
+      const x = val(a, sessionView.sort), y = val(b, sessionView.sort);
+      return (typeof x === "string" ? x.localeCompare(y) : x - y) * (sessionView.desc ? -1 : 1);
+    });
+  const cell = (p, k) => {
+    switch (k) {
+      case "name": return `<td>${esc(p.name)}${p.is_me ? ` <span class="sc-you">You</span>` : ""}</td>`;
+      case "wins": return `<td>${p.wins}-${p.maps - p.wins}</td>`;
+      case "rating3": return `<td class="rating ${ratingClass(p.rating3)}">${f2(p.rating3)}</td>`;
+      case "rws": return `<td class="${gradeClass("rws", p.rws)}">${f1(p.rws)}</td>`;
+      case "diff": { const d = val(p, "diff"); return `<td class="${d > 0 ? "up" : d < 0 ? "down" : ""}">${d > 0 ? "+" : ""}${d}</td>`; }
+      case "kd": case "kr": return `<td>${f2(p[k])}</td>`;
+      case "adr": return `<td>${f1(p.adr)}</td>`;
+      case "kast": return `<td>${f1(p.kast)}%</td>`;
+      case "hs": return `<td>${Math.round(p.hs)}%</td>`;
+      case "clutch": return `<td>${val(p, "clutch")}/${sum(p.c.clutches_attempted || [])}</td>`;
+      case "swing": return `<td>${fmtSwing(p.swing)}</td>`;
+      default: return `<td>${val(p, k)}</td>`;
+    }
+  };
+  const statsOnly = summaries.length - withDemo.length;
+  view.innerHTML = `
+    <div class="sess-head">
+      <div class="sess-box"><span class="sess-w">${w}W</span><span class="sess-sep">:</span><span class="sess-l">${l}L</span><span class="sub">/ ${summaries.length} match${summaries.length === 1 ? "" : "es"}</span></div>
+      <div class="sess-box"><b>${fmtDate(date)}</b><span class="sub">${fmtTime(first.played_at)}–${fmtTime(last.played_at)} · ${minutes} min</span></div>
+      <span class="grow"></span>
+      ${prevSess ? `<a class="btn ghost" href="${prevSess}">◀ Previous session</a>` : ""}
+      ${nextSess ? `<a class="btn ghost" href="${nextSess}">Next session ▶</a>` : ""}
+    </div>
+    ${cards.length ? `<div class="sc-row">${cards.map(card).join("")}</div>` : `<div class="empty">No demos for this session yet.</div>`}
+    ${statsOnly ? `<div class="ml-note" style="margin:0 0 14px">${statsOnly} match${statsOnly === 1 ? "" : "es"} without a demo yet (FACEIT stats only) aren't in these totals. ${demoButton(missingDemos(summaries, 3650), "btn")}</div>` : ""}
+    <section class="fc-card" style="margin-bottom:20px">
+      <div class="fc-head"><div class="h3">Matches</div></div>
+      <div class="ml-grid ml-head"><div>Date</div><div>Score</div><div></div><div><span class="ic">${ICONS.rating}</span>HLTV 3.0</div><div>RWS</div><div>K/D/A</div><div>ADR</div><div>Map</div><div></div></div>
+      ${historyRows().filter((r) => sess.match_ids.includes(r.id)).sort((a, b) => a.when - b.when).map(historyRow).join("")}
+    </section>
+    <section class="panel">
+      <div class="panel-head"><div class="h3">Session scoreboard</div><span class="sub">all ${withDemo.length} match${withDemo.length === 1 ? "" : "es"} added up</span><span class="grow"></span>
+        <div class="seg" id="who">${[["teammates", "Teammates"], ["opponents", "Opponents"], ["everyone", "Everyone"]].map(([v, t]) => `<button data-v="${v}" class="${sessionView.who === v ? "on" : ""}">${t}</button>`).join("")}</div></div>
+      <div class="sc-table"><table class="sb">
+        <thead><tr>${COLS.map(([k, t]) => `<th data-sort="${k}" class="sortable ${sessionView.sort === k ? "on" : ""}">${t}${sessionView.sort === k ? (sessionView.desc ? " ▾" : " ▴") : ""}</th>`).join("")}</tr></thead>
+        <tbody>${rows.map((p) => `<tr class="${p.is_me ? "me" : p.party ? "party" : ""}">${COLS.map(([k]) => cell(p, k)).join("")}</tr>`).join("")}</tbody>
+      </table></div>
+      <div class="note">HLTV 3.0, RWS, ADR, KAST and Swing are per round, so session values weight each match by its rounds. Eco kills: on players with under $2,000 of equipment (not pistol rounds).</div>
+    </section>`;
+  view.querySelectorAll("#who button").forEach((b) => (b.onclick = () => { sessionView.who = b.dataset.v; renderSession(view, date, idx); }));
+  view.querySelectorAll("th[data-sort]").forEach((th) => (th.onclick = () => {
+    const k = th.dataset.sort;
+    sessionView.desc = sessionView.sort === k ? !sessionView.desc : k !== "name";
+    sessionView.sort = k;
+    renderSession(view, date, idx);
+  }));
+  view.querySelectorAll(".ml-row").forEach((row) => (row.onclick = (e) => {
+    const act = e.target.closest("[data-act]")?.dataset.act;
+    if (act === "room") return openFaceitRoom(row.dataset.room);
+    if (act === "demo") return getDemos([row.dataset.room]);
+    location.hash = act === "hl" ? `${row.dataset.href}/highlights` : row.dataset.href;
+  }));
+}
+
+// ---- lowlights ----------------------------------------------------------------------------------
+
+// Lowlight kinds and reasons, as the analysis names them.
+const LL_KINDS = [["all", "All"], ["back", "Missed back"], ["awp", "AWP"], ["scout", "Scout"], ["spray:rifle", "Rifle spray"], ["spray:smg", "SMG spray"], ["pistol:pistol", "Pistol"], ["pistol:deagle", "Deagle"]];
+const LL_REASONS = {
+  late_stop: ["Late counter-strafe", "movement"], moved_mid_spray: ["Moved mid-spray", "movement"], moving: ["Shooting on the move", "movement"],
+  jumping: ["Jump shot", "movement"], unscoped: ["Shot before scoping", "aim"], quickscope: ["Scope not settled", "aim"], spray: ["Spray control", "spray"], aim: ["Aim", "aim"], unlucky: ["Unlucky", "unlucky"], unknown: ["Missed", "unknown"],
+};
+const LL_GROUPS = [["movement", "Movement", "var(--t)"], ["spray", "Spray control", "#c084fc"], ["aim", "Aim", "#ff5252"], ["unlucky", "Unlucky", "#8a8f98"]];
+// What to practice for each reason (used by Practice later).
+const LL_TIPS = {
+  late_stop: "Counter-strafe drills: tap the opposite key and only fire once you've stopped.",
+  moved_mid_spray: "Hold still once a spray starts; if you need to move, stop shooting first.",
+  moving: "Stop before you shoot: counter-strafe, or walk-peek with the shift key.",
+  jumping: "Don't jump-shoot rifles; jump only to reposition.",
+  unscoped: "Scope in fully before you shoot; the AWP and Scout are only accurate once the zoom settles.",
+  quickscope: "Give the scope a split second (about 0.15 s) to settle before you click.",
+  spray: "Spray control: practice the first 10 bullets of the pattern against a wall, then on bots.",
+  aim: "Crosshair placement: pre-aim head height where enemies appear, so the first bullet needs no flick.",
+  unlucky: "Nothing mechanical to fix; it was spread.",
+};
+let ll = { kind: "all", reason: "all", source: "all", sort: "worst" };
+try { ll = { ...ll, ...JSON.parse(localStorage.getItem("veloxify.lowlights") || "{}") }; } catch (e) { /* defaults */ }
+
+function lowlightCard(l) {
+  const [reasonText, group] = LL_REASONS[l.reason] || LL_REASONS.unknown;
+  const groupColor = (LL_GROUPS.find((g) => g[0] === group) || [])[2] || "var(--muted)";
+  return `
+    <a class="ll-card" href="#/clips/lowlights/${encodeURIComponent(l.match_id)}/${encodeURIComponent(l.id)}">
+      <div class="ll-top"><span class="ll-dot" style="background:${groupColor}"></span><b>${esc(l.title)}</b><span class="grow"></span>
+        <span class="sub">${l.shots} shot${l.shots === 1 ? "" : "s"} · ${l.hits} hit${l.hits === 1 ? "" : "s"}</span></div>
+      <div class="ll-verdict">${esc(l.verdict)}</div>
+      <div class="tags">${(l.tags || []).map((t) => `<span class="tag ${t === reasonText ? "reason" : ""}">${esc(t)}</span>`).join("")}</div>
+      <div class="hl-meta"><span>${esc(mapName(l.map))} · ${l.score_mine}-${l.score_theirs}</span><span>${relDay(l.played_at.slice(0, 10))}</span><span>${esc(l.source_label || "")}</span><span>vs ${esc(l.killer_name || "")}</span></div>
+    </a>`;
+}
+
+function renderLowlightsTab(view) {
+  const all = state.index.lowlights || [];
+  const save = () => { try { localStorage.setItem("veloxify.lowlights", JSON.stringify(ll)); } catch (e) { /* not persisted */ } };
+  const sources = [...new Set(all.map((l) => l.source_label).filter(Boolean))].sort();
+  const kindOk = (l) => {
+    if (ll.kind === "all") return true;
+    const [kind, cls] = ll.kind.split(":");
+    return l.kind === kind && (!cls || l.weapon_class === cls);
+  };
+  const list = all.filter((l) => kindOk(l) && (ll.reason === "all" || (LL_REASONS[l.reason] || [])[1] === ll.reason) && (ll.source === "all" || l.source_label === ll.source))
+    .sort((a, b) => (ll.sort === "worst" ? b.severity - a.severity || b.played_ts - a.played_ts : b.played_ts - a.played_ts));
+  // Why you lose duels: reasons over the last 30 days.
+  const recent = all.filter((l) => l.played_ts > Date.now() / 1000 - 30 * DAY_S);
+  const counts = LL_GROUPS.map(([g]) => recent.filter((l) => (LL_REASONS[l.reason] || [])[1] === g).length);
+  const total = sum(counts) || 1;
+  const topReasons = Object.entries(recent.reduce((acc, l) => ((acc[l.reason] = (acc[l.reason] || 0) + 1), acc), {})).sort((a, b) => b[1] - a[1]);
+  const seg = (key, opts) => `<div class="seg" data-lkey="${key}">${opts.map(([v, label]) => `<button data-v="${v}" class="${ll[key] === v ? "on" : ""}">${label}</button>`).join("")}</div>`;
+  view.innerHTML = `
+    <section class="panel" style="margin-bottom:20px">
+      <div class="panel-head"><div class="h3">Why you lose duels</div><span class="sub">last 30 days · ${recent.length} lowlight${recent.length === 1 ? "" : "s"}</span></div>
+      ${recent.length ? `
+      <div class="why-bar">${LL_GROUPS.map(([g, , c], i) => counts[i] ? `<i style="width:${(100 * counts[i]) / total}%;background:${c}" title="${counts[i]} ${g}"></i>` : "").join("")}</div>
+      <div class="why-legend">${LL_GROUPS.map(([g, label, c], i) => `<span><i style="background:${c}"></i><b>${Math.round((100 * counts[i]) / total)}%</b> ${label}</span>`).join("")}</div>
+      ${topReasons.length && topReasons[0][0] !== "unknown" ? `<div class="why-tip"><b>Work on first:</b> ${esc((LL_REASONS[topReasons[0][0]] || [""])[0])} (${topReasons[0][1]} of ${recent.length}). ${esc(LL_TIPS[topReasons[0][0]] || "")}</div>` : ""}`
+      : `<div class="fc-msg">No lowlights in the last 30 days.</div>`}
+    </section>
+    <section class="panel browser">
+      <div class="controls">
+        ${seg("kind", LL_KINDS)}
+        <label>Reason <select id="ll-reason"><option value="all">All</option>${LL_GROUPS.map(([g, label]) => `<option value="${g}" ${ll.reason === g ? "selected" : ""}>${label}</option>`).join("")}</select></label>
+        <label>Source <select id="ll-source"><option value="all">All</option>${sources.map((s) => `<option value="${esc(s)}" ${ll.source === s ? "selected" : ""}>${esc(s)}</option>`).join("")}</select></label>
+        <span class="grow"></span>
+        ${seg("sort", [["worst", "Worst first"], ["recent", "Newest"]])}
+      </div>
+      <div class="browser-body">${list.length ? `<div class="ll-grid">${list.map(lowlightCard).join("")}</div>` : `<div class="empty">No lowlights match these filters.</div>`}</div>
+    </section>`;
+  view.querySelectorAll(".seg[data-lkey]").forEach((el) => el.querySelectorAll("button").forEach((b) => (b.onclick = () => { ll[el.dataset.lkey] = b.dataset.v; save(); renderLowlightsTab(view); })));
+  view.querySelector("#ll-reason").onchange = (e) => { ll.reason = e.target.value; save(); renderLowlightsTab(view); };
+  view.querySelector("#ll-source").onchange = (e) => { ll.source = e.target.value; save(); renderLowlightsTab(view); };
+}
+
+// One lowlight: where every bullet went (his view), your speed at each shot, and the verdict.
+async function renderLowlight(view, matchId, id) {
+  const m = await loadMatch(matchId, true);
+  const l = (m.lowlights || []).find((x) => x.id === id);
+  if (!l) { view.innerHTML = `<div class="empty">That lowlight isn't in this match any more.</div>`; return; }
+  const [reasonText, group] = LL_REASONS[l.reason] || LL_REASONS.unknown;
+  const groupColor = (LL_GROUPS.find((g) => g[0] === group) || [])[2] || "var(--muted)";
+  const shots = l.shot_details || [];
+  const VCOL = { hit: "#2fd36f", unscoped: "#ff5252", quickscope: "#ff5252", moving: "var(--t)", jumping: "var(--t)", aim: "#ff5252", high: "#c084fc", low: "#c084fc", drift: "#c084fc", spread: "#8a8f98", "": "#8a8f98" };
+  const VTEXT = { hit: "Hit", unscoped: "Not scoped in", quickscope: "Fired before the scope settled", moving: "Moving", jumping: "In the air", aim: "Aim off", high: "Over his head (didn't pull down)", low: "Under him (pulled too far)", drift: "Drifted sideways", spread: "On him; spread missed", "": "No tick data" };
+  // Target view (his view at his distance), in cm around his head.
+  const pts = shots.filter((s) => s.off_x_cm != null);
+  const extent = Math.min(420, Math.max(110, ...pts.map((s) => Math.max(Math.abs(s.off_x_cm), Math.abs(s.off_y_cm) * 0.8)).map((v) => v * 1.15)));
+  const W = 320, H = 300, sc = (W / 2 - 14) / extent, cx = W / 2, cy = 96;
+  const X = (x) => cx + x * sc, Y = (y) => cy - y * sc;
+  const clampX = (x) => Math.max(10, Math.min(W - 10, x)), clampY = (y) => Math.max(10, Math.min(H - 10, y));
+  const body = `
+    <circle cx="${X(0)}" cy="${Y(0)}" r="${13 * sc}" class="tg-body"/>
+    <rect x="${X(-24)}" y="${Y(-18)}" width="${48 * sc}" height="${80 * sc}" rx="${8 * sc}" class="tg-body"/>
+    <rect x="${X(-20)}" y="${Y(-98)}" width="${17 * sc}" height="${70 * sc}" rx="${5 * sc}" class="tg-body"/>
+    <rect x="${X(3)}" y="${Y(-98)}" width="${17 * sc}" height="${70 * sc}" rx="${5 * sc}" class="tg-body"/>`;
+  const dots = pts.map((s) => {
+    const x = clampX(X(s.off_x_cm)), y = clampY(Y(s.off_y_cm));
+    return `<g class="tg-shot" data-tip="Bullet ${s.bullet}: ${esc(VTEXT[s.verdict] || s.verdict)} · ${s.speed != null ? Math.round(s.speed) + " u/s" : ""}">
+      <circle cx="${x}" cy="${y}" r="9" fill="${VCOL[s.verdict] || "#8a8f98"}"/><text x="${x}" y="${y + 4}" text-anchor="middle">${s.bullet}</text></g>`;
+  }).join("");
+  // Speed at each shot vs the speed below which the gun is accurate.
+  const SW = 420, SH = 210, pad = 34;
+  const maxSpeed = Math.max(250, ...shots.map((s) => s.speed || 0));
+  const tMax = Math.max(0.5, ...shots.map((s) => s.t)) + 0.1;
+  const sx = (t) => pad + ((tMax - t) / tMax) * (SW - pad - 10), sy = (v) => SH - 24 - (v / maxSpeed) * (SH - 44);
+  const acc = shots[0]?.accurate_speed || 70;
+  const speedPath = shots.filter((s) => s.speed != null).map((s, i) => `${i ? "L" : "M"}${sx(s.t).toFixed(1)},${sy(s.speed).toFixed(1)}`).join(" ");
+  const speedDots = shots.filter((s) => s.speed != null).map((s) => `<circle cx="${sx(s.t)}" cy="${sy(s.speed)}" r="5.5" fill="${VCOL[s.verdict] || "#8a8f98"}"><title>Bullet ${s.bullet}: ${Math.round(s.speed)} u/s</title></circle>`).join("");
+  const where = (s) => {
+    if (s.off_x_cm == null) return "–";
+    const h = Math.abs(s.off_x_cm) >= 3 ? `${Math.round(Math.abs(s.off_x_cm))} cm ${s.off_x_cm > 0 ? "right" : "left"}` : "";
+    const v = Math.abs(s.off_y_cm) >= 3 ? `${Math.round(Math.abs(s.off_y_cm))} cm ${s.off_y_cm > 0 ? "above" : "below"}` : "";
+    return [h, v].filter(Boolean).join(", ") || "on his head";
+  };
+  view.innerHTML = `
+    <a class="day-back" href="#/clips/lowlights">◀ Lowlights</a>
+    <section class="panel">
+      <div class="panel-head" style="flex-wrap:wrap">
+        <div class="h3">${esc(l.title)}</div>
+        <span class="ll-chip" style="--c:${groupColor}">${esc(reasonText)}</span>
+        <span class="sub">${esc(mapName(m.map))} · ${m.score_mine}-${m.score_theirs} · ${relDay(m.played_at.slice(0, 10))} · vs ${esc(l.killer_name)}${l.distance_m ? ` · ${Math.round(l.distance_m)} m` : ""}</span>
+        <span class="grow"></span>
+        ${l.clip ? `<button class="btn primary" id="ll-watch">${ICONS.star.replace("currentColor", "currentColor")} Watch</button>`
+          : tauri ? `<button class="btn primary" id="ll-render" title="Veloxify renders it in the background as soon as CS2 is free">Render clip</button>` : ""}
+        <a class="btn ghost" href="#/day/${m.played_at.slice(0, 10)}/m/${encodeURIComponent(matchId)}/lowlights">Open match</a>
+        ${tauri ? `<button class="btn ghost" id="ll-delete">Delete</button>` : ""}
+      </div>
+      <div class="ll-verdict big">${esc(l.verdict)}</div>
+      ${LL_TIPS[l.reason] ? `<div class="why-tip"><b>Work on:</b> ${esc(LL_TIPS[l.reason])} <a class="link" href="#/practice">Practice this</a></div>` : ""}
+      <div class="ll-panels">
+        <div class="ll-panel">
+          <div class="h2">Where your bullets went · his view${l.distance_m ? `, ${Math.round(l.distance_m)} m` : ""}</div>
+          ${pts.length ? `<svg viewBox="0 0 ${W} ${H}" class="tg" role="img" aria-label="Where each bullet went relative to his body">
+            <line x1="${cx}" y1="0" x2="${cx}" y2="${H}" class="tg-axis"/><line x1="0" y1="${cy}" x2="${W}" y2="${cy}" class="tg-axis"/>
+            ${body}${dots}</svg>
+            <div class="sub">Dot = where your crosshair plus recoil pointed for that bullet. Off-screen bullets sit on the edge.</div>`
+            : `<div class="fc-msg">No aim data for this one.</div>`}
+        </div>
+        <div class="ll-panel">
+          <div class="h2">Your speed at each shot</div>
+          <svg viewBox="0 0 ${SW} ${SH}" class="sp" role="img" aria-label="Your speed at each shot against the accurate speed">
+            <line x1="${pad}" x2="${SW - 6}" y1="${sy(acc)}" y2="${sy(acc)}" class="sp-acc"/>
+            <text x="${pad + 4}" y="${sy(acc) + 12}" class="sp-acc-t">accurate below ${Math.round(acc)} u/s</text>
+            <line x1="${pad}" x2="${SW - 6}" y1="${SH - 24}" y2="${SH - 24}" class="sp-base"/>
+            <text x="${pad - 6}" y="${sy(maxSpeed) + 4}" text-anchor="end" class="sp-ax">${Math.round(maxSpeed)}</text>
+            <text x="${pad - 6}" y="${SH - 20}" text-anchor="end" class="sp-ax">0</text>
+            <text x="${SW - 6}" y="${SH - 6}" text-anchor="end" class="sp-ax">you die</text>
+            <path d="${speedPath}" class="sp-line"/>${speedDots}
+          </svg>
+        </div>
+      </div>
+      <div class="ll-legend">${[["hit", "Hit"], ["moving", "Moving / jumping"], ["high", "Spray off"], ["aim", "Aim off"], ["spread", "On him, spread"]].map(([k, t]) => `<span><i style="background:${VCOL[k]}"></i>${t}</span>`).join("")}</div>
+      <table class="sb ll-shots">
+        <thead><tr><th>Bullet</th><th>Before death</th><th>Speed</th><th>Where it went</th><th>Verdict</th></tr></thead>
+        <tbody>${shots.map((s) => `<tr><td>${s.bullet}</td><td>${s.t.toFixed(2)} s</td>
+          <td class="${s.speed != null && s.speed > s.accurate_speed ? "loss-text" : ""}">${s.speed != null ? Math.round(s.speed) + " u/s" : "–"}</td>
+          <td>${esc(where(s))}</td><td><span class="ll-dot" style="background:${VCOL[s.verdict] || "#8a8f98"}"></span> ${esc(VTEXT[s.verdict] || s.verdict)}</td></tr>`).join("")}</tbody>
+      </table>
+      <div class="note">Speeds and angles come from the demo at 64 ticks a second; CS2 fires between ticks, so treat degrees and milliseconds as close, not exact.</div>
+    </section>`;
+  const watch = view.querySelector("#ll-watch");
+  if (watch) watch.onclick = () => { state.playlist = [{ ...l, name: "You", match: { map: m.map } }]; play(0); };
+  const rend = view.querySelector("#ll-render");
+  if (rend) rend.onclick = () => {
+    tauri.core.invoke("render_clips", { items: [[matchId, l.id]] });
+    rend.disabled = true;
+    rend.textContent = "Queued: renders when CS2 is free";
+  };
+  const del = view.querySelector("#ll-delete");
+  if (del) del.onclick = async () => {
+    if (confirm("Delete this lowlight for good?")) { await tauri.core.invoke("delete_clips", { ids: [l.id] }); location.hash = "#/clips/lowlights"; }
+  };
+  const tip = document.createElement("div");
+  tip.className = "tooltip"; tip.hidden = true;
+  const svg = view.querySelector(".tg");
+  if (svg) {
+    svg.parentElement.style.position = "relative";
+    svg.parentElement.appendChild(tip);
+    svg.querySelectorAll(".tg-shot").forEach((g) => {
+      g.addEventListener("mouseenter", () => { tip.textContent = g.dataset.tip; tip.hidden = false; });
+      g.addEventListener("mousemove", (e) => { const r = svg.parentElement.getBoundingClientRect(); tip.style.left = `${e.clientX - r.left + 12}px`; tip.style.top = `${e.clientY - r.top - 28}px`; });
+      g.addEventListener("mouseleave", () => { tip.hidden = true; });
+    });
+  }
+}
+
+// ---- clips: highlights, lowlights, montages ------------------------------------------------------
+
+function renderClips(view, sub) {
+  const tabs = [["highlights", "Highlights", (state.index.highlights || []).length], ["lowlights", "Lowlights", (state.index.lowlights || []).length], ["montages", "Montages", null]];
+  view.innerHTML = `
+    <div class="clips-head">
+      <div class="h1">Clips</div>
+      <nav class="subtabs">${tabs.map(([k, t, n]) => `<a href="#/clips/${k}" class="${sub === k ? "on" : ""}">${t}${n != null ? ` <span class="sub">${n}</span>` : ""}</a>`).join("")}</nav>
+    </div>
+    <div id="clips-body"></div>`;
+  const body = view.querySelector("#clips-body");
+  if (sub === "lowlights") return renderLowlightsTab(body);
+  if (sub === "montages") return renderMontages(body);
+  return renderHighlightsTab(body);
+}
+
+// Montages are coming: pick a folder or preset, order the clips, add music and transitions, and
+// Veloxify renders one video. For now, this shows what you can build them from.
+function renderMontages(view) {
+  const folders = state.curation?.folders || [];
+  const hl = state.index.highlights || [];
+  view.innerHTML = `
+    <section class="panel montage-soon">
+      <div class="panel-head"><div class="h3">Montages</div><span class="pr-sug">Coming soon</span></div>
+      <div class="fc-msg">Turn a folder or a preset into one edited video: order the clips, pick transitions and music, add an intro card, and Veloxify renders it in the background like any other clip.
+      Until then, <b>Export for montage</b> on a folder copies its clips, in order, to <code>Videos\\Veloxify</code> for your own editor.</div>
+      <div class="montage-sources">
+        ${folders.map((f) => `<div class="montage-src"><b>${esc(f.name)}</b><span class="sub">${f.items.length} clip${f.items.length === 1 ? "" : "s"} · folder</span><button class="btn" disabled>Make montage</button></div>`).join("")}
+        ${PRESETS.map(([k, label, fn]) => `<div class="montage-src"><b>${esc(label)}</b><span class="sub">${hl.filter(fn).filter(playable).length} clips · preset</span><button class="btn" disabled>Make montage</button></div>`).join("")}
+      </div>
+    </section>`;
 }
 
 // ---- highlights tab ---------------------------------------------------------------------------
@@ -891,13 +1363,32 @@ function inWhen(h) {
   }
 }
 
+// Ready-made collections of your best moments by kind.
+const PRESETS = [
+  ["pistol", "Best pistol rounds", (h) => h.pistol_round],
+  ["deag", "One-deags", (h) => h.weapon_class === "deagle" && h.headshots > 0],
+  ["awp", "AWP", (h) => h.weapon_class === "awp"],
+  ["clutch", "Clutches", (h) => h.clutch_vs > 0],
+  ["rifle", "Rifle multi-kills", (h) => h.weapon_class === "rifle" && h.kills >= 2],
+  ["entry", "Entries", (h) => h.entry],
+];
+const sourceLabel = (h) => h.source_label || (h.source === "valve" ? "Premier" : h.source === "faceit" ? "FACEIT" : "Other");
+const folderOf = (id) => (state.curation?.folders || []).find((f) => f.id === id);
+
 function filtered() {
+  const folder = browser.folder ? folderOf(browser.folder) : null;
+  const preset = PRESETS.find((p) => p[0] === browser.preset);
   let list = state.index.highlights.filter((h) =>
-    inWhen(h) && (browser.source === "all" || h.source === browser.source) && (browser.map === "all" || h.map === browser.map)
+    (!folder || folder.items.includes(h.id))
+    && inWhen(h) && (browser.source === "all" || sourceLabel(h) === browser.source) && (browser.map === "all" || h.map === browser.map)
     && (!browser.types.length || TYPE_FILTERS.some(([k, , f]) => browser.types.includes(k) && f(h)))
+    && (!preset || preset[2](h))
+    && browser.tags.every((t) => h.tags.includes(t))
     && (!browser.playableOnly || playable(h)));
   const best = (a, b) => b.hand - a.hand || b.score - a.score;
-  if (browser.sort === "best") list.sort(best);
+  if (folder) return list.sort((a, b) => folder.items.indexOf(a.id) - folder.items.indexOf(b.id));
+  if (browser.preset === "clutch") list.sort((a, b) => b.clutch_vs - a.clutch_vs || best(a, b));
+  else if (browser.sort === "best") list.sort(best);
   else if (browser.sort === "newest") list.sort((a, b) => b.played_ts - a.played_ts || best(a, b));
   else list.sort((a, b) => a.played_ts - b.played_ts || a.round - b.round);
   return list;
@@ -917,7 +1408,8 @@ function cardHtml(h, big = false) {
       <div class="hl-thumb" style="--map-bg:${mapColor(h.map)};${h.thumb ? `background-image:url('${assetUrl(h.thumb)}')` : ""}">
         ${h.clip ? `<span class="play">▶</span>` : `<span class="state">${h.render_error ? "Demo too old to replay" : "Rendering…"}</span>`}
         <span class="dur">${fmtClip(h.duration_s)}</span>
-        <span class="src-chip src ${h.source}">${h.source === "valve" ? "PREMIER" : h.source.toUpperCase()}</span>
+        <span class="src-chip src ${h.source}">${esc(sourceLabel(h).toUpperCase())}</span>
+        ${tauri ? `<button class="card-menu" data-menu="${esc(h.id)}" title="Folders and delete" aria-label="More">⋯</button>` : ""}
       </div>
       <div class="hl-info">
         <div class="hl-title">${esc(h.title)}</div>
@@ -927,10 +1419,54 @@ function cardHtml(h, big = false) {
     </div>`;
 }
 
+// The ⋯ menu on a clip: add to a folder (or a new one), remove from this folder, delete.
+function wireCardMenus(view, inFolder) {
+  view.querySelectorAll("[data-menu]").forEach((b) => (b.onclick = (e) => {
+    e.stopPropagation();
+    document.querySelectorAll(".menu-pop").forEach((m) => m.remove());
+    const id = b.dataset.menu;
+    const folders = state.curation?.folders || [];
+    const pop = document.createElement("div");
+    pop.className = "menu-pop";
+    pop.innerHTML = `
+      <div class="menu-h">Add to folder</div>
+      ${folders.map((f) => `<button data-add="${esc(f.id)}" ${f.items.includes(id) ? "disabled" : ""}>${esc(f.name)}${f.items.includes(id) ? " ✓" : ""}</button>`).join("")}
+      <button data-new>+ New folder…</button>
+      ${inFolder ? `<hr><button data-remove>Remove from “${esc(inFolder.name)}”</button>` : ""}
+      <hr><button data-delete class="danger">Delete clip…</button>`;
+    document.body.appendChild(pop);
+    const r = b.getBoundingClientRect();
+    pop.style.left = `${Math.min(r.left, window.innerWidth - 240)}px`;
+    pop.style.top = `${r.bottom + 4 + window.scrollY}px`;
+    pop.onclick = async (ev) => {
+      ev.stopPropagation();
+      const t = ev.target.closest("button");
+      if (!t || t.disabled) return;
+      pop.remove();
+      if (t.dataset.add) await tauri.core.invoke("edit_folder", { id: t.dataset.add, add: [id] });
+      else if (t.hasAttribute("data-new")) {
+        const name = prompt("New folder name:");
+        if (name && name.trim()) await tauri.core.invoke("create_folder", { name, items: [id] });
+      } else if (t.hasAttribute("data-remove")) await tauri.core.invoke("edit_folder", { id: inFolder.id, remove: [id] });
+      else if (t.hasAttribute("data-delete")) {
+        if (confirm("Delete this clip for good? Its video file is removed and it won't be rendered again.")) await tauri.core.invoke("delete_clips", { ids: [id] });
+      }
+    };
+    setTimeout(() => document.addEventListener("click", () => pop.remove(), { once: true }), 0);
+  }));
+}
+
 function renderHighlightsTab(view) {
   const hero = heroPicks();
   const list = filtered();
   const maps = [...new Set(state.index.highlights.map((h) => h.map))].sort();
+  const sources = [...new Set(state.index.highlights.map(sourceLabel))].sort((a, b) => (a === "FACEIT" ? -1 : b === "FACEIT" ? 1 : a.localeCompare(b)));
+  const tagCounts = {};
+  for (const h of state.index.highlights) for (const t of h.tags) tagCounts[t] = (tagCounts[t] || 0) + 1;
+  const topTags = Object.entries(tagCounts).sort((a, b) => b[1] - a[1]).slice(0, 18).map(([t]) => t);
+  for (const t of browser.tags) if (!topTags.includes(t)) topTags.push(t);
+  const folders = state.curation?.folders || [];
+  const folder = browser.folder ? folderOf(browser.folder) : null;
   const seg = (key, opts) => `<div class="seg" data-key="${key}">${opts.map(([v, label]) =>
     `<button data-v="${v}" class="${browser[key] === v ? "on" : ""}">${label}</button>`).join("")}</div>`;
   const heroLabel = { week: "this week", month: "this month", all: "ever" }[browser.heroPeriod];
@@ -966,8 +1502,20 @@ function renderHighlightsTab(view) {
         <label>Sort ${seg("sort", [["best", "Best"], ["newest", "Newest"], ["oldest", "Oldest"]])}</label>
         <label>When ${seg("when", [["session", "Last session"], ["7d", "7 days"], ["30d", "30 days"], ["all", "All time"], ["custom", "Dates"]])}</label>
         ${browser.when === "custom" ? `<span class="dates"><input type="date" id="from" value="${browser.from}"> – <input type="date" id="to" value="${browser.to}"></span>` : ""}
-        <label>Source ${seg("source", [["all", "All"], ["faceit", "FACEIT"], ["valve", "Premier"]])}</label>
+        <label>Source <select id="source"><option value="all">All</option>${sources.map((s) => `<option value="${esc(s)}" ${browser.source === s ? "selected" : ""}>${esc(s)}</option>`).join("")}</select></label>
         <label>Map <select id="map"><option value="all">All maps</option>${maps.map((m) => `<option value="${m}" ${browser.map === m ? "selected" : ""}>${esc(mapName(m))}</option>`).join("")}</select></label>
+      </div>
+      <div class="controls folders-bar">
+        <span class="h2">Folders</span>
+        <button class="chip ${!folder ? "on" : ""}" data-folder="">All highlights</button>
+        ${folders.map((f) => `<button class="chip ${folder?.id === f.id ? "on" : ""}" data-folder="${esc(f.id)}">${esc(f.name)} <span class="sub">${f.items.length}</span></button>`).join("")}
+        ${tauri ? `<button class="chip" id="new-folder">+ New folder</button>` : ""}
+        ${folder && tauri ? `<span class="grow"></span><button class="btn" id="export-folder" title="Copies the clips, in order, to Videos\\Veloxify\\${esc(folder.name)}">Export for montage</button>
+          <button class="btn ghost" id="rename-folder">Rename</button><button class="btn ghost" id="delete-folder">Delete folder</button>` : ""}
+      </div>
+      <div class="controls">
+        <span class="h2">Presets</span>
+        <div class="chips">${PRESETS.map(([k, label]) => `<button class="chip ${browser.preset === k ? "on" : ""}" data-preset="${k}">${label}</button>`).join("")}</div>
       </div>
       <div class="controls">
         <div class="chips">${TYPE_FILTERS.map(([k, label]) => `<button class="chip ${browser.types.includes(k) ? "on" : ""}" data-type="${k}">${label}</button>`).join("")}</div>
@@ -975,6 +1523,10 @@ function renderHighlightsTab(view) {
         <span class="grow"></span>
         <span class="sub">${list.length} highlight${list.length === 1 ? "" : "s"}</span>
         <button class="btn ghost" id="reset">Reset filters</button>
+      </div>
+      <div class="controls">
+        <span class="h2">Tags</span>
+        <div class="chips">${topTags.map((t) => `<button class="chip ${browser.tags.includes(t) ? "on" : ""}" data-tag="${esc(t)}">${esc(t)}</button>`).join("")}</div>
       </div>
       <div class="browser-body">${list.length ? grid : `<div class="empty">Nothing matches these filters.</div>`}</div>
     </section>`;
@@ -987,8 +1539,34 @@ function renderHighlightsTab(view) {
     rerender();
   }));
   view.querySelector("#map").onchange = (e) => { browser.map = e.target.value; rerender(); };
+  view.querySelector("#source").onchange = (e) => { browser.source = e.target.value; rerender(); };
+  view.querySelectorAll("[data-preset]").forEach((b) => (b.onclick = () => { browser.preset = browser.preset === b.dataset.preset ? "" : b.dataset.preset; rerender(); }));
+  view.querySelectorAll("[data-tag]").forEach((b) => (b.onclick = () => {
+    const t = b.dataset.tag;
+    browser.tags = browser.tags.includes(t) ? browser.tags.filter((x) => x !== t) : [...browser.tags, t];
+    rerender();
+  }));
+  view.querySelectorAll("[data-folder]").forEach((b) => (b.onclick = () => { browser.folder = b.dataset.folder; rerender(); }));
+  const nf = view.querySelector("#new-folder");
+  if (nf) nf.onclick = async () => {
+    const name = prompt("Folder name (e.g. Best moments, ESEA S60 montage):");
+    if (name && name.trim()) { browser.folder = await tauri.core.invoke("create_folder", { name, items: [] }); saveBrowser(); }
+  };
+  const ex = view.querySelector("#export-folder");
+  if (ex) ex.onclick = async () => {
+    ex.disabled = true;
+    try { const [, n] = await tauri.core.invoke("export_folder", { id: folder.id }); ex.textContent = `Exported ${n} clip${n === 1 ? "" : "s"}`; }
+    catch (err) { ex.textContent = `Export failed: ${err}`; }
+  };
+  const rn = view.querySelector("#rename-folder");
+  if (rn) rn.onclick = () => { const name = prompt("Rename folder:", folder.name); if (name && name.trim()) tauri.core.invoke("edit_folder", { id: folder.id, name }); };
+  const df = view.querySelector("#delete-folder");
+  if (df) df.onclick = () => {
+    if (confirm(`Delete the folder "${folder.name}"? The clips stay in your library.`)) { browser.folder = ""; saveBrowser(); tauri.core.invoke("edit_folder", { id: folder.id, delete: true }); }
+  };
+  wireCardMenus(view, folder);
   view.querySelector("#playable").onchange = (e) => { browser.playableOnly = e.target.checked; rerender(); };
-  view.querySelector("#reset").onclick = () => { browser = { ...BROWSER_DEFAULTS, heroPeriod: browser.heroPeriod }; rerender(); };
+  view.querySelector("#reset").onclick = () => { browser = { ...BROWSER_DEFAULTS, heroPeriod: browser.heroPeriod, folder: browser.folder }; rerender(); };
   for (const id of ["from", "to"]) {
     const el = view.querySelector(`#${id}`);
     if (el) el.onchange = (e) => { browser[id] = e.target.value; rerender(); };
@@ -1009,19 +1587,30 @@ function renderHighlightsTab(view) {
 
 // Theme presets (colors mirror styles.css; used for the swatches) and the saved choice.
 const THEMES = [
-  { id: "faceit", name: "FACEIT dark", bg: "#0f0f0f", card: "#1c1c1c", accent: "#ff5500" },
+  { id: "faceit", name: "Dark", bg: "#0f0f0f", card: "#1c1c1c", accent: "#1ea7e1" },
   { id: "purple", name: "Purple", bg: "#121019", card: "#211d2e", accent: "#8b5cf6" },
   { id: "csgo", name: "CS:GO classic", bg: "#16191c", card: "#252a2f", accent: "#e9a93a" },
   { id: "cs2", name: "CS2 slate", bg: "#12161b", card: "#222a33", accent: "#7fb2e8" },
-  { id: "oled", name: "Pure black", bg: "#000000", card: "#121212", accent: "#ff5500" },
+  { id: "oled", name: "Pure black", bg: "#000000", card: "#121212", accent: "#1ea7e1" },
 ];
+// Dark text on light accents, white on dark ones.
+function onAccent(hex) {
+  const n = parseInt(hex.slice(1), 16), c = [(n >> 16) & 255, (n >> 8) & 255, n & 255].map((v) => { v /= 255; return v <= 0.04 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; });
+  return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2] > 0.3 ? "#04121a" : "#ffffff";
+}
 function loadTheme() {
   try { return { preset: "faceit", accent: "", ...JSON.parse(localStorage.getItem("veloxify.theme") || "{}") }; } catch (e) { return { preset: "faceit", accent: "" }; }
 }
 function applyTheme(t) {
   const el = document.documentElement;
   if (t.preset && t.preset !== "faceit") el.dataset.theme = t.preset; else delete el.dataset.theme;
-  if (t.accent) el.style.setProperty("--accent", t.accent); else el.style.removeProperty("--accent");
+  if (t.accent) {
+    el.style.setProperty("--accent", t.accent);
+    el.style.setProperty("--on-accent", onAccent(t.accent));
+  } else {
+    el.style.removeProperty("--accent");
+    el.style.removeProperty("--on-accent");
+  }
   try { localStorage.setItem("veloxify.theme", JSON.stringify(t)); } catch (e) { /* applies for this session only */ }
 }
 
@@ -1091,6 +1680,7 @@ async function renderSettings(view) {
         ${row("Steam", steamid ? `${esc(settingsData.steam_name || "Logged-in account")} · ${steamid}` : "Log in to Steam so Veloxify knows whose highlights to make.", "")}
         <div id="faceit-account">${faceitAccountRow()}</div>
         ${row("Use FACEIT data", "Level, ELO and your full FACEIT match list, found from your Steam account. No login or API key.", sw("faceit_enabled", s.faceit_enabled))}
+        ${row("FACEIT demos", "FACEIT only gives demos to a signed-in account and checks a person clicked download. Sign in once in Veloxify's FACEIT window (your password goes to FACEIT only); after that, Get demo is one click per match.", tauri ? `<button class="btn" id="faceit-window">Open FACEIT window</button>` : "")}
         ${row("FACEIT nickname", "Only needed if your account isn't found automatically.", `<input type="text" data-key="faceit_nickname" value="${esc(s.faceit_nickname)}" placeholder="Found automatically" ${tauri ? "" : "disabled"}>`)}
       </section>
       ${appearancePanel()}
@@ -1117,7 +1707,8 @@ async function renderSettings(view) {
         <div class="sub" style="padding:0 20px 8px">New demos in these folders are imported automatically.</div>
         ${folders}
         <div class="panel-head" style="border-top:1px solid var(--line);margin-top:12px"><div class="h3">App</div></div>
-        ${row("Library", `${settingsData.clips} clips · ${fmtBytes(settingsData.clip_bytes)}`, tauri ? `<button class="btn" id="open-lib">Open folder</button>` : "")}
+        ${row("Library", "Clips, match data and saved demos.", tauri ? `<button class="btn" id="open-lib">Open folder</button>` : "")}
+        <div id="storage"></div>
         ${row("Start with Windows", "Starts in the tray, ready to process your games. It never runs anything while CS2 is open.", sw("start_with_windows", s.start_with_windows))}
       </section>
     </div>`;
@@ -1150,7 +1741,36 @@ async function renderSettings(view) {
     }
   };
   view.querySelector("#open-lib").onclick = () => tauri.core.invoke("open_library");
+  renderStorage(view.querySelector("#storage"));
+  view.querySelector("#faceit-window").onclick = () => tauri.core.invoke("open_faceit_window");
   wireFaceitRefresh();
+}
+
+// How much space each kind of file takes, and the limits that keep it in check.
+async function renderStorage(el) {
+  const u = await tauri.core.invoke("storage_usage");
+  const s = settingsData.settings;
+  const total = u.highlight_bytes + u.lowlight_bytes + u.demo_bytes + u.data_bytes || 1;
+  const parts = [["Highlight clips", u.highlight_bytes, u.highlight_clips, "var(--accent)"], ["Lowlight clips", u.lowlight_bytes, u.lowlight_clips, "#c084fc"],
+    ["Saved demos", u.demo_bytes, u.demos, "var(--t)"], ["Match data", u.data_bytes, null, "#8a8f98"]];
+  el.innerHTML = `
+    <div class="set-row" style="display:block">
+      <div class="lbl"><b>Storage · ${fmtBytes(total)}</b></div>
+      <div class="why-bar" style="margin:10px 0">${parts.map(([, b, , c]) => (b ? `<i style="width:${(100 * b) / total}%;background:${c}"></i>` : "")).join("")}</div>
+      <div class="why-legend" style="padding:0">${parts.map(([l, b, n, c]) => `<span><i style="background:${c}"></i>${l}: <b>${fmtBytes(b)}</b>${n != null ? ` · ${n}` : ""}</span>`).join("")}</div>
+    </div>
+    <div class="set-row"><div class="lbl"><b>Limit for clips</b><span>Over the limit, the oldest clips go first; clips in a folder are never removed. Removed clips can be rendered again. 0 = no limit.</span></div>
+      <input type="number" min="0" step="1" data-key="max_clips_gb" value="${s.max_clips_gb || 0}"> GB</div>
+    <div class="set-row"><div class="lbl"><b>Limit for saved demos</b><span>Demos Veloxify saved from its FACEIT window; the oldest go first (never ones from the last day). Your Downloads folder is never touched. 0 = no limit.</span></div>
+      <input type="number" min="0" step="1" data-key="max_demos_gb" value="${s.max_demos_gb || 0}"> GB</div>
+    <div class="set-row"><div class="lbl"><b>Clean up now</b><span>Applies the limits right away (also happens automatically after each session).</span></div>
+      <button class="btn" id="cleanup">Clean up</button></div>`;
+  el.querySelectorAll("input[type=number]").forEach((i) => (i.onchange = () => { settingsData.settings[i.dataset.key] = Number(i.value) || 0; saveSettings(); }));
+  el.querySelector("#cleanup").onclick = async (e) => {
+    const [c, d] = await tauri.core.invoke("clean_up_storage");
+    e.target.textContent = c + d ? `Removed ${c} clip${c === 1 ? "" : "s"}, ${d} demo${d === 1 ? "" : "s"}` : "Already under the limits";
+    renderStorage(el);
+  };
 }
 
 function wireFaceitRefresh() {
@@ -1162,7 +1782,8 @@ async function saveSettings() {
   const s = settingsData.settings;
   const update = {
     watch_dirs: s.watch_dirs, auto_render: s.auto_render, faceit_enabled: s.faceit_enabled, faceit_nickname: s.faceit_nickname,
-    selectivity: s.selectivity, max_per_match: Number(s.max_per_match) || 6, start_with_windows: s.start_with_windows, render: settingsData.render,
+    selectivity: s.selectivity, max_per_match: Number(s.max_per_match) || 6, start_with_windows: s.start_with_windows,
+    max_clips_gb: Number(s.max_clips_gb) || 0, max_demos_gb: Number(s.max_demos_gb) || 0, render: settingsData.render,
   };
   const saved = document.getElementById("saved");
   try {

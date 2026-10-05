@@ -34,6 +34,8 @@ pub struct FormPoint {
     pub map: String,
     pub result: String,
     pub rating2: f64,
+    #[serde(default)]
+    pub rating3: f64,
     pub adr: f64,
 }
 
@@ -222,6 +224,7 @@ pub fn build(me: &str, matches: &[MatchEntry], last: usize, source: &str) -> Opt
             map: m.map.clone(),
             result: m.result.clone(),
             rating2: row.derived.rating2,
+            rating3: row.derived.rating3,
             adr: row.derived.adr,
         });
     }

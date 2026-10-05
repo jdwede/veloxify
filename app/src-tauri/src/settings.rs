@@ -50,6 +50,15 @@ pub struct Settings {
     pub also_clip: Vec<u64>,
     #[serde(default)]
     pub start_with_windows: bool,
+    /// Storage limits in GB (0 = no limit): rendered clips (oldest not in a folder go first) and
+    /// demos in Veloxify's own folder.
+    #[serde(default)]
+    pub max_clips_gb: f64,
+    #[serde(default)]
+    pub max_demos_gb: f64,
+    /// Your own Practice presets (as the Practice tab saves them).
+    #[serde(default)]
+    pub practice: Vec<serde_json::Value>,
 }
 
 impl Settings {
@@ -81,6 +90,9 @@ impl Settings {
                     max_per_match: d_max(),
                     also_clip: vec![],
                     start_with_windows: false,
+                    max_clips_gb: 0.0,
+                    max_demos_gb: 0.0,
+                    practice: vec![],
                 }
             });
         if let Some(lib) = std::env::var_os("VELOXIFY_LIBRARY") {

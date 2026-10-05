@@ -2,8 +2,11 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod clips;
+mod demos;
 mod faceit;
 mod mapicons;
+mod practice;
 mod settings;
 mod system;
 mod worker;
@@ -121,6 +124,10 @@ struct SettingsUpdate {
     selectivity: String,
     max_per_match: usize,
     start_with_windows: bool,
+    #[serde(default)]
+    max_clips_gb: f64,
+    #[serde(default)]
+    max_demos_gb: f64,
     render: RenderOptions,
 }
 
@@ -138,6 +145,8 @@ fn save_settings(state: State<AppState>, update: SettingsUpdate) -> Result<(), S
     s.selectivity = update.selectivity;
     s.max_per_match = update.max_per_match.clamp(1, 20);
     s.start_with_windows = update.start_with_windows;
+    s.max_clips_gb = update.max_clips_gb.max(0.0);
+    s.max_demos_gb = update.max_demos_gb.max(0.0);
     s.save();
     update.render.save(&s.profile).map_err(|e| e.to_string())?;
     if faceit_changed && s.faceit_enabled {
@@ -168,6 +177,187 @@ fn open_faceit(path: String) -> Result<(), String> {
     Ok(())
 }
 
+/// Opens Veloxify's FACEIT window on these matches' rooms, one after another (newest first as
+/// given); click FACEIT's download on each and the demo is saved and analyzed.
+#[tauri::command]
+fn get_demos(app: tauri::AppHandle, state: State<AppState>, match_ids: Vec<String>) -> Result<(), String> {
+    let lib = state.settings.lock().unwrap().library_dir.clone();
+    let faceit = cs2hl_core::faceit::Faceit::load(&lib);
+    let items = match_ids
+        .into_iter()
+        .filter(|id| id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))
+        .map(|id| {
+            let label = faceit
+                .as_ref()
+                .and_then(|f| f.matches.iter().find(|m| m.match_id == id))
+                .map(|m| {
+                    let when = chrono::DateTime::from_timestamp(if m.started_ts > 0 { m.started_ts } else { m.finished_ts }, 0)
+                        .map(|d| d.with_timezone(&chrono::Local).format("%a %-d %b %H:%M").to_string())
+                        .unwrap_or_default();
+                    format!("{} {}-{} · {when}", m.map.trim_start_matches("de_"), m.score_mine, m.score_theirs)
+                })
+                .unwrap_or_else(|| id.clone());
+            demos::Item { match_id: id, label }
+        })
+        .collect();
+    demos::start(&app, items).map_err(|e| e.to_string())
+}
+
+/// Opens Veloxify's FACEIT window to sign in (once).
+#[tauri::command]
+fn open_faceit_window(app: tauri::AppHandle) -> Result<(), String> {
+    demos::start(&app, vec![]).map_err(|e| e.to_string())
+}
+
+fn library_and_me(state: &State<AppState>) -> (std::path::PathBuf, Option<u64>) {
+    let s = state.settings.lock().unwrap();
+    (s.library_dir.clone(), s.steamid64.or_else(system::active_steam_user))
+}
+
+/// Rebuild the index (when clips changed) and tell the window.
+fn library_changed(app: &tauri::AppHandle, lib: &std::path::Path, me: Option<u64>, rebuild: bool) {
+    if rebuild {
+        if let Some(me) = me {
+            let _ = cs2hl_core::ingest::rebuild_index(lib, me);
+        }
+    }
+    use tauri::Emitter;
+    let _ = app.emit("veloxify://library", ());
+}
+
+/// Renders these clips as soon as CS2 is free: [[match id, clip id], ...].
+#[tauri::command]
+fn render_clips(state: State<AppState>, items: Vec<(String, String)>) {
+    let _ = state.jobs.lock().unwrap().send(Job::RenderClips(items));
+}
+
+#[tauri::command]
+fn delete_clips(app: tauri::AppHandle, state: State<AppState>, ids: Vec<String>) -> Result<usize, String> {
+    let (lib, me) = library_and_me(&state);
+    let n = clips::delete(&lib, &ids).map_err(|e| e.to_string())?;
+    library_changed(&app, &lib, me, true);
+    Ok(n)
+}
+
+#[tauri::command]
+fn create_folder(app: tauri::AppHandle, state: State<AppState>, name: String, items: Vec<String>) -> Result<String, String> {
+    let (lib, me) = library_and_me(&state);
+    let f = clips::create_folder(&lib, &name).map_err(|e| e.to_string())?;
+    if !items.is_empty() {
+        let id = f.id.clone();
+        clips::update_folders(&lib, |fs| {
+            if let Some(f) = fs.iter_mut().find(|f| f.id == id) {
+                f.items.extend(items);
+            }
+        })
+        .map_err(|e| e.to_string())?;
+    }
+    library_changed(&app, &lib, me, false);
+    Ok(f.id)
+}
+
+/// Folder edits: rename (`name`), delete (`delete`), add or remove clips.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+fn edit_folder(
+    app: tauri::AppHandle,
+    state: State<AppState>,
+    id: String,
+    name: Option<String>,
+    delete: Option<bool>,
+    add: Option<Vec<String>>,
+    remove: Option<Vec<String>>,
+) -> Result<(), String> {
+    let (lib, me) = library_and_me(&state);
+    clips::update_folders(&lib, |fs| {
+        if delete == Some(true) {
+            fs.retain(|f| f.id != id);
+            return;
+        }
+        if let Some(f) = fs.iter_mut().find(|f| f.id == id) {
+            if let Some(n) = name.filter(|n| !n.trim().is_empty()) {
+                f.name = n.trim().to_string();
+            }
+            for i in add.unwrap_or_default() {
+                if !f.items.contains(&i) {
+                    f.items.push(i);
+                }
+            }
+            let remove = remove.unwrap_or_default();
+            f.items.retain(|i| !remove.contains(i));
+        }
+    })
+    .map_err(|e| e.to_string())?;
+    library_changed(&app, &lib, me, false);
+    Ok(())
+}
+
+/// Copies a folder's clips to Videos\Veloxify\<folder> and opens it.
+#[tauri::command]
+fn export_folder(state: State<AppState>, id: String) -> Result<(String, usize), String> {
+    let (lib, _) = library_and_me(&state);
+    let (dest, n) = clips::export_folder(&lib, &id).map_err(|e| e.to_string())?;
+    let _ = std::process::Command::new("explorer").arg(&dest).spawn();
+    Ok((dest.display().to_string(), n))
+}
+
+#[tauri::command]
+fn storage_usage(state: State<AppState>) -> clips::Usage {
+    let (lib, _) = library_and_me(&state);
+    clips::usage(&lib)
+}
+
+/// Applies the storage limits now. Returns (clips removed, demos removed).
+#[tauri::command]
+fn clean_up_storage(app: tauri::AppHandle, state: State<AppState>) -> (usize, usize) {
+    let settings = state.settings.lock().unwrap().clone();
+    let me = settings.steamid64.or_else(system::active_steam_user);
+    let r = clips::enforce(&settings);
+    library_changed(&app, &settings.library_dir, me, r.0 + r.1 > 0);
+    r
+}
+
+/// Starts CS2 on a practice preset. If Veloxify is rendering, it stops first and hands CS2 back.
+/// If CS2 is already open (you're playing), nothing is launched: the console commands come back
+/// so you can paste them.
+#[tauri::command]
+async fn launch_practice(app: tauri::AppHandle, launch: practice::Launch) -> Result<serde_json::Value, String> {
+    let (args, console) = practice::plan(&launch)?;
+    let state = app.state::<AppState>();
+    if state.status.lock().unwrap().state == "rendering" {
+        state.abort.store(true, Ordering::SeqCst);
+        for _ in 0..60 {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            if state.status.lock().unwrap().state != "rendering" && !system::cs2_running() {
+                break;
+            }
+        }
+    }
+    if system::cs2_running() {
+        return Ok(serde_json::json!({ "launched": false, "console": console }));
+    }
+    practice::start(&args)?;
+    Ok(serde_json::json!({ "launched": true, "console": console }))
+}
+
+/// Opens a practice website (only the ones the Practice tab links to) in the default browser.
+#[tauri::command]
+fn open_link(url: String) -> Result<(), String> {
+    const ALLOWED: &[&str] = &["https://warmupserver.net/"];
+    if !ALLOWED.iter().any(|a| url == *a) {
+        return Err("not a Veloxify practice link".into());
+    }
+    std::process::Command::new("rundll32").args(["url.dll,FileProtocolHandler", &url]).spawn().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn save_practice(state: State<AppState>, presets: Vec<serde_json::Value>) {
+    let mut s = state.settings.lock().unwrap();
+    s.practice = presets;
+    s.save();
+}
+
 #[tauri::command]
 fn open_library(state: State<AppState>) -> Result<(), String> {
     let lib = state.settings.lock().unwrap().library_dir.clone();
@@ -195,6 +385,7 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
+        .manage(std::sync::Mutex::new(demos::Queue::default()))
         .manage(AppState { settings: settings.clone(), status: status.clone(), jobs: Mutex::new(tx.clone()), abort: abort.clone() })
         .invoke_handler(tauri::generate_handler![
             library_root,
@@ -209,7 +400,19 @@ fn main() {
             pick_folder,
             refresh_faceit,
             open_faceit,
-            open_library
+            open_library,
+            get_demos,
+            open_faceit_window,
+            render_clips,
+            delete_clips,
+            create_folder,
+            edit_folder,
+            export_folder,
+            storage_usage,
+            clean_up_storage,
+            launch_practice,
+            save_practice,
+            open_link
         ])
         .setup(move |app| {
             // Clips, thumbnails and match data are served from the library folder only.

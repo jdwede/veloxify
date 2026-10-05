@@ -26,7 +26,7 @@ const POST_ROLL_S: f64 = 3.0;
 /// Kills further apart than this become separate segments of the same moment.
 const SEGMENT_GAP_S: f64 = 12.0;
 /// Victims with less equipment than this (outside pistol rounds) are on an eco or light buy.
-const ECO_EQUIP_VALUE: u32 = 2000;
+pub const ECO_EQUIP_VALUE: u32 = 2000;
 /// Your equipment value at which a round counts as a gun round.
 const GUN_ROUND_EQUIP_VALUE: u32 = 3500;
 /// Reaction flick: the fastest view swing over any ~200 ms span...
@@ -154,6 +154,12 @@ pub fn reaction_flicks(demo: &[u8], m: &Match, player: u64) -> Result<HashMap<us
     Ok(out)
 }
 
+/// Overtime, late and close (10-10 or later, within one), the enemy on match point, or our match
+/// point while they're still in it (10+).
+pub fn is_critical_round(m: &Match, r: usize, team: TeamId) -> bool {
+    round_context(m, r, team).critical
+}
+
 struct RoundContext {
     mine_before: u32,
     theirs_before: u32,
@@ -181,7 +187,7 @@ fn round_context(m: &Match, r: usize, my_team: TeamId) -> RoundContext {
     RoundContext {
         mine_before: mine,
         theirs_before: theirs,
-        pistol: n == 1 || n == 13,
+        pistol: crate::analysis::pistol_rounds(m).contains(&r),
         critical: overtime || late_close || must_win || tense_match_point,
         won: m.rounds[r].winner_team() == my_team,
     }
@@ -498,6 +504,26 @@ fn most_used_weapon(m: &Match, kills: &[usize]) -> Option<String> {
         }
     }
     counts.into_iter().max_by_key(|(_, c)| *c).map(|(w, _)| w)
+}
+
+/// Weapon family, for filters and lowlight kinds: rifle, awp, scout, auto (auto-snipers),
+/// deagle (Deagle/R8), pistol, smg, shotgun, mg, knife, grenade, zeus.
+pub fn weapon_class(w: &str) -> &'static str {
+    match w.trim_start_matches("weapon_") {
+        "ak47" | "m4a1" | "m4a1_silencer" | "galilar" | "famas" | "sg556" | "aug" => "rifle",
+        "awp" => "awp",
+        "ssg08" => "scout",
+        "g3sg1" | "scar20" => "auto",
+        "deagle" | "revolver" => "deagle",
+        "glock" | "usp_silencer" | "hkp2000" | "p250" | "fiveseven" | "tec9" | "cz75a" | "elite" => "pistol",
+        "mac10" | "mp9" | "mp7" | "mp5sd" | "ump45" | "p90" | "bizon" => "smg",
+        "nova" | "xm1014" | "mag7" | "sawedoff" => "shotgun",
+        "m249" | "negev" => "mg",
+        "hegrenade" | "flashbang" | "smokegrenade" | "decoy" | "inferno" | "molotov" | "incgrenade" => "grenade",
+        "taser" => "zeus",
+        w if w.starts_with("knife") || w == "bayonet" => "knife",
+        _ => "other",
+    }
 }
 
 pub fn pretty_weapon(w: &str) -> String {

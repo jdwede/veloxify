@@ -21,6 +21,9 @@ pub enum Scope {
     LatestSession,
     All,
     Matches(Vec<String>),
+    /// Exactly these clips (match id, highlight or lowlight id), in this order: on-demand renders
+    /// such as Watch on a lowlight or a clip removed for space.
+    Items(Vec<(String, String)>),
 }
 
 pub enum Event {
@@ -56,16 +59,32 @@ fn save(path: &Path, m: &MatchEntry) -> Result<()> {
 
 /// Highlight ids still to render in `scope`, in render order: (match id, highlight id).
 pub fn plan(lib: &Path, scope: &Scope) -> Result<Vec<(String, String)>> {
+    let curation = cs2hl_core::curation::Curation::load(lib);
+    if let Scope::Items(items) = scope {
+        let mut out = vec![];
+        for (mid, id) in items {
+            let Ok(m) = load(&lib.join("matches").join(format!("{mid}.json"))) else { continue };
+            let pending = m.highlights.iter().any(|h| &h.id == id && h.clip.is_none() && h.render_error.is_none())
+                || m.lowlights.iter().any(|l| &l.id == id && l.clip.is_none() && l.render_error.is_none());
+            if pending && !curation.deleted.contains(id) {
+                out.push((mid.clone(), id.clone()));
+            }
+        }
+        return Ok(out);
+    }
     let index: Index = serde_json::from_str(&std::fs::read_to_string(lib.join("index.json")).context("library index")?)?;
     let ids: Vec<String> = match scope {
         Scope::Matches(ids) => ids.clone(),
         Scope::All => index.matches.iter().map(|m| m.id.clone()).collect(),
         Scope::LatestSession => index.days.last().and_then(|d| d.sessions.last()).map(|s| s.match_ids.clone()).unwrap_or_default(),
+        Scope::Items(_) => unreachable!(),
     };
     let mut pending: Vec<(String, HighlightEntry)> = vec![];
     for id in &ids {
         let m = load(&lib.join("matches").join(format!("{id}.json")))?;
-        pending.extend(m.highlights.into_iter().filter(|h| h.clip.is_none() && h.render_error.is_none()).map(|h| (id.clone(), h)));
+        pending.extend(
+            m.highlights.into_iter().filter(|h| h.clip.is_none() && h.render_error.is_none() && curation.auto_render(&h.id)).map(|h| (id.clone(), h)),
+        );
     }
     let mut order = vec![];
     for b in 0..3 {
@@ -135,7 +154,12 @@ pub fn render(
         }
         let path = lib.join("matches").join(format!("{mid}.json"));
         let mut m = load(&path)?;
-        let Some(hi) = m.highlights.iter().position(|h| h.id == hid) else { continue };
+        // A highlight, or a lowlight rendered on request.
+        let hi = m.highlights.iter().position(|h| h.id == hid);
+        let li = m.lowlights.iter().position(|l| l.id == hid);
+        if hi.is_none() && li.is_none() {
+            continue;
+        }
         if loaded.as_deref() != Some(mid.as_str()) {
             let dem: PathBuf = demos.join(format!("{mid}.dem"));
             if !dem.exists() {
@@ -148,8 +172,12 @@ pub fn render(
                     break;
                 }
                 Err(e) if e.downcast_ref::<DemoIncompatible>().is_some() => {
+                    let why = "Recorded on an older CS2 version; CS2 can no longer play this demo.";
                     for h in m.highlights.iter_mut().filter(|h| h.clip.is_none()) {
-                        h.render_error = Some("Recorded on an older CS2 version; CS2 can no longer play this demo.".into());
+                        h.render_error = Some(why.into());
+                    }
+                    for l in m.lowlights.iter_mut().filter(|l| l.clip.is_none()) {
+                        l.render_error = Some(why.into());
                     }
                     save(&path, &m)?;
                     broken.push(mid.clone());
@@ -160,27 +188,47 @@ pub fn render(
             }
             drain(on);
         }
-        let h = &mut m.highlights[hi];
-        let rel = format!("clips/{}.mp4", h.id);
+        let (segments, title, duration) = match (hi, li) {
+            (Some(i), _) => (m.highlights[i].segments.clone(), m.highlights[i].title.clone(), m.highlights[i].duration_s),
+            (None, Some(i)) => (m.lowlights[i].segments.clone(), m.lowlights[i].title.clone(), m.lowlights[i].duration_s),
+            _ => unreachable!(),
+        };
+        let rel = format!("clips/{hid}.mp4");
         let ts = Instant::now();
-        let segments: Vec<(i32, i32)> = h.segments.clone();
         match renderer.record(&segments, &lib.join(&rel)) {
             Ok(()) => {
-                let thumb = format!("clips/{}.jpg", h.id);
-                if make_thumb(&lib.join(&rel), &lib.join(&thumb)).is_ok() {
-                    h.thumb = Some(thumb);
+                let thumb = format!("clips/{hid}.jpg");
+                let thumb = make_thumb(&lib.join(&rel), &lib.join(&thumb)).is_ok().then_some(thumb);
+                match (hi, li) {
+                    (Some(i), _) => {
+                        m.highlights[i].clip = Some(rel);
+                        m.highlights[i].thumb = thumb;
+                    }
+                    (None, Some(i)) => {
+                        m.lowlights[i].clip = Some(rel);
+                        m.lowlights[i].thumb = thumb;
+                    }
+                    _ => {}
                 }
-                h.clip = Some(rel);
+                // Rendered again on request: no longer "removed for space".
+                let mut curation = cs2hl_core::curation::Curation::load(lib);
+                if curation.evicted.remove(&hid) {
+                    let _ = curation.save(lib);
+                }
                 rendered += 1;
-                on(Event::Rendered { match_id: mid.clone(), title: h.title.clone(), clip_s: h.duration_s, took_s: ts.elapsed().as_secs_f64() });
+                on(Event::Rendered { match_id: mid.clone(), title, clip_s: duration, took_s: ts.elapsed().as_secs_f64() });
             }
             Err(e) if e.downcast_ref::<Aborted>().is_some() => {
                 stopped = true;
                 break;
             }
             Err(e) => {
-                h.render_error = Some(e.to_string());
-                on(Event::Failed { match_id: mid.clone(), title: h.title.clone(), error: e.to_string() });
+                match (hi, li) {
+                    (Some(i), _) => m.highlights[i].render_error = Some(e.to_string()),
+                    (None, Some(i)) => m.lowlights[i].render_error = Some(e.to_string()),
+                    _ => {}
+                }
+                on(Event::Failed { match_id: mid.clone(), title, error: e.to_string() });
             }
         }
         save(&path, &m)?;

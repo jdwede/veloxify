@@ -179,6 +179,66 @@ pub fn player_series(demo: &[u8], steamid: u64, props: &[&str], ticks: &[i32]) -
 fn num_at(v: &VarVec, row: usize) -> Option<f64> {
     match v {
         VarVec::F32(x) => x.get(row).copied().flatten().map(|v| v as f64),
+        VarVec::Bool(x) => x.get(row).copied().flatten().map(|v| v as u8 as f64),
         _ => int_at(v, row).map(|v| v as f64),
     }
+}
+
+/// Numeric props for several players at the given ticks: (steamid, tick) -> prop -> value.
+/// Vector props (e.g. `aim_punch_angle`) come back as `<name>_0`, `<name>_1`, `<name>_2`.
+pub fn players_series(demo: &[u8], steamids: &[u64], props: &[&str], ticks: &[i32]) -> Result<HashMap<(u64, i32), HashMap<String, f64>>> {
+    let (real, names) = friendly_to_real(props)?;
+    let out = run(demo, |i| {
+        i.wanted_player_props = real;
+        i.real_name_to_og_name = names;
+        i.wanted_ticks = ticks.to_vec();
+        i.wanted_players = steamids.to_vec();
+    })?;
+    let ids: Vec<(u32, String)> = out
+        .prop_controller
+        .prop_infos
+        .iter()
+        .filter(|p| props.contains(&p.prop_friendly_name.as_str()))
+        .map(|p| (p.id, p.prop_friendly_name.clone()))
+        .collect();
+    let (Some(VarVec::U64(sids)), Some(VarVec::I32(row_ticks))) = (
+        out.df.get(&STEAMID_ID).and_then(|c| c.data.as_ref()),
+        out.df.get(&TICK_ID).and_then(|c| c.data.as_ref()),
+    ) else {
+        return Ok(HashMap::new());
+    };
+    let mut result = HashMap::new();
+    for (row, (sid, tick)) in sids.iter().zip(row_ticks).enumerate() {
+        let (Some(sid), Some(tick)) = (sid, tick) else { continue };
+        if !steamids.contains(sid) {
+            continue;
+        }
+        let mut vals = HashMap::new();
+        for (id, name) in &ids {
+            let Some(data) = out.df.get(id).and_then(|c| c.data.as_ref()) else { continue };
+            match data {
+                VarVec::XYZVec(x) => {
+                    if let Some(Some(v)) = x.get(row) {
+                        for (i, c) in v.iter().enumerate() {
+                            vals.insert(format!("{name}_{i}"), *c as f64);
+                        }
+                    }
+                }
+                VarVec::XYVec(x) => {
+                    if let Some(Some(v)) = x.get(row) {
+                        for (i, c) in v.iter().enumerate() {
+                            vals.insert(format!("{name}_{i}"), *c as f64);
+                        }
+                    }
+                }
+                _ => {
+                    if let Some(v) = num_at(data, row) {
+                        vals.insert(name.clone(), v);
+                    }
+                }
+            }
+        }
+        result.insert((*sid, *tick), vals);
+    }
+    Ok(result)
 }

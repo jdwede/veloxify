@@ -103,6 +103,7 @@ fn read_room(fm: &mut FaceitMatch, room: &Value, player_id: &str) {
     if fm.map_number <= 1 {
         fm.started_ts = ts(&room["startedAt"]);
     }
+    fm.competition = room["entity"]["name"].as_str().or_else(|| room["competitionName"].as_str()).unwrap_or("").to_string();
     let teams = &room["teams"];
     let mine = ["faction1", "faction2"]
         .into_iter()
@@ -159,7 +160,9 @@ pub fn refresh(root: &Path, steamid: u64, candidates: &[String], light: bool) ->
     // What earlier refreshes learned from match rooms is kept, so each room is read only once.
     for fm in matches.iter_mut() {
         if let Some(prev) = old.as_ref().and_then(|o| o.matches.iter().find(|p| p.match_id == fm.match_id && p.map_number == fm.map_number)) {
-            if prev.detailed {
+            // Rooms read before competitions were recorded are read again.
+            if prev.detailed && !prev.competition.is_empty() {
+                fm.competition = prev.competition.clone();
                 fm.started_ts = prev.started_ts;
                 fm.team_elo = prev.team_elo;
                 fm.enemy_elo = prev.enemy_elo;

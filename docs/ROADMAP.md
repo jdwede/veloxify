@@ -74,7 +74,25 @@ Legit score = **Reputation** + **Overwatch**.
       prefiring/tracking through walls and smokes, rotating early with no info, always facing
       where the action will be.
 
+## Done in the Oct 2026 push
+
+- HLTV Rating 3.0 est. everywhere (eco-adjusted with HLTV's duel matrix, Round Swing from our own
+  win-probability model, weights from HLTV; 1.00 = your lobbies' average). Rating 1.0 removed.
+- Lowlights: misses you were punished for (missed back, AWP/Scout, spray, pistol), each bullet
+  matched to the enemy you aimed at, with a movement / spray / aim / scope diagnosis and a
+  per-bullet breakdown. Clips page = Highlights + Lowlights + Montages (placeholder).
+- Clip management: delete, folders (export for montages), presets, tag and ESEA-season filters,
+  storage usage and rolling limits.
+- FACEIT demos with one click each through Veloxify's own FACEIT window (FACEIT's Turnstile
+  check means a person clicks download; Veloxify saves and analyzes the file).
+- Session page (Leetify-style cards, summed session scoreboard), real Premier match times from
+  `.dem.info`, Practice tab with only pro-used tools.
+- Not possible: FACEIT's own Rating sits behind Cloudflare's browser check; Veloxify won't
+  disguise itself to get it.
+
 ## Later
+
+- **Montages:** order a folder's clips, transitions, music, intro card; rendered like any clip.
 
 - **Grenade lineups:** extract every throw (position, view angles, movement and jump state, where
   it landed), classify the technique (standing, jump-throw, run-throw, crouch), tell real

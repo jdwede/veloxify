@@ -43,6 +43,19 @@ impl Analysis {
     }
 }
 
+/// Round indices of pistol rounds: the first round of each half of regulation (found from the
+/// side switch, so MR12 and MR15 demos both work). Overtime starts with money, so it has none.
+pub fn pistol_rounds(m: &Match) -> HashSet<usize> {
+    let mut out = HashSet::new();
+    if let Some(first) = m.rounds.first() {
+        out.insert(0);
+        if let Some(i) = m.rounds.iter().position(|r| r.team_a_side != first.team_a_side).filter(|i| *i <= 15) {
+            out.insert(i);
+        }
+    }
+    out
+}
+
 /// True when `attacker` killed someone on the other team (excludes suicides, world and team kills).
 pub fn is_enemy_kill(m: &Match, attacker: Option<u64>, victim: u64) -> bool {
     match attacker {

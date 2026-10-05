@@ -85,7 +85,7 @@ fn analyze(args: &[String]) -> Result<()> {
     println!("{} | {:?} | {} - {} | {} rounds | load {:.2}s, analyze {:.2}s",
         m.map, m.source, m.score_a, m.score_b, m.rounds.len(), t_load, t_parse);
     println!("\n{:<18} {:>4} {:>3} {:>3} {:>3} {:>6} {:>6} {:>5} {:>5} {:>5} {:>5} {:>3} {:>5}",
-        "player", "team", "K", "A", "D", "ADR", "KAST", "HS%", "R1.0", "R2.0", "FK-FD", "MK", "1vX");
+        "player", "team", "K", "A", "D", "ADR", "KAST", "HS%", "R3.0", "Swing", "FK-FD", "MK", "1vX");
     for s in &st {
         let c = &s.counts;
         let d = &s.derived;
@@ -95,7 +95,7 @@ fn analyze(args: &[String]) -> Result<()> {
         let mark = if Some(s.steamid) == focus { "*" } else { "" };
         println!("{:<18} {:>4} {:>3} {:>3} {:>3} {:>6.1} {:>5.1}% {:>4.0}% {:>5.2} {:>5.2} {:>2}-{:<2} {:>3} {:>2}/{}",
             format!("{mark}{}", truncate(&s.name, 17)), format!("{:?}", s.team), c.kills, c.assists, c.deaths,
-            d.adr, d.kast, d.hs_pct, d.rating1, d.rating2, c.opening_kills, c.opening_deaths, mk, cw, ca);
+            d.adr, d.kast, d.hs_pct, d.rating3, d.swing, c.opening_kills, c.opening_deaths, mk, cw, ca);
     }
     println!("\nhighlights ({sel:?}):");
     for h in &hl {
@@ -104,6 +104,24 @@ fn analyze(args: &[String]) -> Result<()> {
             .map(|s| format!("{}-{}", s.start_tick, s.end_tick)).collect();
         println!("  T{} {:>5.1}  {:<16} {:<40} {:>5.1}s  [{}]  {}",
             h.tier, h.score, truncate(name, 16), h.title, h.duration_s, h.tags.join(", "), segs.join(" "));
+    }
+    if let Some(me) = focus {
+        let t = std::time::Instant::now();
+        let lls = cs2hl_core::lowlights::detect(&m, me, Some(&demo));
+        println!("
+lowlights ({:.2}s):", t.elapsed().as_secs_f64());
+        for l in &lls {
+            println!("  {:<40} sev {:.1}  killer {:<14} {:>2} shots {} hits  {:>4}  [{}]",
+                l.title, l.severity, truncate(&l.killer_name, 14), l.shots, l.hits,
+                l.distance_m.map(|d| format!("{d:.0}m")).unwrap_or_default(), l.tags.join(", "));
+            println!("      {}", l.verdict);
+            for s in &l.shot_details {
+                println!("      #{:<2} -{:.2}s {:>5} u/s (ok<{:.0}) {:<8} x{:>6} y{:>6}  {}",
+                    s.bullet, s.t, s.speed.map(|v| format!("{v:.0}")).unwrap_or("-".into()), s.accurate_speed,
+                    s.verdict, s.off_x_cm.map(|v| format!("{v:.0}")).unwrap_or("-".into()),
+                    s.off_y_cm.map(|v| format!("{v:.0}")).unwrap_or("-".into()), if s.hit { "HIT" } else { "" });
+            }
+        }
     }
     Ok(())
 }

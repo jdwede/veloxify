@@ -36,6 +36,9 @@ pub enum Job {
     Render(Vec<String>),
     /// Refresh FACEIT data now (settings changed).
     Faceit,
+    /// Render these clips now (match id, highlight or lowlight id): Watch on a lowlight, or a
+    /// clip removed for space.
+    RenderClips(Vec<(String, String)>),
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -117,6 +120,7 @@ impl Worker {
 
     pub fn run(mut self, jobs: Receiver<Job>) {
         let mut pending_render: Vec<String> = vec![];
+        let mut pending_clips: Vec<(String, String)> = vec![];
         let mut last_faceit: Option<Instant> = None;
         let mut icons_checked = false;
         let mut was_playing = false;
@@ -143,6 +147,7 @@ impl Worker {
                 }
                 match jobs.recv_timeout(Duration::from_secs(20)) {
                     Ok(Job::Render(ids)) => pending_render.extend(ids),
+                    Ok(Job::RenderClips(items)) => pending_clips.extend(items),
                     Ok(Job::Faceit) => last_faceit = None,
                     Err(RecvTimeoutError::Disconnected) => return,
                     _ => {}
@@ -172,6 +177,10 @@ impl Worker {
                 last_faceit = Some(Instant::now());
             }
             was_playing = false;
+            // Clips you asked for come first.
+            if !pending_clips.is_empty() {
+                self.render(&settings, me, Scope::Items(std::mem::take(&mut pending_clips)));
+            }
             if settings.auto_render || !pending_render.is_empty() {
                 let scope =
                     if pending_render.is_empty() { Scope::LatestSession } else { Scope::Matches(std::mem::take(&mut pending_render)) };
@@ -179,11 +188,18 @@ impl Worker {
             } else if imported {
                 self.set("idle", "Up to date", 0, 0);
             }
+            // Storage limits (Settings): oldest clips not in a folder, oldest saved demos.
+            let (clips, demos) = crate::clips::enforce(&settings);
+            if clips + demos > 0 {
+                let _ = ingest::rebuild_index(&settings.library_dir, me);
+                self.library_changed();
+            }
             if self.status.lock().unwrap().state != "error" {
                 self.set("idle", "Up to date", 0, 0);
             }
             match jobs.recv_timeout(POLL) {
                 Ok(Job::Render(ids)) => pending_render.extend(ids),
+                Ok(Job::RenderClips(items)) => pending_clips.extend(items),
                 Ok(Job::Faceit) => last_faceit = None,
                 Err(RecvTimeoutError::Disconnected) => return,
                 _ => {}
@@ -252,7 +268,8 @@ impl Worker {
     /// New demo files in the watched folders, newest first, skipping ones still downloading.
     fn new_demos(&self, settings: &Settings) -> Vec<(PathBuf, String)> {
         let mut found = vec![];
-        for dir in &settings.watch_dirs {
+        // Demos saved from Veloxify's FACEIT window land in its own folder.
+        for dir in settings.watch_dirs.iter().cloned().chain([crate::demos::demos_dir()]) {
             let Ok(entries) = std::fs::read_dir(dir) else { continue };
             for e in entries.flatten() {
                 let p = e.path();
