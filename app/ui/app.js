@@ -139,6 +139,11 @@ const fmtDate = (d) => {
   return date.toLocaleDateString([], opts);
 };
 const fmtDur = (s) => `${Math.round(s / 60)} min`;
+// Long spans in hours: "4h 41m" (under an hour stays "41 min").
+const fmtSpan = (minutes) => {
+  const m = Math.round(minutes);
+  return m >= 60 ? `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, "0")}m` : `${m} min`;
+};
 const fmtClip = (s) => { const t = Math.round(s); return `${Math.floor(t / 60)}:${String(t % 60).padStart(2, "0")}`; };
 const iso = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 const f1 = (x) => x.toFixed(1);
@@ -202,8 +207,8 @@ function openFaceitRoom(matchId) {
   else window.open(`https://www.faceit.com/${path}`, "_blank");
 }
 
-// FACEIT demos: each match room opens in your own browser (where you're signed in to FACEIT);
-// click FACEIT's download and Veloxify picks the file up from Downloads, then opens the next.
+// FACEIT demos: Veloxify downloads them through its own FACEIT window; one click fetches every
+// missing demo. (Preview: opens the room in a browser.)
 function getDemos(matchIds) {
   if (!matchIds.length) return;
   if (tauri) tauri.core.invoke("get_demos", { matchIds });
@@ -324,7 +329,7 @@ async function renderOverview(el, day, tab) {
     <div class="match-head">
       <div><div class="k">Day</div><div class="v">${fmtDate(day.date)}</div></div>
       <div><div class="k">Matches</div><div class="v">${ids.length}</div></div>
-      <div><div class="k">Time played</div><div class="v">${Math.round(minutes)} min</div></div>
+      <div><div class="k">Time played</div><div class="v">${fmtSpan(minutes)}</div></div>
       <div><div class="k">Highlights</div><div class="v"><span class="star">★</span> ${day.highlight_count}</div></div>
     </div>
     ${tabsHtml([["stats", "Stats"], ["highlights", "Highlights"]], tab)}
@@ -343,7 +348,7 @@ async function renderOverview(el, day, tab) {
         <td>${fm.kills} / ${fm.deaths} / ${fm.assists}</td><td>${f1(fm.adr)}</td><td>${Math.round(fm.hs_pct)}%</td>
         <td>${fm.elo ? `${fm.elo.toLocaleString("en-US")} ${deltaHtml(fm.elo_delta)}` : fm.calibrating ? "Placement" : "–"}</td></tr>`; }).join("")}</tbody>
     </table>
-    <div class="note">Get the demos and these join the totals above, with HLTV rating, RWS, highlights and lowlights. Veloxify opens each match room in your browser; click FACEIT's download and Veloxify picks the demo up from Downloads (processing waits until CS2 is closed).</div>` : "";
+    <div class="note">Get the demos and these join the totals above, with HLTV rating, RWS, highlights and lowlights. Veloxify downloads them for you through its FACEIT window and analyzes them; downloads wait while CS2 is open.</div>` : "";
   const rows = day.players.map((p) => {
     const c = p.counts, d = p.derived;
     const mk = sum(c.multikill_rounds.slice(2));
@@ -405,7 +410,7 @@ function renderStatsOnly(el, date, m) {
       ${fm.team_elo && fm.enemy_elo ? `<div class="sub" style="margin-top:14px">Average ELO: your team ${fm.team_elo.toLocaleString("en-US")} · enemy team ${fm.enemy_elo.toLocaleString("en-US")}</div>` : ""}
       <div class="stats-only-note">
         <div><b>The full scoreboard, HLTV rating, RWS and highlights come from the demo.</b>
-          <span>Veloxify opens the match room in your browser: click FACEIT's download and Veloxify picks it up from Downloads and analyzes it (after you close CS2 if it's open).</span></div>
+          <span>One click: Veloxify downloads it through its FACEIT window and analyzes it. Downloads wait while CS2 is open.</span></div>
         ${demoButton([fm.match_id], "btn primary")}
       </div>
     </div>`;
@@ -1071,7 +1076,7 @@ async function renderSession(view, date, idx) {
   view.innerHTML = `
     <div class="sess-head">
       <div class="sess-box"><span class="sess-w">${w}W</span><span class="sess-sep">:</span><span class="sess-l">${l}L</span><span class="sub">/ ${summaries.length} match${summaries.length === 1 ? "" : "es"}</span></div>
-      <div class="sess-box"><b>${fmtDate(date)}</b><span class="sub">${fmtTime(first.played_at)}–${fmtTime(last.played_at)} · ${minutes} min</span></div>
+      <div class="sess-box"><b>${fmtDate(date)}</b><span class="sub">${fmtTime(first.played_at)}–${fmtTime(last.played_at)} · ${fmtSpan(minutes)}</span></div>
       <span class="grow"></span>
       ${prevSess ? `<a class="btn ghost" href="${prevSess}">◀ Previous session</a>` : ""}
       ${nextSess ? `<a class="btn ghost" href="${nextSess}">Next session ▶</a>` : ""}
@@ -1647,7 +1652,7 @@ let settingsData = null;
 const PREVIEW_SETTINGS = {
   settings: { watch_dirs: ["C:\\Users\\you\\Downloads"], auto_render: true, faceit_enabled: true, faceit_nickname: "", selectivity: "solid-plays", max_per_match: 6, start_with_windows: false, steamid64: null },
   detected_steamid: null, steam_name: null, version: "preview", clips: 0, clip_bytes: 0,
-  render: { height: 1080, fps: 60, transition: "cut", hide_fps_counter: true, killfeed_only: true, own_crosshair: false, xray: false, audio: true },
+  render: { height: 1080, fps: 60, transition: "cut", killfeed_only: true, own_crosshair: false, xray: false, audio: true },
 };
 const fmtBytes = (b) => (b > 1e9 ? `${(b / 1e9).toFixed(1)} GB` : `${Math.round(b / 1e6)} MB`);
 
@@ -1670,7 +1675,7 @@ async function renderSettings(view) {
   const seg = (key, val, opts) => `<div class="seg" data-key="${key}">${opts.map(([v, l]) => `<button data-v="${v}" class="${String(val) === String(v) ? "on" : ""}" ${tauri ? "" : "disabled"}>${l}</button>`).join("")}</div>`;
   const row = (title, desc, control) => `<div class="set-row"><div class="lbl"><b>${title}</b>${desc ? `<span>${desc}</span>` : ""}</div>${control}</div>`;
   const folders = s.watch_dirs.map((d, i) => `<div class="folder"><code title="${esc(d)}">${esc(d)}</code>${tauri ? `<button class="btn ghost" data-remove="${i}">Remove</button>` : ""}</div>`).join("")
-    || `<div class="folder sub">No folders. Add your browser's download folder so FACEIT demos are picked up.</div>`;
+    || `<div class="folder sub">No extra folders. Demos from Get demos are found automatically; add a folder here only if you keep other demos somewhere (e.g. Downloads).</div>`;
   view.innerHTML = `
     <div class="profile-head"><div><div class="h2">Veloxify ${esc(settingsData.version)}</div><div class="h1">Settings</div></div><span class="saved" id="saved">Saved</span></div>
     ${tauri ? "" : `<div class="preview-note">Preview: settings can be changed in the desktop app.</div>`}
@@ -1680,7 +1685,7 @@ async function renderSettings(view) {
         ${row("Steam", steamid ? `${esc(settingsData.steam_name || "Logged-in account")} · ${steamid}` : "Log in to Steam so Veloxify knows whose highlights to make.", "")}
         <div id="faceit-account">${faceitAccountRow()}</div>
         ${row("Use FACEIT data", "Level, ELO and your full FACEIT match list, found from your Steam account. No login or API key.", sw("faceit_enabled", s.faceit_enabled))}
-        ${row("FACEIT demos", "Get demos opens each match room in your normal browser, where you're already signed in to FACEIT. Click download there; Veloxify picks the file up from your Downloads folder (or any demo folder below) and opens the next match. It never reads your browser's logins.", "")}
+        ${row("FACEIT demos", "Get demos downloads every missing demo in one click through Veloxify's own FACEIT window. If FACEIT ever asks you to sign in, do it once there: it's a separate browser profile, so your Chrome and FACEIT client stay signed in, and Veloxify never sees your password. FACEIT's human check runs normally; once in a while it may ask you to tick a box.", tauri ? `<button class="btn" id="faceit-sign-in">Sign in to FACEIT</button>` : "")}
         ${row("FACEIT nickname", "Only needed if your account isn't found automatically.", `<input type="text" data-key="faceit_nickname" value="${esc(s.faceit_nickname)}" placeholder="Found automatically" ${tauri ? "" : "disabled"}>`)}
       </section>
       ${appearancePanel()}
@@ -1700,7 +1705,6 @@ async function renderSettings(view) {
         ${row("Crosshair", "", seg("own_crosshair", r.own_crosshair, [[false, "Clean default"], [true, "Player's own"]]))}
         ${row("X-ray", "Show players through walls.", sw("xray", r.xray))}
         ${row("Game audio", "CS2's sound only, never Discord or music.", sw("audio", r.audio))}
-        ${row("Hide Steam FPS counter", "Covers Steam's in-game FPS counter if you have it on.", sw("hide_fps_counter", r.hide_fps_counter))}
       </section>
       <section class="panel">
         <div class="panel-head"><div class="h3">Demo folders</div><span class="grow"></span>${tauri ? `<button class="btn" id="add-folder">Add folder</button>` : ""}</div>
@@ -1715,7 +1719,7 @@ async function renderSettings(view) {
   wireAppearance(view); // works in the preview too (saved in this browser)
   if (!tauri) return;
 
-  const RENDER_KEYS = ["height", "fps", "transition", "killfeed_only", "own_crosshair", "xray", "audio", "hide_fps_counter"];
+  const RENDER_KEYS = ["height", "fps", "transition", "killfeed_only", "own_crosshair", "xray", "audio"];
   const set = (key, value) => {
     if (["height", "fps", "max_per_match"].includes(key)) value = Number(value);
     if (["killfeed_only", "own_crosshair"].includes(key) && typeof value === "string") value = value === "true";
@@ -1741,6 +1745,7 @@ async function renderSettings(view) {
     }
   };
   view.querySelector("#open-lib").onclick = () => tauri.core.invoke("open_library");
+  view.querySelector("#faceit-sign-in").onclick = () => tauri.core.invoke("faceit_sign_in");
   renderStorage(view.querySelector("#storage"));
   wireFaceitRefresh();
 }
@@ -1838,27 +1843,70 @@ function showStatus(st) {
   if (st.state === "rendering") el.title = "CS2 is rendering your highlights in the background. Click to stop and hand CS2 back.";
 }
 
-// While Get demos is waiting for downloads: which match, and Skip / Stop.
-function showDemoQueue(q) {
-  let bar = document.getElementById("demo-queue");
-  const active = q && q.items && q.pos < q.items.length;
-  if (!active) { if (bar) bar.remove(); return; }
-  if (!bar) {
-    bar = document.createElement("div");
-    bar.id = "demo-queue";
-    document.body.appendChild(bar);
+// The big banner under the top bar: what Veloxify is doing right now (downloading demos, then
+// analyzing them, then capturing clips) with progress, or what needs you.
+const live = { queue: null, status: null };
+let bannerKey = "";
+function renderBanner() {
+  const el = document.getElementById("banner");
+  if (!el) return;
+  const q = live.queue, st = live.status;
+  const total = q?.items?.length || 0;
+  let b = null;
+  if (total && !q.finished && !q.cancelled) {
+    b = {
+      kind: q.message ? "warn" : q.paused ? "paused" : "busy",
+      title: q.paused ? "Demo downloads paused" : "Downloading demos",
+      count: `${Math.min(q.pos, total)}/${total}`,
+      frac: (q.pos + (q.paused ? 0 : q.progress || 0)) / total,
+      note: q.message || (q.paused ? "CS2 is open. Downloads continue when you close it." : ""),
+      actions: [
+        ...(q.message ? [["Show FACEIT window", () => tauri.core.invoke("faceit_sign_in")]] : []),
+        ["Cancel", () => tauri.core.invoke("demo_queue", { action: "cancel" })],
+      ],
+    };
+  } else if (st?.state === "importing" && st.total) {
+    b = { kind: "busy", title: "Analyzing matches", count: `${Math.min(st.done + 1, st.total)}/${st.total}`, frac: st.done / st.total, actions: [] };
+  } else if (st?.state === "rendering") {
+    b = {
+      kind: "rec",
+      title: st.total ? "Clip capture in progress" : "Starting clip capture",
+      count: st.total ? `${Math.min(st.done + 1, st.total)}/${st.total}` : "",
+      frac: st.total ? st.done / st.total : 0,
+      actions: [["Stop", () => tauri.core.invoke("stop_rendering")]],
+    };
+  } else if (st?.state === "error") {
+    b = { kind: "warn", title: "Needs attention", count: "", frac: null, note: st.message, actions: [] };
   }
-  const it = q.items[q.pos];
-  bar.innerHTML = `<b>Getting demos · ${q.pos + 1} of ${q.items.length}</b><span>${esc(it.label)}: click download on FACEIT in your browser. Veloxify picks it up from Downloads${q.saved ? ` (${q.saved} done)` : ""}.</span>
-    <button class="btn ghost" data-q="skip">Skip</button><button class="btn ghost" data-q="stop">Stop</button>`;
-  bar.querySelectorAll("[data-q]").forEach((b) => (b.onclick = () => tauri.core.invoke("demo_queue", { action: b.dataset.q })));
+  if (!b) { el.hidden = true; bannerKey = ""; return; }
+  el.hidden = false;
+  el.className = `banner ${b.kind}`;
+  // Built once per kind of banner; progress updates in place (so buttons aren't swapped mid-click).
+  const key = b.kind + b.actions.map((a) => a[0]).join();
+  if (key !== bannerKey) {
+    bannerKey = key;
+    el.innerHTML = `<div class="banner-in"><span class="banner-dot"></span><b class="banner-title"></b><span class="banner-count"></span>
+      <div class="banner-bar"><i></i></div>${b.actions.map((a, i) => `<button class="banner-btn" data-i="${i}">${esc(a[0])}</button>`).join("")}</div>
+      <div class="banner-note"></div>`;
+  }
+  el.querySelectorAll(".banner-btn").forEach((btn) => (btn.onclick = b.actions[btn.dataset.i][1]));
+  el.querySelector(".banner-title").textContent = b.title;
+  el.querySelector(".banner-count").textContent = b.count;
+  const bar = el.querySelector(".banner-bar");
+  bar.hidden = b.frac == null;
+  bar.firstElementChild.style.width = `${Math.max(0, Math.min(1, b.frac || 0)) * 100}%`;
+  const note = el.querySelector(".banner-note");
+  note.textContent = b.note || "";
+  note.hidden = !b.note;
 }
 
 if (tauri) {
-  tauri.core.invoke("demo_queue_state").then(showDemoQueue);
-  tauri.event.listen("veloxify://demos", (e) => showDemoQueue(e.payload));
-  tauri.core.invoke("get_status").then(showStatus);
-  tauri.event.listen("veloxify://status", (e) => showStatus(e.payload));
+  const setQueue = (q) => { live.queue = q; renderBanner(); };
+  const setStatus = (st) => { live.status = st; showStatus(st); renderBanner(); };
+  tauri.core.invoke("demo_queue_state").then(setQueue);
+  tauri.event.listen("veloxify://demos", (e) => setQueue(e.payload));
+  tauri.core.invoke("get_status").then(setStatus);
+  tauri.event.listen("veloxify://status", (e) => setStatus(e.payload));
   let pendingReload = false;
   const reload = () => {
     // Don't disturb a playing clip, and don't spend anything on a window that's in the tray.

@@ -11,7 +11,7 @@
     "transition_seconds": 0.35,
     "max_bitrate_mbps": 12,
     "final_encoder": "nvenc",
-    "hide_fps_counter": true
+    "hide_fps_counter": false
   },
   "video": {
     "_comment": "Written to cs2_video.txt for the render only; your own file is restored afterwards.",

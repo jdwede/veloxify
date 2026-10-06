@@ -154,6 +154,17 @@ impl Worker {
                 }
                 continue;
             }
+            // Get demos first, processing after: the demo queue sends Job::Now when it's done.
+            if crate::demos::downloading(&self.app) {
+                match jobs.recv_timeout(Duration::from_secs(5)) {
+                    Ok(Job::Render(ids)) => pending_render.extend(ids),
+                    Ok(Job::RenderClips(items)) => pending_clips.extend(items),
+                    Ok(Job::Faceit) => last_faceit = None,
+                    Err(RecvTimeoutError::Disconnected) => return,
+                    _ => {}
+                }
+                continue;
+            }
             let settings = self.settings.lock().unwrap().clone();
             let Some(me) = settings.steamid64.or_else(system::active_steam_user) else {
                 self.set("error", "Log in to Steam so Veloxify knows whose highlights to make.", 0, 0);
@@ -162,7 +173,16 @@ impl Worker {
                 }
                 continue;
             };
+            // CS2 is closed and nothing's rendering: if a render was cut short, put the user's
+            // own video settings back before they next start CS2.
+            if cs2hl_render::session::repair_cut_short_render(me) {
+                eprintln!("put back your CS2 video settings after a render was cut short");
+            }
             let imported = self.import(&settings, me);
+            // Get demos started meanwhile: finish downloading before analyzing or rendering more.
+            if crate::demos::downloading(&self.app) {
+                continue;
+            }
             if !icons_checked || imported {
                 self.map_icons(&settings);
                 icons_checked = true;
@@ -307,10 +327,10 @@ impl Worker {
         let total = demos.len();
         let mut added = 0;
         for (i, (path, key)) in demos.into_iter().enumerate() {
-            if system::cs2_running() {
-                break; // the user started playing: stop and pick up later
+            if system::cs2_running() || crate::demos::downloading(&self.app) {
+                break; // the user started playing, or Get demos: stop and pick up later
             }
-            self.set("importing", format!("Reading match {} of {}", i + 1, total), i, total);
+            self.set("importing", format!("Analyzing match {} of {}", i + 1, total), i, total);
             match ingest::add_demo(&settings.library_dir, &path, me, &policy, false) {
                 Ok(Added::Added { .. }) => added += 1,
                 Ok(_) => {}
@@ -347,11 +367,39 @@ impl Worker {
                 return;
             }
         };
+        // A FACEIT match found means you're about to need CS2: don't start, and stop if one comes
+        // up while rendering (checked every 15 s), so CS2 is free before you hit Connect.
+        let player_id = Faceit::load(&lib).map(|f| f.player_id).filter(|p| !p.is_empty());
+        if let Some(pid) = &player_id {
+            if faceit::in_match(pid) == Some(true) {
+                self.set("waiting", "FACEIT match in progress; clips after it", 0, 0);
+                return;
+            }
+        }
         let work = data_dir().join("work");
         self.abort.store(false, Ordering::SeqCst);
+        let rendering = Arc::new(AtomicBool::new(true));
+        let match_found = Arc::new(AtomicBool::new(false));
+        if let Some(pid) = player_id {
+            let (rendering, match_found, abort) = (rendering.clone(), match_found.clone(), self.abort.clone());
+            std::thread::spawn(move || {
+                while rendering.load(Ordering::SeqCst) {
+                    if faceit::in_match(&pid) == Some(true) {
+                        match_found.store(true, Ordering::SeqCst);
+                        abort.store(true, Ordering::SeqCst);
+                        return;
+                    }
+                    for _ in 0..15 {
+                        if !rendering.load(Ordering::SeqCst) {
+                            return;
+                        }
+                        std::thread::sleep(Duration::from_secs(1));
+                    }
+                }
+            });
+        }
         let mut total = 0;
         let mut done = 0;
-        let mut hand_back = false;
         let abort = self.abort.clone();
         let result = batch::render(&lib, me, profile, &work, scope, None, abort, &mut |e| match e {
             Event::Plan { total: t } => {
@@ -360,7 +408,7 @@ impl Worker {
                 self.notify(
                     "Rendering your highlights",
                     &format!(
-                        "{t} clip{} from your session. CS2 runs hidden for a few minutes; opening CS2 or \"Stop rendering\" in the tray hands it back.",
+                        "{t} clip{} from your session. CS2 runs hidden for a few minutes; \"Stop rendering\" in the tray hands it back.",
                         if t == 1 { "" } else { "s" }
                     ),
                 );
@@ -381,23 +429,22 @@ impl Worker {
                 }
             }
             Event::Stopped { rendered, wants_cs2 } => {
-                hand_back = wants_cs2;
+                // Veloxify never starts CS2 for you (it could be left running with nobody there):
+                // it closes its own and you start CS2 from Steam as usual.
                 let left = total.saturating_sub(rendered);
+                let wants_cs2 = wants_cs2 || match_found.load(Ordering::SeqCst);
                 self.notify(
-                    if wants_cs2 { "CS2 is yours" } else { "Rendering stopped" },
+                    if match_found.load(Ordering::SeqCst) { "FACEIT match found: CS2 is free" } else if wants_cs2 { "CS2 is free" } else { "Rendering stopped" },
                     &format!(
                         "{}{rendered} clip{} done; {left} more after your next game.",
-                        if wants_cs2 { "Starting CS2 for you. " } else { "" },
+                        if wants_cs2 { "Veloxify closed its CS2; start CS2 from Steam. " } else { "" },
                         if rendered == 1 { "" } else { "s" }
                     ),
                 );
             }
             Event::Log(_) => {}
         });
-        if hand_back {
-            // Someone opened CS2 while it was busy rendering: give them a normal CS2.
-            let _ = std::process::Command::new(cs2hl_render::steam::steam_exe()).args(["-applaunch", "730"]).spawn();
-        }
+        rendering.store(false, Ordering::SeqCst);
         if let Err(e) = result {
             self.set("error", format!("Rendering stopped: {e}"), done, total);
         }

@@ -28,6 +28,17 @@ fn get(agent: &ureq::Agent, url: &str) -> Result<Value> {
     Ok(agent.get(url).call()?.into_json()?)
 }
 
+/// Whether the player has a FACEIT match going: found (check-in, accepting), map veto, server
+/// starting, ready or live. CS2 must be free then. From FACEIT's public match list (no login);
+/// `None` when FACEIT can't be reached. Scheduled league matches don't count until they start.
+pub fn in_match(player_id: &str) -> Option<bool> {
+    let v = get(&agent(), &format!("{API}/match/v1/matches/groupByState?userId={}", encode(player_id))).ok()?;
+    let payload = v["payload"].as_object()?;
+    Some(payload.iter().any(|(state, list)| {
+        !matches!(state.as_str(), "SCHEDULED" | "FINISHED" | "CANCELLED" | "ABORTED") && list.as_array().is_some_and(|l| !l.is_empty())
+    }))
+}
+
 /// FACEIT sends most numbers as strings.
 fn num(v: &Value) -> f64 {
     v.as_str().and_then(|s| s.trim().parse().ok()).or_else(|| v.as_f64()).unwrap_or(0.0)

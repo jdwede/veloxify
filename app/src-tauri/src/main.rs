@@ -177,15 +177,15 @@ fn open_faceit(path: String) -> Result<(), String> {
     Ok(())
 }
 
-/// Opens these matches' rooms in your browser one after another (newest first as given): click
-/// FACEIT's download on each and Veloxify picks the file up from Downloads and opens the next.
+/// Downloads these matches' demos (newest first as given) through Veloxify's FACEIT window; see
+/// `demos`. Starts a background run and returns right away.
 #[tauri::command]
 fn get_demos(app: tauri::AppHandle, state: State<AppState>, match_ids: Vec<String>) -> Result<(), String> {
     let settings = state.settings.lock().unwrap().clone();
     let lib = settings.library_dir.clone();
     let mut seen = std::collections::HashSet::new();
     let faceit = cs2hl_core::faceit::Faceit::load(&lib);
-    let items = match_ids
+    let items: Vec<demos::Item> = match_ids
         .into_iter()
         .filter(|id| id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') && seen.insert(id.clone()))
         .map(|id| {
@@ -202,11 +202,28 @@ fn get_demos(app: tauri::AppHandle, state: State<AppState>, match_ids: Vec<Strin
             demos::Item { match_id: id, label }
         })
         .collect();
-    demos::start(&app, items, &settings);
+    let _ = settings;
+    // Demos already downloaded (e.g. by a run that was cut short) only need importing.
+    let have: Vec<String> = std::fs::read_dir(demos::demos_dir())
+        .map(|d| d.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| !n.ends_with(".part")).collect())
+        .unwrap_or_default();
+    let (had, items): (Vec<demos::Item>, Vec<demos::Item>) =
+        items.into_iter().partition(|i: &demos::Item| have.iter().any(|n| n.starts_with(&format!("{}-", i.match_id))));
+    if !had.is_empty() {
+        let _ = state.jobs.lock().unwrap().send(Job::Now);
+    }
+    demos::start(&app, items);
     Ok(())
 }
 
-/// The demo queue's banner: "skip" this match or "stop".
+/// Opens Veloxify's FACEIT window to sign in (once). Async: creating a window from a main-thread
+/// command deadlocks on Windows.
+#[tauri::command]
+async fn faceit_sign_in(app: tauri::AppHandle) -> Result<(), String> {
+    demos::sign_in(&app).map_err(|e| e.to_string())
+}
+
+/// The demo queue: "cancel", or "retry" the current match (after signing in to FACEIT).
 #[tauri::command]
 fn demo_queue(app: tauri::AppHandle, action: String) {
     demos::control(&app, &action);
@@ -394,6 +411,7 @@ fn main() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(std::sync::Arc::new(std::sync::Mutex::new(demos::Queue::default())))
+        .manage(std::sync::Arc::new(std::sync::Mutex::new(demos::Bridge::default())))
         .manage(AppState { settings: settings.clone(), status: status.clone(), jobs: Mutex::new(tx.clone()), abort: abort.clone() })
         .invoke_handler(tauri::generate_handler![
             library_root,
@@ -412,6 +430,7 @@ fn main() {
             get_demos,
             demo_queue,
             demo_queue_state,
+            faceit_sign_in,
             render_clips,
             delete_clips,
             create_folder,

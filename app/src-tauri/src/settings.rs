@@ -125,7 +125,6 @@ pub struct RenderOptions {
     pub fps: u32,
     /// "cut" or "fade" between the parts of a highlight.
     pub transition: String,
-    pub hide_fps_counter: bool,
     /// Kill feed only (Allstar look) instead of the full spectator HUD.
     pub killfeed_only: bool,
     /// The recorded player's own crosshair instead of the profile's.
@@ -146,7 +145,6 @@ impl RenderOptions {
             height: p["output"]["height"].as_u64().unwrap_or(1080) as u32,
             fps: p["output"]["fps"].as_u64().unwrap_or(60) as u32,
             transition: p["output"]["transition"].as_str().unwrap_or("cut").into(),
-            hide_fps_counter: p["output"]["hide_fps_counter"].as_bool().unwrap_or(true),
             killfeed_only: c("cl_draw_only_deathnotices") != "0",
             own_crosshair: c("cl_show_observer_crosshair") == "2",
             xray: c("spec_show_xray") == "1",
@@ -164,7 +162,9 @@ impl RenderOptions {
         p["output"]["width"] = (height * 16 / 9).into();
         p["output"]["fps"] = (if self.fps == 30 { 30 } else { 60 }).into();
         p["output"]["transition"] = (if self.transition == "fade" { "fade" } else { "cut" }).into();
-        p["output"]["hide_fps_counter"] = self.hide_fps_counter.into();
+        // Recordings are of CS2's own window, which Steam's overlay (FPS counter) isn't part of:
+        // nothing to cover, and covering a corner could hide real footage.
+        p["output"]["hide_fps_counter"] = false.into();
         p["console"]["cl_draw_only_deathnotices"] = (if self.killfeed_only { "1" } else { "0" }).into();
         p["console"]["cl_show_observer_crosshair"] = (if self.own_crosshair { "2" } else { "0" }).into();
         p["console"]["spec_show_xray"] = (if self.xray { "1" } else { "0" }).into();

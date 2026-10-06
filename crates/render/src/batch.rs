@@ -6,16 +6,47 @@
 //! file is saved as soon as a clip is done, so the app shows clips as they finish and an
 //! interrupted run loses nothing.
 
-use crate::assemble::make_thumb;
+use crate::assemble::{make_thumb, SETTLE_S};
 use crate::profile::Profile;
 use crate::session::{Aborted, DemoIncompatible, Renderer};
 use anyhow::{Context, Result};
 use cs2hl_core::library::{HighlightEntry, Index, MatchEntry};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Instant;
+
+/// Ticks between samples of the player's health when trimming parts.
+const LIFE_STEP: i32 = 8;
+const TICKRATE: f64 = 64.0;
+
+/// The player's position and health at the ticks this match's clips need: where CS2's camera
+/// must be (their eyes), and when a part has to end (once they die, CS2's camera moves on to
+/// someone else). Empty if the demo can't be read.
+fn sample_me(demo: &[u8], me: u64, m: &MatchEntry) -> HashMap<i32, (f64, f64, f64)> {
+    let settle = (SETTLE_S * TICKRATE) as i32;
+    let segments = m.highlights.iter().flat_map(|h| h.segments.iter()).chain(m.lowlights.iter().flat_map(|l| l.segments.iter()));
+    let mut ticks: Vec<i32> = segments.flat_map(|&(s, e)| std::iter::once(s - settle).chain((s..=e).step_by(LIFE_STEP as usize))).collect();
+    ticks.sort_unstable();
+    ticks.dedup();
+    let Ok(data) = cs2hl_core::raw::players_series(demo, &[me], &["X", "Y", "health"], &ticks) else { return HashMap::new() };
+    data.into_iter()
+        .filter_map(|((_, t), v)| Some((t, (*v.get("X")?, *v.get("Y")?, v.get("health").copied().unwrap_or(100.0)))))
+        .collect()
+}
+
+/// Ends each part a moment after the player dies (and drops parts that would start after it).
+fn trim_to_life(segments: &[(i32, i32)], me: &HashMap<i32, (f64, f64, f64)>) -> Vec<(i32, i32)> {
+    segments
+        .iter()
+        .filter_map(|&(s, e)| {
+            let death = (s..=e).step_by(LIFE_STEP as usize).find(|t| me.get(t).is_some_and(|p| p.2 <= 0.0));
+            let e = death.map_or(e, |d| e.min(d + 16));
+            (e - s >= 32).then_some((s, e))
+        })
+        .collect()
+}
 
 pub enum Scope {
     LatestSession,
@@ -145,6 +176,7 @@ pub fn render(
     let demos = std::env::temp_dir().join(format!("veloxify-demos-{}", std::process::id()));
     std::fs::create_dir_all(&demos)?;
     let mut loaded: Option<String> = None;
+    let mut me_at: HashMap<i32, (f64, f64, f64)> = HashMap::new();
     let mut broken: Vec<String> = vec![];
     let mut rendered = 0;
     let mut stopped = false;
@@ -162,10 +194,17 @@ pub fn render(
         }
         if loaded.as_deref() != Some(mid.as_str()) {
             let dem: PathBuf = demos.join(format!("{mid}.dem"));
-            if !dem.exists() {
-                std::fs::write(&dem, cs2hl_core::demo_io::read_demo(Path::new(&m.demo_path))?)?;
-            }
-            match renderer.load_demo(&dem) {
+            let bytes = if dem.exists() {
+                std::fs::read(&dem)?
+            } else {
+                let b = cs2hl_core::demo_io::read_demo(Path::new(&m.demo_path))?;
+                std::fs::write(&dem, &b)?;
+                b
+            };
+            me_at = sample_me(&bytes, steamid64, &m);
+            drop(bytes);
+            let me_name = m.players.iter().find(|p| p.steamid == steamid64.to_string()).map(|p| p.name.clone()).unwrap_or_default();
+            match renderer.load_demo(&dem, &me_name) {
                 Ok(()) => loaded = Some(mid.clone()),
                 Err(e) if e.downcast_ref::<Aborted>().is_some() => {
                     stopped = true;
@@ -195,7 +234,15 @@ pub fn render(
         };
         let rel = format!("clips/{hid}.mp4");
         let ts = Instant::now();
-        match renderer.record(&segments, &lib.join(&rel)) {
+        // Only while you're alive: after you die, CS2's camera follows someone else.
+        let segments = if me_at.is_empty() { segments } else { trim_to_life(&segments, &me_at) };
+        let eyes = |t: i32| me_at.get(&t).map(|p| (p.0, p.1));
+        let recorded = if segments.is_empty() {
+            Err(anyhow::anyhow!("you weren't alive for this moment"))
+        } else {
+            renderer.record(&segments, &lib.join(&rel), &eyes)
+        };
+        match recorded {
             Ok(()) => {
                 let thumb = format!("clips/{hid}.jpg");
                 let thumb = make_thumb(&lib.join(&rel), &lib.join(&thumb)).is_ok().then_some(thumb);

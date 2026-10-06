@@ -27,6 +27,21 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 const TICKRATE: f64 = 64.0;
+/// How far (game units) CS2's camera may be from the player's position before a part counts as
+/// filmed from someone else's eyes.
+const POV_TOLERANCE: f64 = 64.0;
+
+/// CS2's camera wasn't in the player's eyes, even after locking it again: the clip is skipped
+/// rather than made from someone else's view.
+#[derive(Debug)]
+pub struct WrongPov;
+
+impl std::fmt::Display for WrongPov {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("CS2's camera wasn't on you, so this clip was skipped")
+    }
+}
+impl std::error::Error for WrongPov {}
 
 /// CS2 refuses demos recorded on older game versions (network protocol changes).
 #[derive(Debug)]
@@ -63,7 +78,9 @@ pub struct Renderer {
     applied: Mutex<Option<Vec<(String, String)>>>,
     pid: Option<u32>,
     audio: Option<Audio>,
-    account_id: u64,
+    /// The player's name in the loaded demo (FACEIT nickname or Steam name): the camera follows
+    /// them by name.
+    pov_name: Mutex<String>,
     abort: Arc<AtomicBool>,
     wants_cs2: Arc<AtomicBool>,
     closed: Arc<AtomicBool>,
@@ -80,6 +97,16 @@ pub fn cs2_pid() -> Option<u32> {
     }
     let out = String::from_utf8_lossy(&c.output().ok()?.stdout).to_string();
     out.lines().find(|l| l.starts_with("\"cs2.exe\"")).and_then(|l| l.split("\",\"").nth(1)).and_then(|p| p.parse().ok())
+}
+
+/// Puts the user's own video settings back when a render was cut short (Veloxify closed or
+/// crashed mid-render) and CS2 is closed, so their next CS2 never starts with the render's
+/// settings (windowed, 1080p, high quality). Returns whether anything was put back.
+pub fn repair_cut_short_render(steamid64: u64) -> bool {
+    if cs2_running() {
+        return false;
+    }
+    Protector::new(steam::user_cfg_dir(steamid64), PathBuf::new()).restore_video().unwrap_or(false)
 }
 
 pub fn cs2_running() -> bool {
@@ -138,7 +165,7 @@ impl Renderer {
             applied: Mutex::new(None),
             pid: None,
             audio,
-            account_id: steam::account_id(steamid64),
+            pov_name: Mutex::new(String::new()),
             abort,
             wants_cs2: Arc::new(AtomicBool::new(false)),
             closed: Arc::new(AtomicBool::new(false)),
@@ -210,19 +237,41 @@ impl Renderer {
         Ok(())
     }
 
-    /// From here on, CS2 becoming the foreground window means someone wants to use it (Play in
-    /// Steam, FACEIT's Connect): stop rendering and hand it back.
+    /// Stops rendering when a person clearly wants CS2: they bring its window forward twice
+    /// within 15 seconds, each time right after real keyboard or mouse input. CS2 also comes
+    /// forward by itself (loading a demo, or when another window closes) with nobody there, even
+    /// overnight; then it's pushed back out of the way and the render carries on.
     fn watch_for_user(&self) {
         let (abort, wants, closed) = (self.abort.clone(), self.wants_cs2.clone(), self.closed.clone());
         std::thread::spawn(move || {
+            // The last window other than CS2 that had the focus.
+            let mut before = window::foreground();
+            let mut asked_at: Option<Instant> = None;
+            let mut was_forward = false;
             while !closed.load(Ordering::SeqCst) {
-                if let Some(h) = window::cs2_window() {
-                    if h == window::foreground() {
+                let fg = window::foreground();
+                let forward = window::cs2_window().is_some_and(|h| h == fg);
+                if forward && !was_forward {
+                    let person = window::idle_ms() < 2000;
+                    eprintln!("veloxify: CS2 came forward (from {:?}; input {} ms ago)", window::title(before), window::idle_ms());
+                    if person && asked_at.is_some_and(|t| t.elapsed() < Duration::from_secs(15)) {
                         wants.store(true, Ordering::SeqCst);
                         abort.store(true, Ordering::SeqCst);
                         return;
                     }
+                    if person {
+                        asked_at = Some(Instant::now());
+                    }
+                    window::park_offscreen();
+                    if window::is_open(before) {
+                        window::set_foreground(before);
+                    } else {
+                        window::focus_desktop();
+                    }
+                } else if !forward && !fg.is_invalid() {
+                    before = fg;
                 }
+                was_forward = forward;
                 std::thread::sleep(Duration::from_millis(250));
             }
         });
@@ -230,6 +279,32 @@ impl Renderer {
 
     fn vc(&self) -> &VConsole {
         self.vc.as_ref().expect("renderer not started")
+    }
+
+    /// Puts CS2's camera in the player's eyes, by their name in the demo. (CS2 ignores
+    /// `spec_lock_to_accountid` and `spec_player_by_accountid` in demos: the camera stays with
+    /// CS2's auto-director, jumping between players. `spec_player "<name>"` works and holds
+    /// through jumps; `record` still checks every part.)
+    fn lock_pov(&self) {
+        let name = self.pov_name.lock().unwrap().replace(['"', ';'], "");
+        if !name.is_empty() {
+            self.vc().send(&format!("spec_player \"{name}\""));
+        }
+    }
+
+    /// Where CS2's camera is (x, y), from `getpos`.
+    fn camera(&self) -> Option<(f64, f64)> {
+        let vc = self.vc();
+        let since = vc.mark();
+        vc.send("getpos");
+        let line = vc.wait_for("setpos", Duration::from_secs(2), since)?;
+        let nums: Vec<f64> = line.split(|c: char| c.is_whitespace() || c == ';').filter_map(|w| w.parse().ok()).collect();
+        (nums.len() >= 2).then(|| (nums[0], nums[1]))
+    }
+
+    /// CS2's console, for tools that probe a loaded demo (e.g. `examples/pov_probe.rs`).
+    pub fn console(&self) -> &VConsole {
+        self.vc()
     }
 
     fn revert_settings(&self) {
@@ -240,7 +315,9 @@ impl Renderer {
         }
     }
 
-    pub fn load_demo(&self, path: &Path) -> Result<()> {
+    /// Loads a demo; `player` is the recorded player's name in it.
+    pub fn load_demo(&self, path: &Path, player: &str) -> Result<()> {
+        *self.pov_name.lock().unwrap() = player.to_string();
         self.check()?;
         // CS2 saves the config when a demo loads: make sure it saves the user's own values.
         self.revert_settings();
@@ -261,13 +338,15 @@ impl Renderer {
         window::park_offscreen();
         self.pause(Duration::from_secs(1))?;
         *self.applied.lock().unwrap() = Some(self.protector.apply_console(vc, &self.console)?);
-        vc.send(&format!("spec_lock_to_accountid {}", self.account_id));
+        self.lock_pov();
         (self.log)(&format!("demo loaded in {:.0}s", t0.elapsed().as_secs_f64()));
         Ok(())
     }
 
-    /// Records the tick ranges and assembles them into `out`.
-    pub fn record(&self, segments: &[(i32, i32)], out: &Path) -> Result<()> {
+    /// Records the tick ranges and assembles them into `out`. `eyes(tick)` is where the player
+    /// is at a tick (from the demo): each part is checked to start in their eyes, never anyone
+    /// else's; `None` when unknown.
+    pub fn record(&self, segments: &[(i32, i32)], out: &Path, eyes: &dyn Fn(i32) -> Option<(f64, f64)>) -> Result<()> {
         let vc = self.vc();
         let o = &self.profile.output;
         let tmp = std::env::temp_dir().join(format!("veloxify-{}", std::process::id()));
@@ -277,10 +356,33 @@ impl Renderer {
             for (i, &(start, end)) in segments.iter().enumerate() {
                 self.check()?;
                 vc.send("demo_pause");
-                vc.send(&format!("demo_gototick {}", start - (SETTLE_S * TICKRATE) as i32));
+                let at = start - (SETTLE_S * TICKRATE) as i32;
+                vc.send(&format!("demo_gototick {at}"));
                 self.pause(Duration::from_millis(1500))?; // anything still settling is trimmed
-                vc.send(&format!("spec_lock_to_accountid {}", self.account_id));
-                self.pause(Duration::from_millis(300))?;
+                // The player's own view, checked: never a clip from someone else's eyes.
+                let mut on_you = false;
+                for attempt in 0..3u64 {
+                    self.lock_pov();
+                    self.pause(Duration::from_millis(400 + 400 * attempt))?;
+                    match (eyes(at), self.camera()) {
+                        (None, _) => {
+                            on_you = true; // nothing to check against: trust the lock
+                            break;
+                        }
+                        (Some(want), Some(got)) => {
+                            let off = (want.0 - got.0).hypot(want.1 - got.1);
+                            if off <= POV_TOLERANCE {
+                                on_you = true;
+                                break;
+                            }
+                            (self.log)(&format!("camera {off:.0} units from you at tick {at}; locking it again"));
+                        }
+                        (Some(_), None) => (self.log)("CS2 didn't say where its camera is; locking it again"),
+                    }
+                }
+                if !on_you {
+                    return Err(WrongPov.into());
+                }
                 let video = tmp.join(format!("part{i}.mp4"));
                 let opts = CaptureOptions {
                     window_title: window::TITLE.into(),
@@ -333,6 +435,10 @@ impl Renderer {
         }
         let urgent = self.abort.load(Ordering::SeqCst);
         if self.vc.is_some() {
+            if self.vc().alive() {
+                // The lock outlives CS2: don't leave your own spectating stuck on yourself.
+                self.vc().send("spec_lock_to_accountid 0");
+            }
             if let Some(orig) = self.applied.lock().unwrap().take() {
                 if self.vc().alive() {
                     self.protector.revert_console(self.vc(), &orig);
