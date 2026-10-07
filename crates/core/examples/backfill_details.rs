@@ -26,7 +26,7 @@ fn main() -> anyhow::Result<()> {
         details::write(&lib, &m.id, &demo, &mm, &a, me)?;
         n += 1;
     }
-    details::write_benchmarks(&lib)?;
+    details::write_benchmarks(&lib, Some(me))?;
     println!("built {n} in {:.0}s", t.elapsed().as_secs_f64());
     Ok(())
 }

@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
 /// Bumped whenever what's in a details file changes, so older ones are rebuilt.
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 
 /// Spotted state is sampled every this many ticks.
 const SPOT_STEP: i32 = 2;
@@ -145,6 +145,9 @@ pub const STATS: &[(&str, bool)] = &[
     ("spray_accuracy", false),
     ("counter_strafe", false),
     ("accuracy", false),
+    ("accurate_movement", false),
+    ("air_shot_pct", true),
+    ("air_accuracy", false),
     ("nades_per_round", false),
     ("flash_assist_pct", false),
     ("enemies_per_flash", false),
@@ -181,6 +184,9 @@ impl DPlayer {
         rate("spray_accuracy", a.spray_hits, a.spray_shots, MIN_SAMPLE);
         rate("counter_strafe", a.strafe_good, a.strafe_shots, MIN_SAMPLE);
         rate("accuracy", a.hits, a.shots, MIN_SAMPLE);
+        rate("accurate_movement", a.move_accurate, a.move_shots, MIN_SAMPLE);
+        rate("air_shot_pct", a.air_shots, a.spotted_shots, MIN_SAMPLE);
+        rate("air_accuracy", a.air_hits, a.air_shots, 3);
         rate("flash_assist_pct", u.flash_assists, u.flashes, 1);
         rate("wasted_magazine", ac.wasted_bullets, ac.magazine_bullets, 1);
         rate("rounds_survived_pct", ac.rounds_survived, ac.rounds, 1);
@@ -224,8 +230,80 @@ pub struct Benchmark {
     pub lower_is_better: bool,
 }
 
-pub fn write_benchmarks(root: &std::path::Path) -> Result<()> {
+/// Overall stats every analyzed match has (from the scoreboard rows), usable in custom ratings and
+/// trends next to the details stats: key, lower is better.
+pub const CORE_STATS: &[(&str, bool)] = &[
+    ("rating3", false),
+    ("rws", false),
+    ("swing", false),
+    ("adr", false),
+    ("kast", false),
+    ("kd", false),
+    ("kpr", false),
+    ("dpr", true),
+    ("hs_pct", false),
+    ("entry_success", false),
+    ("entry_attempts", false),
+    ("trade_kills_pr", false),
+    ("traded_deaths_pct", false),
+    ("multikill_pr", false),
+    ("utility_damage_pr", false),
+    ("flash_assists_pr", false),
+    ("clutch_wins", false),
+];
+
+/// The core stats of one player row.
+pub fn core_stats(p: &crate::library::PlayerRow) -> std::collections::BTreeMap<String, f64> {
+    let (c, d) = (&p.counts, &p.derived);
+    let rounds = c.rounds.max(1) as f64;
+    let openings = c.opening_kills + c.opening_deaths;
+    let mut s = std::collections::BTreeMap::new();
+    let mut put = |k: &str, v: f64| {
+        if v.is_finite() {
+            s.insert(k.to_string(), v);
+        }
+    };
+    put("rating3", if d.rating3 > 0.0 { d.rating3 } else { d.rating2 });
+    put("rws", d.rws);
+    put("swing", d.swing);
+    put("adr", d.adr);
+    put("kast", d.kast);
+    put("kd", d.kd);
+    put("kpr", d.kpr);
+    put("dpr", d.dpr);
+    put("hs_pct", d.hs_pct);
+    if openings > 0 {
+        put("entry_success", c.opening_kills as f64 * 100.0 / openings as f64);
+    }
+    put("entry_attempts", openings as f64 * 100.0 / rounds);
+    put("trade_kills_pr", c.trade_kills as f64 / rounds);
+    if c.deaths > 0 {
+        put("traded_deaths_pct", c.traded_deaths as f64 * 100.0 / c.deaths as f64);
+    }
+    put("multikill_pr", c.multikill_rounds.iter().skip(2).sum::<u32>() as f64 / rounds);
+    put("utility_damage_pr", c.utility_damage as f64 / rounds);
+    put("flash_assists_pr", c.flash_assists as f64 / rounds);
+    put("clutch_wins", c.clutches_won.iter().sum::<u32>() as f64);
+    s
+}
+
+/// One of the owner's matches, for trends over time (`my_stats.json`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MyMatch {
+    pub id: String,
+    pub ts: i64,
+    pub source: String,
+    pub result: String,
+    pub rounds: u32,
+    pub stats: std::collections::BTreeMap<String, f64>,
+}
+
+/// Writes `benchmarks.json` (every stat's distribution over all player-matches) and, given the
+/// owner, `my_stats.json` (their stats per match: core stats and details stats).
+pub fn write_benchmarks(root: &std::path::Path, me: Option<u64>) -> Result<()> {
     let mut values: HashMap<&str, Vec<f64>> = HashMap::new();
+    let mut mine: HashMap<String, std::collections::BTreeMap<String, f64>> = HashMap::new();
+    let me_s = me.map(|m| m.to_string()).unwrap_or_default();
     for f in std::fs::read_dir(root.join("matches"))?.flatten() {
         let p = f.path();
         if !p.to_string_lossy().ends_with(".details.json") {
@@ -238,10 +316,39 @@ pub fn write_benchmarks(root: &std::path::Path) -> Result<()> {
                     values.entry(k).or_default().push(*v);
                 }
             }
+            if pl.steamid == me_s {
+                let id = p.file_name().unwrap().to_string_lossy().trim_end_matches(".details.json").to_string();
+                mine.insert(id, pl.stats.clone());
+            }
         }
     }
+    let mut my_matches = vec![];
+    for f in std::fs::read_dir(root.join("matches"))?.flatten() {
+        let p = f.path();
+        if !crate::library::is_entry_file(&p) {
+            continue;
+        }
+        let Ok(e) = serde_json::from_str::<crate::library::MatchEntry>(&std::fs::read_to_string(&p)?) else { continue };
+        for pl in &e.players {
+            let core = core_stats(pl);
+            for (k, _) in CORE_STATS {
+                if let Some(v) = core.get(*k) {
+                    values.entry(k).or_default().push(*v);
+                }
+            }
+            if pl.steamid == me_s {
+                let mut stats = core;
+                stats.extend(mine.remove(&e.id).unwrap_or_default());
+                my_matches.push(MyMatch { id: e.id.clone(), ts: e.played_ts, source: e.source.clone(), result: e.result.clone(), rounds: e.rounds, stats });
+            }
+        }
+    }
+    if me.is_some() {
+        my_matches.sort_by_key(|m| m.ts);
+        std::fs::write(root.join("my_stats.json"), serde_json::to_string(&my_matches)?)?;
+    }
     let mut out = std::collections::BTreeMap::new();
-    for (k, lower) in STATS {
+    for (k, lower) in STATS.iter().chain(CORE_STATS) {
         let Some(mut v) = values.remove(k) else { continue };
         v.sort_by(|a, b| a.total_cmp(b));
         let n = v.len();
@@ -286,6 +393,16 @@ pub struct Aim {
     /// Rifle shots with an enemy spotted (not fully crouched), and those below 34% speed.
     pub strafe_shots: u32,
     pub strafe_good: u32,
+    /// Movement, any gun, enemy spotted: shots on the ground (not fully crouched) and those
+    /// below 34% of the gun's max speed; shots fired in the air and their hits.
+    #[serde(default)]
+    pub move_shots: u32,
+    #[serde(default)]
+    pub move_accurate: u32,
+    #[serde(default)]
+    pub air_shots: u32,
+    #[serde(default)]
+    pub air_hits: u32,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -347,16 +464,7 @@ fn magazine(w: &str) -> u32 {
     }
 }
 
-/// Running speed of each gun (units/s); a gun is accurate below 34% of it.
-fn max_speed(w: &str) -> f64 {
-    match w {
-        "ak47" | "galilar" => 215.0,
-        "m4a1" | "m4a1_silencer" => 225.0,
-        "famas" | "aug" => 220.0,
-        "sg556" => 210.0,
-        _ => 240.0,
-    }
-}
+use crate::lowlights::max_speed;
 
 fn is_gun(w: &str) -> bool {
     matches!(weapon_class(w), "rifle" | "awp" | "scout" | "auto" | "deagle" | "pistol" | "smg" | "shotgun" | "mg")
@@ -637,7 +745,7 @@ pub fn build(demo: &[u8], m: &Match, a: &Analysis, me: u64) -> Result<MatchDetai
         state_ticks.insert(hit);
     }
     for (p, list) in &shots {
-        for s in list.iter().filter(|s| weapon_class(&s.weapon) == "rifle" && has_spotted(*p, s.tick)) {
+        for s in list.iter().filter(|s| has_spotted(*p, s.tick)) {
             state_ticks.insert(s.tick);
             state_ticks.insert(s.tick - 1);
         }
@@ -651,7 +759,7 @@ pub fn build(demo: &[u8], m: &Match, a: &Analysis, me: u64) -> Result<MatchDetai
     let mut state_ticks: Vec<i32> = state_ticks.into_iter().filter(|t| *t > 0).collect();
     state_ticks.sort_unstable();
     let state =
-        raw::players_values(demo, &["X", "Y", "pitch", "yaw", "duck_amount", "inventory", "active_weapon_ammo"], &state_ticks)?;
+        raw::players_values(demo, &["X", "Y", "pitch", "yaw", "duck_amount", "is_airborne", "inventory", "active_weapon_ammo"], &state_ticks)?;
     let num = |s: u64, t: i32, k: &str| match state.get(&(s, t)).and_then(|v| v.get(k)) {
         Some(Val::Num(x)) => Some(*x),
         _ => None,
@@ -676,17 +784,24 @@ pub fn build(demo: &[u8], m: &Match, a: &Analysis, me: u64) -> Result<MatchDetai
                     aim.first_shots += 1;
                     aim.first_hits += sh.hit as u32;
                 }
-                if weapon_class(&sh.weapon) == "rifle" {
-                    if sh.spray {
-                        aim.spray_shots += 1;
-                        aim.spray_hits += sh.hit as u32;
-                    }
-                    let pos = |t: i32| Some((num(s, t, "X")?, num(s, t, "Y")?));
-                    if let (Some(a0), Some(a1), duck) = (pos(sh.tick - 1), pos(sh.tick), num(s, sh.tick, "duck_amount").unwrap_or(0.0)) {
-                        if duck < CROUCHED {
-                            let speed = (a1.0 - a0.0).hypot(a1.1 - a0.1) * TICKRATE;
+                let rifle = weapon_class(&sh.weapon) == "rifle";
+                if rifle && sh.spray {
+                    aim.spray_shots += 1;
+                    aim.spray_hits += sh.hit as u32;
+                }
+                let pos = |t: i32| Some((num(s, t, "X")?, num(s, t, "Y")?));
+                let airborne = num(s, sh.tick, "is_airborne").unwrap_or(0.0) > 0.5;
+                if airborne {
+                    aim.air_shots += 1;
+                    aim.air_hits += sh.hit as u32;
+                } else if let (Some(a0), Some(a1), duck) = (pos(sh.tick - 1), pos(sh.tick), num(s, sh.tick, "duck_amount").unwrap_or(0.0)) {
+                    if duck < CROUCHED {
+                        let accurate = (a1.0 - a0.0).hypot(a1.1 - a0.1) * TICKRATE < 0.34 * max_speed(&sh.weapon);
+                        aim.move_shots += 1;
+                        aim.move_accurate += accurate as u32;
+                        if rifle {
                             aim.strafe_shots += 1;
-                            aim.strafe_good += (speed < 0.34 * max_speed(&sh.weapon)) as u32;
+                            aim.strafe_good += accurate as u32;
                         }
                     }
                 }

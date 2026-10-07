@@ -97,7 +97,7 @@ pub struct Lowlight {
 }
 
 /// Running speed of each gun (units/s); a gun is accurate below 34% of it.
-fn max_speed(w: &str) -> f64 {
+pub(crate) fn max_speed(w: &str) -> f64 {
     match w {
         "ak47" | "galilar" => 215.0,
         "m4a1" | "m4a1_silencer" | "mag7" => 225.0,

@@ -183,8 +183,8 @@ impl Worker {
                 eprintln!("put back your CS2 video settings after a render was cut short");
             }
             let imported = self.import(&settings, me);
-            if imported {
-                let _ = cs2hl_core::details::write_benchmarks(&settings.library_dir);
+            if imported || !settings.library_dir.join("my_stats.json").exists() {
+                let _ = cs2hl_core::details::write_benchmarks(&settings.library_dir, Some(me));
             }
             // Get demos started meanwhile: finish downloading before analyzing or rendering more.
             if crate::demos::downloading(&self.app) {
@@ -283,7 +283,7 @@ impl Worker {
             }
         }
         if built > 0 {
-            let _ = cs2hl_core::details::write_benchmarks(lib);
+            let _ = cs2hl_core::details::write_benchmarks(lib, Some(me));
         }
         built > 0
     }

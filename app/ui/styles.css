@@ -784,6 +784,60 @@ input[type=color] { width: 44px; height: 30px; padding: 2px; background: var(--r
   .hs-chart { --label: 96px; }
 }
 
+/* ---- custom ratings and trends ------------------------------------------------------------ */
+.my-ratings { margin-bottom: 20px; }
+.my-ratings .panel-head .sub { margin-left: 4px; }
+.my-ratings-row { display: flex; flex-wrap: wrap; gap: 26px; padding: 0 20px 20px; }
+.my-rating { display: block; border-radius: var(--radius); }
+.my-rating:hover { background: var(--row); }
+.trends { margin-bottom: 20px; }
+.trends .panel-head { flex-wrap: wrap; }
+.trends select { max-width: 240px; }
+.trend-body { padding: 0 14px 4px; }
+.trend-svg { display: block; width: 100%; height: auto; }
+.trend-svg .grid { stroke: var(--line); stroke-width: 1; }
+.trend-svg .ref { stroke: var(--faint); stroke-width: 1.5; stroke-dasharray: 6 5; }
+.trend-svg .line { fill: none; stroke: var(--accent); stroke-width: 2.5; stroke-linejoin: round; stroke-linecap: round; }
+.trend-svg .pt { fill: var(--accent); stroke: var(--card); stroke-width: 2.5; }
+.trend-svg .pt-g:hover .pt { r: 7; }
+.trend-svg .hit { fill: transparent; }
+.trend-svg .axis { fill: var(--muted); font-size: 13px; }
+.trend-svg .val { fill: var(--text); font-size: 14px; font-weight: 700; }
+.trend-strip { display: flex; gap: 6px; overflow-x: auto; padding: 4px 20px 14px; }
+.trend-cell { flex: none; min-width: 92px; padding: 8px 10px; background: var(--row); border-radius: var(--radius-sm); display: flex; flex-direction: column; gap: 2px; }
+.trend-cell span { font-size: 11.5px; color: var(--muted); white-space: nowrap; }
+.trend-cell b { font-size: 16px; }
+.trend-cell em { font-style: normal; font-size: 11px; color: var(--faint); }
+.trends .note { padding: 0 20px 16px; margin: 0; }
+.empty.small { padding: 30px; }
+.rb-grid { display: grid; grid-template-columns: 300px 1fr; gap: 20px; align-items: start; }
+.rb-list { padding-bottom: 14px; }
+.rb-item { display: flex; justify-content: space-between; width: calc(100% - 24px); margin: 0 12px 6px; padding: 10px 14px; border: 1px solid var(--line-2);
+  background: var(--row); border-radius: var(--radius-sm); cursor: pointer; font-weight: 600; text-align: left; }
+.rb-item:hover { background: var(--row-hi); }
+.rb-item.on { border-color: var(--accent); color: var(--accent-text); }
+.rb-actions { display: flex; gap: 8px; padding: 8px 12px; flex-wrap: wrap; }
+.rb-list .note { padding: 6px 14px 0; }
+.rb-name { font-size: 20px; font-weight: 800; background: transparent; border: 1px solid transparent; padding: 4px 8px; max-width: 360px; }
+.rb-name:hover, .rb-name:focus { border-color: var(--line-2); background: var(--row); }
+.rb-you { text-align: right; margin-right: 10px; }
+.rb-you b { display: block; font-size: 28px; line-height: 1; }
+.rb-table { width: 100%; border-collapse: separate; border-spacing: 0 4px; padding: 0 14px; }
+.rb-table th { text-align: left; font-size: 12.5px; color: var(--muted); font-weight: 700; padding: 6px 10px; }
+.rb-table td { background: var(--row); padding: 8px 10px; }
+.rb-table td:first-child { border-radius: var(--radius-sm) 0 0 var(--radius-sm); }
+.rb-table td:last-child { border-radius: 0 var(--radius-sm) var(--radius-sm) 0; text-align: right; }
+.rb-w { white-space: nowrap; }
+.rb-w input[type=range] { width: 160px; vertical-align: middle; accent-color: var(--accent); }
+.rb-w input[type=number] { width: 58px; margin-left: 8px; }
+.pull { position: relative; display: inline-block; width: 110px; height: 10px; background: var(--row-hi); border-radius: 5px; vertical-align: middle; }
+.pull::after { content: ""; position: absolute; left: 50%; top: -3px; bottom: -3px; width: 1px; background: var(--faint); }
+.pull i { position: absolute; top: 0; bottom: 0; border-radius: 5px; }
+.pull i.pos { background: var(--win); }
+.pull i.neg { background: var(--loss); }
+.rb-add { padding: 8px 14px 16px; }
+@media (max-width: 900px) { .rb-grid { grid-template-columns: 1fr; } }
+
 /* ---- player modal ------------------------------------------------------------------------ */
 .player-modal { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.88); display: flex; align-items: center; justify-content: center; z-index: 50; }
 .player-modal[hidden] { display: none; }

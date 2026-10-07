@@ -14,7 +14,7 @@ async function initLib() {
 }
 const assetUrl = (rel) => (tauri ? tauri.core.convertFileSrc(`${LIB}\\${rel.replaceAll("/", "\\")}`) : `${LIB}/${rel}`);
 
-const state = { index: null, faceit: null, matches: new Map(), details: new Map(), benchmarks: undefined, month: null, playlist: [], playing: -1 };
+const state = { index: null, faceit: null, matches: new Map(), details: new Map(), benchmarks: undefined, myStats: undefined, month: null, playlist: [], playing: -1 };
 const BROWSER_DEFAULTS = { heroPeriod: "week", sort: "best", when: "all", from: "", to: "", source: "all", map: "all", types: [], playableOnly: true, hideEco: false, preset: "", tags: [], folder: "" };
 let browser = { ...BROWSER_DEFAULTS };
 try { browser = { ...BROWSER_DEFAULTS, ...JSON.parse(localStorage.getItem("veloxify.browser") || "{}") }; } catch (e) { /* defaults */ }
@@ -271,6 +271,10 @@ async function route() {
       return;
     }
   }
+  if (parts[0] === "ratings") {
+    document.querySelector('[data-nav="profile"]').classList.add("active");
+    return renderRatingBuilder(view, parts[1] ? decodeURIComponent(parts[1]) : null);
+  }
   if (parts[0] === "match" && parts[1]) {
     document.querySelector('[data-nav="matches"]').classList.add("active");
     return renderMatchPage(view, decodeURIComponent(parts[1]), parts[2] || "overview");
@@ -504,7 +508,7 @@ async function renderMatchPage(view, id, tab) {
   if (!s) { view.innerHTML = `<a class="day-back" href="#/matches">◀ Match history</a><div class="empty">Match not found.</div>`; return; }
   const m = s.stats_only ? null : await loadMatch(id);
   const tabs = [["overview", "Overview"]];
-  if (m) tabs.push(["aim", "Aim"], ["utility", "Utility"], ["activity", "Activity"], ["opening", "Opening Duels"], ["clutches", "Clutches"],
+  if (m) tabs.push(["aim", "Aim"], ["utility", "Utility"], ["activity", "Activity"], ["opening", "Opening Duels"], ["clutches", "Clutches"], ["ratings", "Ratings"],
     ["highlights", `Highlights${m.highlights.length ? ` (${m.highlights.length})` : ""}`], ["lowlights", `Lowlights${(m.lowlights || []).length ? ` (${m.lowlights.length})` : ""}`]);
   if (!tabs.some(([k]) => k === tab)) tab = "overview";
   const fm = s.faceit;
@@ -539,6 +543,7 @@ async function renderMatchPage(view, id, tab) {
   if (tab === "aim" || tab === "utility" || tab === "activity") return renderStatTab(body, m, id, tab);
   if (tab === "opening") return renderOpeningTab(body, m, id);
   if (tab === "clutches") return renderClutchTab(body, m, id);
+  if (tab === "ratings") return renderRatingsTab(body, m, id);
   body.innerHTML = `<div id="mp-summary"></div><div id="mp-board"></div>`;
   renderMatchScoreboard(body.querySelector("#mp-board"), m);
   await renderMatchSummary(body.querySelector("#mp-summary"), m, id);
@@ -980,6 +985,388 @@ async function renderMatchSummary(el, m, id) {
     </section>`;
 }
 
+// ---- custom ratings, trends ----------------------------------------------------------------------
+
+// Every stat a custom rating or a trend can use: key, label, group, format. Lower-is-better comes
+// from the library benchmarks.
+const pct1 = (v) => `${v.toFixed(1)}%`;
+const n0 = (v) => `${Math.round(v)}`;
+const STAT_CATALOG = [
+  ["rating3", "HLTV Rating 3.0", "Overall", f2], ["rws", "RWS", "Overall", f1], ["swing", "Swing / round", "Overall", fmtSwing],
+  ["adr", "ADR", "Overall", f1], ["kast", "KAST", "Overall", pct1], ["kd", "K/D", "Overall", f2], ["kpr", "Kills per round", "Overall", f2],
+  ["dpr", "Deaths per round", "Overall", f2], ["hs_pct", "Headshot kills %", "Overall", pct0], ["entry_success", "Opening duel success", "Overall", pct0],
+  ["entry_attempts", "Opening duel attempts", "Overall", pct0], ["trade_kills_pr", "Trade kills per round", "Overall", f2],
+  ["traded_deaths_pct", "Deaths traded", "Overall", pct0], ["multikill_pr", "Multi-kill rounds per round", "Overall", f2],
+  ["utility_damage_pr", "Utility damage per round", "Overall", f1], ["flash_assists_pr", "Flash assists per round", "Overall", f2], ["clutch_wins", "Clutches won", "Overall", n0],
+  ["spotted_accuracy", "Spotted accuracy", "Aim", pct0], ["ttd_ms", "Time to damage", "Aim", ms0], ["ttk_ms", "Time to kill", "Aim", ms0],
+  ["crosshair_deg", "Crosshair placement", "Aim", deg2], ["head_accuracy", "Head accuracy", "Aim", pct0], ["hs_kill_pct", "HS kill %", "Aim", pct0],
+  ["first_bullet", "First bullet accuracy", "Aim", pct0], ["spray_accuracy", "Spray accuracy", "Aim", pct0], ["accuracy", "Accuracy (all)", "Aim", pct0],
+  ["counter_strafe", "Counter-strafing (rifles)", "Movement", pct0], ["accurate_movement", "Shots while stopped (all guns)", "Movement", pct0],
+  ["air_shot_pct", "Shots while jumping", "Movement", pct1], ["air_accuracy", "Accuracy while jumping", "Movement", pct0],
+  ["nades_per_round", "Grenades per round", "Utility", f2], ["flash_assist_pct", "Flash assists per flash", "Utility", pct0],
+  ["enemies_per_flash", "Enemies flashed per flash", "Utility", f2], ["friends_per_flash", "Friends flashed per flash", "Utility", f2],
+  ["blind_time", "Average blind time", "Utility", (v) => `${v.toFixed(1)}s`], ["he_damage_avg", "Damage per HE", "Utility", f1],
+  ["he_team_damage_avg", "Team damage per HE", "Utility", f1], ["unused_utility", "Unused utility at death", "Utility", (v) => `$${Math.round(v)}`],
+  ["damage", "Total damage", "Activity", n0], ["he_damage", "HE damage", "Activity", n0], ["molotov_damage", "Molotov damage", "Activity", n0],
+  ["enemies_flashed", "Enemies flashed", "Activity", n0], ["shots", "Shots fired", "Activity", n0], ["wasted_magazine", "Wasted magazine", "Activity", pct0],
+  ["rounds_survived_pct", "Rounds survived", "Activity", pct0],
+];
+const statInfo = new Map(STAT_CATALOG.map(([k, label, group, fmt]) => [k, { label, group, fmt }]));
+const STAT_GROUPS = ["Overall", "Aim", "Movement", "Utility", "Activity"];
+
+// Ratings you build yourself: weighted stats, each against every player in your library.
+const DEFAULT_RATINGS = [
+  { id: "aim", name: "Aim", parts: { spotted_accuracy: 15, ttd_ms: 15, crosshair_deg: 15, head_accuracy: 10, first_bullet: 10, spray_accuracy: 10, ttk_ms: 10, counter_strafe: 10, hs_kill_pct: 5 } },
+  { id: "movement", name: "Movement", parts: { counter_strafe: 40, accurate_movement: 30, air_shot_pct: 20, air_accuracy: 10 } },
+  { id: "utility", name: "Utility", parts: { nades_per_round: 20, flash_assist_pct: 15, enemies_per_flash: 15, he_damage_avg: 15, blind_time: 10, friends_per_flash: 10, unused_utility: 10, he_team_damage_avg: 5 } },
+  { id: "impact", name: "Impact", parts: { swing: 30, adr: 20, entry_success: 15, multikill_pr: 15, kast: 10, clutch_wins: 10 } },
+];
+let customRatings = DEFAULT_RATINGS;
+try { customRatings = JSON.parse(localStorage.getItem("veloxify.ratings") || "null") || DEFAULT_RATINGS; } catch (e) { /* defaults */ }
+const saveRatings = () => { try { localStorage.setItem("veloxify.ratings", JSON.stringify(customRatings)); } catch (e) { /* not saved */ } };
+
+// A custom rating for one set of stats: the weighted average standard score, as 0-100 (50 = the
+// average player in your library). Needs at least half the weight to have data.
+function customRating(r, stats) {
+  let sum = 0, w = 0, total = 0;
+  for (const [k, weight] of Object.entries(r.parts)) {
+    if (!(weight > 0)) continue;
+    total += weight;
+    const z = zOf(k, stats[k]);
+    if (z == null) continue;
+    sum += z * weight;
+    w += weight;
+  }
+  return w > 0 && w >= total / 2 ? Math.round(phi(sum / w) * 100) : null;
+}
+
+async function loadMyStats() {
+  if (state.myStats === undefined) {
+    try {
+      const r = await fetch(assetUrl("my_stats.json"), { cache: "no-store" });
+      state.myStats = r.ok ? await r.json() : [];
+    } catch (e) { state.myStats = []; }
+  }
+  return state.myStats;
+}
+
+// A metric's value for one of your matches: a stat, or "rating:<id>" for a custom rating.
+function metricValue(metric, stats) {
+  if (metric.startsWith("rating:")) {
+    const r = customRatings.find((x) => x.id === metric.slice(7));
+    return r ? customRating(r, stats) : null;
+  }
+  return stats[metric] ?? null;
+}
+const metricLabel = (metric) => (metric.startsWith("rating:") ? `${customRatings.find((x) => x.id === metric.slice(7))?.name || "Rating"} rating` : statInfo.get(metric)?.label || metric);
+const metricFmt = (metric) => (metric.startsWith("rating:") ? n0 : statInfo.get(metric)?.fmt || f2);
+// Where a trend's "average" line sits: 1.00 for HLTV ratings, 50 for custom ratings, else the library mean.
+const metricBaseline = (metric) => (metric === "rating3" ? 1 : metric.startsWith("rating:") ? 50 : state.benchmarks?.[metric]?.mean ?? null);
+
+// ---- periods and buckets -------------------------------------------------------------------------
+
+const TREND_DEFAULTS = { metric: "rating3", period: "year", from: "", to: "" };
+let trend = { ...TREND_DEFAULTS };
+try { trend = { ...TREND_DEFAULTS, ...JSON.parse(localStorage.getItem("veloxify.trends") || "{}") }; } catch (e) { /* defaults */ }
+const saveTrend = () => { try { localStorage.setItem("veloxify.trends", JSON.stringify(trend)); } catch (e) { /* not saved */ } };
+const PERIODS = [["week", "Week"], ["month", "Month"], ["3m", "3 months"], ["year", "12 months"], ["all", "All time"], ["custom", "Dates"]];
+
+const startOfDay = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate());
+const startOfWeek = (d) => { const x = startOfDay(d); x.setDate(x.getDate() - ((x.getDay() + 6) % 7)); return x; };
+const startOfMonth = (d) => new Date(d.getFullYear(), d.getMonth(), 1);
+
+// The buckets a period is shown in: days for a week or month, weeks for 3 months, months beyond.
+function periodBuckets(period, firstTs) {
+  const now = new Date();
+  let from, to = now, unit;
+  if (period === "week") { from = new Date(now - 6 * 864e5); unit = "day"; }
+  else if (period === "month") { from = new Date(now - 29 * 864e5); unit = "day"; }
+  else if (period === "3m") { from = new Date(now.getFullYear(), now.getMonth() - 3, now.getDate()); unit = "week"; }
+  else if (period === "year") { from = new Date(now.getFullYear(), now.getMonth() - 11, 1); unit = "month"; }
+  else if (period === "custom" && trend.from && trend.to) {
+    const day = (iso) => { const [y, mo, d] = iso.split("-").map(Number); return new Date(y, mo - 1, d); }; // local midnight
+    from = day(trend.from); to = new Date(day(trend.to).getTime() + 864e5 - 1);
+    const days = (to - from) / 864e5;
+    unit = days <= 31 ? "day" : days <= 180 ? "week" : "month";
+  } else { from = firstTs ? new Date(firstTs * 1000) : new Date(now.getFullYear(), now.getMonth() - 11, 1); unit = "month"; }
+  const start = unit === "day" ? startOfDay(from) : unit === "week" ? startOfWeek(from) : startOfMonth(from);
+  const out = [];
+  for (let d = start; d <= to && out.length < 400; ) {
+    const next = unit === "day" ? new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1)
+      : unit === "week" ? new Date(d.getFullYear(), d.getMonth(), d.getDate() + 7) : new Date(d.getFullYear(), d.getMonth() + 1, 1);
+    const label = unit === "month" ? `${MONTHS[d.getMonth()]}${d.getMonth() === 0 || !out.length ? ` ${String(d.getFullYear()).slice(2)}` : ""}`
+      : `${d.getDate()} ${MONTHS[d.getMonth()]}`;
+    out.push({ from: d.getTime() / 1000, to: next.getTime() / 1000, label, long: unit === "month" ? `${MONTHS[d.getMonth()]} ${d.getFullYear()}` : unit === "week" ? `Week of ${d.getDate()} ${MONTHS[d.getMonth()]}` : fmtDate(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`) });
+    d = next;
+  }
+  return { buckets: out, unit };
+}
+
+// Your matches (by the profile's source filter) averaged per bucket, weighted by rounds.
+function trendPoints(metric, buckets, myStats) {
+  const src = prof.source;
+  return buckets.map((b) => {
+    const ms = myStats.filter((m) => m.ts >= b.from && m.ts < b.to && (src === "all" || m.source === src));
+    let s = 0, w = 0;
+    for (const m of ms) {
+      const v = metricValue(metric, m.stats);
+      if (v == null) continue;
+      s += v * (m.rounds || 1);
+      w += m.rounds || 1;
+    }
+    return { ...b, n: ms.length, value: w ? s / w : null, wins: ms.filter((m) => m.result === "win").length };
+  });
+}
+
+// One series over time: 2px line, ringed markers, a dashed "average" reference, recessive grid,
+// labels only on the latest, best and worst points, native tooltips on every point.
+function lineChart(points, { fmt, baseline, lowerBetter = false, height = 230, tip = null }) {
+  tip = tip || ((p) => `${p.long}: ${fmt(p.value)} · ${p.n} match${p.n === 1 ? "" : "es"} (${p.wins}-${p.n - p.wins})`);
+  const pts = points.map((p, i) => ({ ...p, i })).filter((p) => p.value != null);
+  if (!pts.length) return `<div class="empty small">No matches in this period.</div>`;
+  const W = 1000, H = height, L = 46, R = 16, T = 18, B = 34;
+  const vals = pts.map((p) => p.value).concat(baseline != null ? [baseline] : []);
+  let lo = Math.min(...vals), hi = Math.max(...vals);
+  const pad = (hi - lo || Math.abs(hi) * 0.1 || 1) * 0.15;
+  lo -= pad; hi += pad;
+  const n = points.length;
+  const x = (i) => L + (n === 1 ? (W - L - R) / 2 : (i * (W - L - R)) / (n - 1));
+  const y = (v) => T + ((hi - v) * (H - T - B)) / (hi - lo);
+  const ticks = Array.from({ length: 4 }, (_, k) => lo + ((k + 0.5) * (hi - lo)) / 4);
+  const grid = ticks.map((t) => `<line class="grid" x1="${L}" x2="${W - R}" y1="${y(t)}" y2="${y(t)}"/><text class="axis" x="${L - 8}" y="${y(t) + 4}" text-anchor="end">${fmt(t)}</text>`).join("");
+  const ref = baseline != null ? `<line class="ref" x1="${L}" x2="${W - R}" y1="${y(baseline)}" y2="${y(baseline)}"/>` : "";
+  // Line segments only between neighbouring buckets that both have data.
+  let path = "";
+  pts.forEach((p, k) => { path += `${k && pts[k - 1].i === p.i - 1 ? "L" : "M"}${x(p.i).toFixed(1)},${y(p.value).toFixed(1)} `; });
+  const best = pts.reduce((a, b) => ((lowerBetter ? b.value < a.value : b.value > a.value) ? b : a));
+  const worst = pts.reduce((a, b) => ((lowerBetter ? b.value > a.value : b.value < a.value) ? b : a));
+  const last = pts[pts.length - 1];
+  const labelled = new Set([last, best, worst]);
+  const every = Math.max(1, Math.ceil(n / 12));
+  const xl = points.map((p, i) => (i % every === 0 || i === n - 1 ? `<text class="axis" x="${x(i)}" y="${H - 10}" text-anchor="middle">${esc(p.label)}</text>` : "")).join("");
+  const dots = pts.map((p) => `<g class="pt-g"><title>${esc(tip(p))}</title>
+    <rect class="hit" x="${x(p.i) - 14}" y="${T}" width="28" height="${H - T - B}"/>
+    <circle class="pt" cx="${x(p.i)}" cy="${y(p.value)}" r="5"/>
+    ${labelled.has(p) ? `<text class="val" x="${x(p.i)}" y="${y(p.value) - 11}" text-anchor="middle">${fmt(p.value)}</text>` : ""}</g>`).join("");
+  return `<svg class="trend-svg" viewBox="0 0 ${W} ${H}" role="img" aria-label="Trend">${grid}${ref}<path class="line" d="${path}"/>${dots}${xl}</svg>`;
+}
+
+// Bars above/below zero (ELO change per bucket), green up, red down, labelled with the change.
+function changeBars(points, { height = 120 }) {
+  const pts = points.map((p, i) => ({ ...p, i }));
+  if (!pts.some((p) => p.value != null)) return "";
+  const W = 1000, H = height, L = 46, R = 16, T = 14, B = 24;
+  const m = Math.max(10, ...pts.map((p) => Math.abs(p.value || 0)));
+  const n = pts.length, slot = (W - L - R) / n, bw = Math.min(46, slot * 0.6);
+  const zero = T + (H - T - B) / 2, scale = (H - T - B) / 2 / m;
+  const bars = pts.filter((p) => p.value != null && p.value !== 0).map((p) => {
+    const cx = L + slot * (p.i + 0.5), h = Math.abs(p.value) * scale, up = p.value > 0;
+    const yTop = up ? zero - h : zero;
+    return `<g><title>${esc(p.long)}: ${p.value > 0 ? "+" : ""}${p.value} ELO</title>
+      <rect x="${cx - bw / 2}" y="${yTop}" width="${bw}" height="${Math.max(1, h)}" rx="3" fill="${up ? WIN : LOSS}"/>
+      <text class="val" x="${cx}" y="${up ? yTop - 4 : yTop + h + 12}" text-anchor="middle">${p.value > 0 ? "+" : ""}${p.value}</text></g>`;
+  }).join("");
+  return `<svg class="trend-svg" viewBox="0 0 ${W} ${H}" role="img" aria-label="ELO change"><line class="grid" x1="${L}" x2="${W - R}" y1="${zero}" y2="${zero}"/>${bars}</svg>`;
+}
+
+// FACEIT ELO per bucket: where you ended each one, and how much it moved.
+function eloPoints(buckets) {
+  const list = (state.faceit?.matches || []).filter((m) => m.elo).map((m) => ({ ts: m.finished_ts || m.started_ts, elo: m.elo })).sort((a, b) => a.ts - b.ts);
+  let prev = null;
+  for (const m of list) if (m.ts < buckets[0]?.from) prev = m.elo;
+  return buckets.map((b) => {
+    const inB = list.filter((m) => m.ts >= b.from && m.ts < b.to);
+    const end = inB.length ? inB[inB.length - 1].elo : null;
+    const change = end != null && prev != null ? end - prev : null;
+    if (end != null) prev = end;
+    return { ...b, value: end, change, n: inB.length, wins: 0 };
+  });
+}
+
+function metricOptions(selected) {
+  const custom = customRatings.map((r) => `<option value="rating:${esc(r.id)}" ${selected === `rating:${r.id}` ? "selected" : ""}>${esc(r.name)} rating</option>`).join("");
+  return `<optgroup label="Your ratings">${custom}</optgroup>${STAT_GROUPS.map((g) => `<optgroup label="${g}">${STAT_CATALOG.filter((s) => s[2] === g)
+    .map(([k, label]) => `<option value="${k}" ${selected === k ? "selected" : ""}>${esc(label)}</option>`).join("")}</optgroup>`).join("")}`;
+}
+
+// The profile's Progress section: any metric over a chosen period, and FACEIT ELO by period.
+async function renderTrends(el) {
+  const [my] = await Promise.all([loadMyStats(), loadBenchmarks()]);
+  const { buckets, unit } = periodBuckets(trend.period, my[0]?.ts);
+  const pts = trendPoints(trend.metric, buckets, my);
+  const fmt = metricFmt(trend.metric);
+  const lowerBetter = !!state.benchmarks?.[trend.metric]?.lower_is_better;
+  const withData = pts.filter((p) => p.value != null);
+  const per = { day: "day", week: "week", month: "month" }[unit];
+  const change = withData.length >= 2 ? withData[withData.length - 1].value - withData[0].value : null;
+  const elo = eloPoints(buckets);
+  const hasElo = elo.some((p) => p.value != null);
+  el.innerHTML = `
+    <section class="panel trends">
+      <div class="panel-head"><div><div class="h3">Progress</div><div class="sub">${esc(metricLabel(trend.metric))} per ${per}${prof.source !== "all" ? ` · ${prof.source === "faceit" ? "FACEIT" : "Premier"} only` : ""}</div></div><span class="grow"></span>
+        <select id="trend-metric">${metricOptions(trend.metric)}</select>
+        <div class="seg">${PERIODS.map(([k, l]) => `<button data-period="${k}" class="${trend.period === k ? "on" : ""}">${l}</button>`).join("")}</div>
+        ${trend.period === "custom" ? `<span class="dates"><input type="date" id="trend-from" value="${trend.from}"> – <input type="date" id="trend-to" value="${trend.to}"></span>` : ""}
+      </div>
+      <div class="trend-body">${lineChart(pts, { fmt, baseline: metricBaseline(trend.metric), lowerBetter })}</div>
+      <div class="trend-strip">${withData.map((p) => `<div class="trend-cell" title="${p.n} match${p.n === 1 ? "" : "es"} (${p.wins}-${p.n - p.wins})"><span>${esc(p.long)}</span><b>${fmt(p.value)}</b><em>${p.n} match${p.n === 1 ? "" : "es"}</em></div>`).join("")}</div>
+      ${change != null ? `<div class="note">From ${esc(withData[0].long)} to ${esc(withData[withData.length - 1].long)}: <b class="${(lowerBetter ? change < 0 : change > 0) ? "up" : change === 0 ? "" : "down"}">${change > 0 ? "+" : ""}${fmt(change)}</b>. Each ${per} averages its matches, weighted by rounds. Dashed line: ${trend.metric === "rating3" ? "1.00 (average)" : trend.metric.startsWith("rating:") ? "50 (the average player in your library)" : "the average player in your library"}.</div>` : ""}
+    </section>
+    ${hasElo ? `<section class="panel trends">
+      <div class="panel-head"><div><div class="h3">FACEIT ELO</div><div class="sub">Where you ended each ${per}, and how much it moved</div></div></div>
+      <div class="trend-body">${lineChart(elo, { fmt: n0, baseline: null, tip: (p) => `${p.long}: ${p.value} ELO after ${p.n} match${p.n === 1 ? "" : "es"}${p.change != null ? ` (${p.change > 0 ? "+" : ""}${p.change})` : ""}` })}</div>
+      <div class="trend-body">${changeBars(elo.map((p) => ({ ...p, value: p.change })), {})}</div>
+    </section>` : ""}`;
+  el.querySelector("#trend-metric").onchange = (e) => { trend.metric = e.target.value; saveTrend(); renderTrends(el); };
+  el.querySelectorAll("[data-period]").forEach((b) => (b.onclick = () => {
+    trend.period = b.dataset.period;
+    if (trend.period === "custom" && !trend.from) {
+      const d = new Date(), f = new Date(d.getFullYear(), d.getMonth() - 1, d.getDate());
+      const iso = (x) => `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, "0")}-${String(x.getDate()).padStart(2, "0")}`;
+      trend.from = iso(f); trend.to = iso(d);
+    }
+    saveTrend(); renderTrends(el);
+  }));
+  for (const id of ["trend-from", "trend-to"]) {
+    const inp = el.querySelector(`#${id}`);
+    if (inp) inp.onchange = () => { trend[id === "trend-from" ? "from" : "to"] = inp.value; saveTrend(); renderTrends(el); };
+  }
+}
+
+// Your custom ratings over the profile's selection (last N matches, source).
+async function renderMyRatings(el) {
+  const [my] = await Promise.all([loadMyStats(), loadBenchmarks()]);
+  const list = my.filter((m) => prof.source === "all" || m.source === prof.source);
+  const sel = prof.last ? list.slice(-prof.last) : list;
+  const avg = (r) => {
+    const v = sel.map((m) => customRating(r, m.stats)).filter((x) => x != null);
+    return v.length ? v.reduce((a, b) => a + b, 0) / v.length : null;
+  };
+  el.innerHTML = `<section class="panel my-ratings"><div class="panel-head"><div class="h3">Your ratings</div><span class="sub">50 = the average player in your library</span><span class="grow"></span><a class="btn ghost" href="#/ratings">Edit ratings</a></div>
+    <div class="my-ratings-row">${customRatings.map((r) => {
+      const v = avg(r);
+      const band = v == null ? "" : bandOf(v / 100);
+      return `<a class="my-rating" href="#/ratings/${esc(r.id)}">${dial(v == null ? "–" : Math.round(v), (v || 0) / 100, r.name, v == null ? "No data" : BAND_WORDS[band] || "", 110, v == null ? "" : GRADE_COLORS[Number(band.slice(1))])}</a>`;
+    }).join("")}</div></section>`;
+}
+
+// ---- rating builder --------------------------------------------------------------------------------
+
+let editingRating = null;
+async function renderRatingBuilder(view, id) {
+  const [my] = await Promise.all([loadMyStats(), loadBenchmarks()]);
+  const recent = my.slice(-30);
+  let r = customRatings.find((x) => x.id === (id || editingRating)) || customRatings[0];
+  editingRating = r?.id;
+  const yourValue = (rr) => {
+    const v = recent.map((m) => customRating(rr, m.stats)).filter((x) => x != null);
+    return v.length ? Math.round(v.reduce((a, b) => a + b, 0) / v.length) : null;
+  };
+  // How each stat pulls your rating: your average standard score over the last 30 matches.
+  const yourZ = (k) => {
+    const zs = recent.map((m) => zOf(k, m.stats[k])).filter((z) => z != null);
+    return zs.length ? zs.reduce((a, b) => a + b, 0) / zs.length : null;
+  };
+  const yourAvg = (k) => {
+    const vs = recent.map((m) => m.stats[k]).filter((v) => v != null);
+    return vs.length ? vs.reduce((a, b) => a + b, 0) / vs.length : null;
+  };
+  const total = r ? Object.values(r.parts).reduce((a, b) => a + (b > 0 ? b : 0), 0) : 0;
+  const used = new Set(r ? Object.keys(r.parts) : []);
+  view.innerHTML = `
+    <div class="profile-head"><div><div class="h2">Profile</div><div class="h1">Custom ratings</div></div><a class="btn ghost" href="#/profile">◀ Back to profile</a></div>
+    <div class="rb-grid">
+      <section class="panel rb-list">
+        <div class="panel-head"><div class="h3">Your ratings</div></div>
+        ${customRatings.map((x) => `<button class="rb-item ${x.id === r?.id ? "on" : ""}" data-pick="${esc(x.id)}"><span>${esc(x.name)}</span><b>${yourValue(x) ?? "–"}</b></button>`).join("")}
+        <div class="rb-actions"><button class="btn" id="rb-new">+ New rating</button><button class="btn ghost" id="rb-reset" title="Put back Aim, Movement, Utility and Impact as they came">Reset to defaults</button></div>
+        <div class="note">A rating weighs stats you pick. Each stat is compared with every player-match in your library (lower is better where that makes sense, like time to damage), then the weighted average becomes a 0–100 score: 50 is the average player, about 84 is one standard deviation better.</div>
+      </section>
+      ${r ? `<section class="panel rb-edit">
+        <div class="panel-head"><input class="rb-name" id="rb-name" value="${esc(r.name)}" maxlength="32" aria-label="Rating name"><span class="grow"></span>
+          <div class="rb-you"><span class="sub">You, last ${recent.length} matches</span><b>${yourValue(r) ?? "–"}</b></div>
+          <button class="btn ghost" id="rb-delete">Delete</button></div>
+        <table class="rb-table"><thead><tr><th>Stat</th><th>Weight</th><th>Share</th><th>You (avg)</th><th title="How this stat pulls your rating: your average against the library">Pull</th><th></th></tr></thead><tbody>
+        ${Object.entries(r.parts).map(([k, w]) => {
+          const info = statInfo.get(k) || { label: k, group: "", fmt: f2 };
+          const z = yourZ(k), a = yourAvg(k);
+          const lower = state.benchmarks?.[k]?.lower_is_better;
+          return `<tr><td><b>${esc(info.label)}</b><span class="sub"> ${esc(info.group)}${lower ? " · lower is better" : ""}</span></td>
+            <td class="rb-w"><input type="range" min="0" max="100" step="1" value="${w}" data-w="${k}"><input type="number" min="0" max="100" value="${w}" data-wn="${k}"></td>
+            <td>${total ? Math.round((Math.max(0, w) / total) * 100) : 0}%</td>
+            <td>${a == null ? "–" : info.fmt(a)}</td>
+            <td>${z == null ? "–" : `<span class="pull"><i class="${z >= 0 ? "pos" : "neg"}" style="width:${Math.min(50, Math.abs(z) * 25)}%;${z >= 0 ? "left:50%" : `right:50%`}"></i></span>`}</td>
+            <td><button class="icon-btn" data-remove="${k}" title="Remove">✕</button></td></tr>`;
+        }).join("")}
+        </tbody></table>
+        <div class="rb-add"><select id="rb-add"><option value="">+ Add a stat…</option>${STAT_GROUPS.map((g) => `<optgroup label="${g}">${STAT_CATALOG.filter((s) => s[2] === g && !used.has(s[0])).map(([k, label]) => `<option value="${k}">${esc(label)}</option>`).join("")}</optgroup>`).join("")}</select></div>
+      </section>` : `<section class="panel rb-edit"><div class="empty">No ratings. Make one with + New rating.</div></section>`}
+    </div>`;
+  const rerender = () => { saveRatings(); renderRatingBuilder(view, editingRating); };
+  view.querySelectorAll("[data-pick]").forEach((b) => (b.onclick = () => { editingRating = b.dataset.pick; location.hash = `#/ratings/${encodeURIComponent(editingRating)}`; }));
+  view.querySelector("#rb-new").onclick = () => {
+    const nid = `r${Date.now().toString(36)}`;
+    customRatings = [...customRatings, { id: nid, name: "New rating", parts: {} }];
+    editingRating = nid;
+    saveRatings();
+    location.hash = `#/ratings/${nid}`;
+  };
+  view.querySelector("#rb-reset").onclick = () => {
+    if (!confirm("Put back the default ratings (Aim, Movement, Utility, Impact)? Ratings you made are removed.")) return;
+    customRatings = JSON.parse(JSON.stringify(DEFAULT_RATINGS));
+    editingRating = customRatings[0].id;
+    rerender();
+  };
+  if (!r) return;
+  view.querySelector("#rb-name").onchange = (e) => { r.name = e.target.value.trim() || r.name; rerender(); };
+  view.querySelector("#rb-delete").onclick = () => {
+    if (!confirm(`Delete the "${r.name}" rating?`)) return;
+    customRatings = customRatings.filter((x) => x !== r);
+    editingRating = customRatings[0]?.id || null;
+    rerender();
+  };
+  // Sliders update their number live; the table re-renders when you let go.
+  view.querySelectorAll("[data-w]").forEach((inp) => {
+    inp.oninput = () => { view.querySelector(`[data-wn="${inp.dataset.w}"]`).value = inp.value; };
+    inp.onchange = () => { r.parts[inp.dataset.w] = Number(inp.value); rerender(); };
+  });
+  view.querySelectorAll("[data-wn]").forEach((inp) => (inp.onchange = () => { r.parts[inp.dataset.wn] = Math.max(0, Math.min(100, Number(inp.value) || 0)); rerender(); }));
+  view.querySelectorAll("[data-remove]").forEach((b) => (b.onclick = () => { delete r.parts[b.dataset.remove]; rerender(); }));
+  view.querySelector("#rb-add").onchange = (e) => { if (e.target.value) { r.parts[e.target.value] = 20; rerender(); } };
+}
+
+// Match page: everyone's custom ratings in this match.
+async function renderRatingsTab(body, m, id) {
+  const [d] = await Promise.all([loadDetails(id), loadBenchmarks()]);
+  if (!d) return noDetails(body);
+  const rows = detailRows(m, d).map((r) => ({ ...r, s: { ...r.s, ...coreStatsOf(r.p) } }));
+  const cols = customRatings.map((cr) => ({
+    key: `rating:${cr.id}`, label: esc(cr.name), tip: `Your "${cr.name}" rating: ${Object.entries(cr.parts).map(([k, w]) => `${statInfo.get(k)?.label || k} ${w}`).join(", ")}`,
+    value: (r) => customRating(cr, r.s), cell: (r) => `<td>${ratingChip(customRating(cr, r.s))}</td>`,
+  }));
+  if (!detailSorts.ratings || !cols.some((c) => c.key === detailSorts.ratings.key)) detailSorts.ratings = { key: cols[0]?.key, desc: true };
+  const draw = () => {
+    teamTables(body, m, rows, cols, detailSorts.ratings, draw);
+    const note = document.createElement("div");
+    note.className = "note";
+    note.innerHTML = `Your own ratings, built in <a class="link" href="#/ratings">Custom ratings</a>. 50 = the average player in your library.`;
+    body.appendChild(note);
+  };
+  if (!cols.length) { body.innerHTML = `<div class="empty">No custom ratings yet. <a class="link" href="#/ratings">Make one</a>.</div>`; return; }
+  draw();
+}
+
+// The same core stats the library benchmarks use, from a scoreboard row.
+function coreStatsOf(p) {
+  const c = p.counts, d = p.derived, rounds = Math.max(1, c.rounds), openings = c.opening_kills + c.opening_deaths;
+  const s = { rating3: r3(d), rws: d.rws, swing: d.swing || 0, adr: d.adr, kast: d.kast, kd: d.kd, kpr: d.kpr, dpr: d.dpr, hs_pct: d.hs_pct,
+    entry_attempts: (openings * 100) / rounds, trade_kills_pr: c.trade_kills / rounds, multikill_pr: sum(c.multikill_rounds.slice(2)) / rounds,
+    utility_damage_pr: c.utility_damage / rounds, flash_assists_pr: c.flash_assists / rounds, clutch_wins: sum(c.clutches_won) };
+  if (openings) s.entry_success = (c.opening_kills * 100) / openings;
+  if (c.deaths) s.traded_deaths_pct = (c.traded_deaths * 100) / c.deaths;
+  return s;
+}
+
 // ---- highlights ---------------------------------------------------------------------------------
 
 async function renderHighlights(body, ids) {
@@ -1242,6 +1629,8 @@ function renderProfile(view) {
       </section>
       </div>
     </div>
+    <div id="my-ratings"></div>
+    <div id="trends"></div>
     <section class="panel form">
       <div class="panel-head"><div class="h2">Form · HLTV Rating 3.0 per match</div><span class="grow"></span>
         <span class="legend"><i style="background:${WIN}"></i>Win <i style="background:${LOSS}"></i>Loss</span></div>
@@ -1250,6 +1639,8 @@ function renderProfile(view) {
     ${top.length ? `<section class="profile-top"><div class="hero-head"><div class="h2">Top highlights</div><a class="btn ghost" href="#/clips/highlights">All highlights</a></div>
       <div class="hl-grid">${top.map((h) => cardHtml(h)).join("")}</div></section>` : ""}`;
 
+  renderMyRatings(view.querySelector("#my-ratings"));
+  renderTrends(view.querySelector("#trends"));
   view.querySelectorAll(".seg[data-pkey]").forEach((el) => el.querySelectorAll("button").forEach((b) => (b.onclick = () => {
     const k = el.dataset.pkey;
     prof[k] = k === "last" ? Number(b.dataset.v) : b.dataset.v;
@@ -2500,6 +2891,7 @@ if (tauri) {
     state.matches.clear();
     state.details.clear();
     state.benchmarks = undefined;
+    state.myStats = undefined;
     route();
   };
   tauri.event.listen("veloxify://library", reload);
