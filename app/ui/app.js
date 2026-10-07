@@ -15,17 +15,29 @@ async function initLib() {
 const assetUrl = (rel) => (tauri ? tauri.core.convertFileSrc(`${LIB}\\${rel.replaceAll("/", "\\")}`) : `${LIB}/${rel}`);
 
 const state = { index: null, faceit: null, matches: new Map(), month: null, playlist: [], playing: -1 };
-const BROWSER_DEFAULTS = { heroPeriod: "week", sort: "best", when: "all", from: "", to: "", source: "all", map: "all", types: [], playableOnly: true, preset: "", tags: [], folder: "" };
+const BROWSER_DEFAULTS = { heroPeriod: "week", sort: "best", when: "all", from: "", to: "", source: "all", map: "all", types: [], playableOnly: true, hideEco: false, preset: "", tags: [], folder: "" };
 let browser = { ...BROWSER_DEFAULTS };
 try { browser = { ...BROWSER_DEFAULTS, ...JSON.parse(localStorage.getItem("veloxify.browser") || "{}") }; } catch (e) { /* defaults */ }
 const saveBrowser = () => { try { localStorage.setItem("veloxify.browser", JSON.stringify(browser)); } catch (e) { /* not persisted */ } };
 
 // ---- data ----------------------------------------------------------------------------------------
 
+// "vs eco": most of a highlight's kills were on players who'd saved (under $2,000 of equipment,
+// pistol rounds aside). Tagged so they're easy to spot or hide; works for clips analyzed before
+// the tag existed too.
+const ECO_TAG = "vs eco";
+function tagEco(h) {
+  const kills = h.kills ?? h.details?.kills ?? 0, eco = h.eco_kills ?? h.details?.eco_kills ?? 0;
+  if (kills > 0 && eco * 2 >= kills && !h.tags.includes(ECO_TAG)) h.tags.push(ECO_TAG);
+  return h;
+}
+const tagHtml = (t, extra = "") => `<span class="tag ${t === ECO_TAG ? "eco" : ""} ${extra}">${esc(t)}</span>`;
+
 async function loadIndex() {
   const res = await fetch(assetUrl("index.json"), { cache: "no-store" });
   if (!res.ok) throw new Error(`index.json: ${res.status}`);
   state.index = await res.json();
+  state.index.highlights.forEach(tagEco);
   // FACEIT account and match list (written by the app; absent until the first lookup).
   try {
     const f = await fetch(assetUrl("faceit.json"), { cache: "no-store" });
@@ -105,7 +117,9 @@ function mergeFaceit() {
 async function loadMatch(id, fresh = false) {
   if (fresh || !state.matches.has(id)) {
     const res = await fetch(assetUrl(`matches/${id}.json`), { cache: "no-store" });
-    state.matches.set(id, await res.json());
+    const m = await res.json();
+    m.highlights.forEach(tagEco);
+    state.matches.set(id, m);
   }
   return state.matches.get(id);
 }
@@ -149,7 +163,10 @@ const iso = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0
 const f1 = (x) => x.toFixed(1);
 const f2 = (x) => x.toFixed(2);
 // How good a number is, as a class g0 (great, green) .. g4 (poor, red).
-const GRADES = { rating: [1.2, 1.05, 0.95, 0.85], rws: [13, 11, 9, 7], win: [0.6, 0.53, 0.47, 0.4] };
+const GRADES = {
+  rating: [1.2, 1.05, 0.95, 0.85], rws: [13, 11, 9, 7], win: [0.6, 0.53, 0.47, 0.4],
+  kd: [1.3, 1.1, 0.9, 0.75], adr: [95, 82, 70, 60], kast: [80, 73, 66, 58],
+};
 const GRADE_COLORS = ["#2fd36f", "#9ddb8c", "var(--text)", "#f3a5a0", "#ff5252"];
 const gradeOf = (kind, v) => GRADES[kind].filter((t) => v < t).length;
 const ratingClass = (r) => `g${gradeOf("rating", r)}`;
@@ -195,6 +212,10 @@ function premierChip(r) {
 }
 const deltaHtml = (d) => (d == null ? "" : `<span class="delta ${d >= 0 ? "up" : "down"}">${d >= 0 ? "↑" : "↓"} ${Math.abs(d).toLocaleString("en-US")}</span>`);
 const ICONS = {
+  party: '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="9" cy="8" r="3.2"/><circle cx="16.5" cy="9" r="2.6"/><path d="M3 19c0-3.3 2.7-5.5 6-5.5s6 2.2 6 5.5zM14.6 13.7c3.2-.4 6.4 1.4 6.4 5.3h-4.4c0-2-.7-3.9-2-5.3z"/></svg>',
+  clock: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></svg>',
+  check: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>',
+  cross: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M7 7l10 10M17 7L7 17"/></svg>',
   star: '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 2.5l2.9 6.1 6.6.8-4.9 4.6 1.3 6.6L12 17.3l-5.9 3.3 1.3-6.6-4.9-4.6 6.6-.8z"/></svg>',
   download: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v11m0 0l-4.5-4.5M12 15l4.5-4.5M5 19h14"/></svg>',
   external: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></svg>',
@@ -210,7 +231,7 @@ function openFaceitRoom(matchId) {
 // FACEIT demos: Veloxify downloads them through its own FACEIT window; one click fetches every
 // missing demo. (Preview: opens the room in a browser.)
 function getDemos(matchIds) {
-  if (!matchIds.length) return;
+  if (!matchIds.length || demoRunActive()) return; // one run at a time: a click mustn't restart it
   if (tauri) tauri.core.invoke("get_demos", { matchIds });
   else openFaceitRoom(matchIds[0]);
 }
@@ -247,6 +268,10 @@ async function route() {
       view.innerHTML = `<div class="empty">No library yet. Play a match and it will show up here.<br><span class="sub">${esc(e.message)}</span></div>`;
       return;
     }
+  }
+  if (parts[0] === "match" && parts[1]) {
+    document.querySelector('[data-nav="matches"]').classList.add("active");
+    return renderMatchPage(view, decodeURIComponent(parts[1]), parts[2] || "overview");
   }
   if (parts[0] === "day" && parts[1]) return renderDay(view, parts[1], parts[2] === "m" ? decodeURIComponent(parts[3]) : null, parts[4]);
   if (parts[0] === "latest") {
@@ -292,7 +317,7 @@ async function renderDay(view, date, matchId, tab) {
   const cards = ids.map((id) => {
     const m = summaryOf(id);
     return `
-      <a class="mcard ${m.result} ${id === matchId ? "selected" : ""} ${m.stats_only ? "stats-only" : ""}" href="#/day/${date}/m/${encodeURIComponent(id)}">
+      <a class="mcard ${m.result} ${id === matchId ? "selected" : ""} ${m.stats_only ? "stats-only" : ""}" href="${matchHref(id)}">
         <div class="map-tile" title="${esc(mapName(m.map))}">${mapIcon(m.map)}</div>
         <div>
           <div class="mscore">${m.score_mine}<span class="sep">-</span>${m.score_theirs} <span class="src ${m.source}">${m.source === "valve" ? "PREMIER" : m.source.toUpperCase()}</span></div>
@@ -343,7 +368,7 @@ async function renderOverview(el, day, tab) {
     <div style="display:flex;align-items:center;gap:12px;margin:${day.players.length ? "26px" : "0"} 0 10px"><div class="h2">Waiting for the demo · stats from FACEIT</div><span class="grow"></span>${demoButton(missingDemos(waiting, 3650), "btn primary")}</div>
     <table class="sb">
       <thead><tr><th>Map</th><th>Time</th><th>Score</th><th>K / D / A</th><th>ADR</th><th>HS%</th><th>ELO</th></tr></thead>
-      <tbody>${waiting.map((m) => { const fm = m.faceit; return `<tr class="clickable" data-href="#/day/${day.date}/m/${encodeURIComponent(m.id)}">
+      <tbody>${waiting.map((m) => { const fm = m.faceit; return `<tr class="clickable" data-href="${matchHref(m.id)}">
         <td>${esc(mapName(m.map))}</td><td>${fmtTime(m.played_at)}</td><td class="${m.result}-text">${m.score_mine}-${m.score_theirs}</td>
         <td>${fm.kills} / ${fm.deaths} / ${fm.assists}</td><td>${f1(fm.adr)}</td><td>${Math.round(fm.hs_pct)}%</td>
         <td>${fm.elo ? `${fm.elo.toLocaleString("en-US")} ${deltaHtml(fm.elo_delta)}` : fm.calibrating ? "Placement" : "–"}</td></tr>`; }).join("")}</tbody>
@@ -461,6 +486,103 @@ async function renderMatch(el, date, id, tab) {
     <div class="note">K/A/D, MVPs and score come from CS2's own end-of-match scoreboard. ● marks party members.</div>`;
 }
 
+// ---- match page (Leetify-style): header, scoreboard and the match's sections ------------------
+
+const matchHref = (id, tab) => `#/match/${encodeURIComponent(id)}${tab ? `/${tab}` : ""}`;
+const MATCH_SORTS = {
+  name: (p) => p.name.toLowerCase(), kills: (p) => p.counts.kills, assists: (p) => p.counts.assists, deaths: (p) => p.counts.deaths,
+  kd: (p) => p.derived.kd, adr: (p) => p.derived.adr, kast: (p) => p.derived.kast,
+  k2: (p) => p.counts.multikill_rounds[2], k3: (p) => p.counts.multikill_rounds[3], k4: (p) => p.counts.multikill_rounds[4], k5: (p) => p.counts.multikill_rounds[5],
+  rws: (p) => p.derived.rws, rating: (p) => r3(p.derived),
+};
+const matchSort = { key: "kills", desc: true };
+
+async function renderMatchPage(view, id, tab) {
+  const s = summaryOf(id);
+  if (!s) { view.innerHTML = `<a class="day-back" href="#/matches">◀ Match history</a><div class="empty">Match not found.</div>`; return; }
+  const m = s.stats_only ? null : await loadMatch(id);
+  const tabs = [["overview", "Overview"]];
+  if (m) tabs.push(["highlights", `Highlights${m.highlights.length ? ` (${m.highlights.length})` : ""}`], ["lowlights", `Lowlights${(m.lowlights || []).length ? ` (${m.lowlights.length})` : ""}`]);
+  if (!tabs.some(([k]) => k === tab)) tab = "overview";
+  const fm = s.faceit;
+  const eloNow = s.elo ?? fm?.elo, eloDelta = s.elo_delta ?? fm?.elo_delta;
+  const room = s.source === "faceit" ? fm?.match_id || s.id.replace(/^faceit-/, "1-").replace(/-m\d+$/, "") : null;
+  const when = new Date(s.played_ts * 1000);
+  const stamp = `${when.getFullYear()}-${String(when.getMonth() + 1).padStart(2, "0")}-${String(when.getDate()).padStart(2, "0")} ${fmtTime(s.played_at)}`;
+  const elo = eloNow ? `<span class="mp-chip">${levelBadge(levelFor(eloNow), 20)}${eloNow.toLocaleString("en-US")} ${deltaHtml(eloDelta)}</span>`
+    : s.premier ? `<span class="mp-chip">${premierChip(s.premier)}${deltaHtml(s.premier_delta)}</span>` : "";
+  const source = s.source === "valve" ? "Premier" : s.source === "faceit" ? "FACEIT" : s.source;
+  view.innerHTML = `
+    <a class="day-back" href="#/matches">◀ Match history</a>
+    <section class="mp-hero ${s.result}">
+      <div class="mp-map">${mapIcon(s.map)}</div>
+      <div class="mp-top">
+        <div class="mp-result"><b>${resultWord(s.result)}</b><span class="mp-score"><span class="${s.result}">${s.score_mine}</span>:<span>${s.score_theirs}</span></span></div>
+        <div class="mp-meta">${stamp}<i>|</i>${esc(mapName(s.map))}<i>|</i>${esc(source)}${s.source_label && s.source_label.toLowerCase() !== source.toLowerCase() ? ` · ${esc(s.source_label)}` : ""}${s.duration_s ? `<i>|</i>${fmtDur(s.duration_s)}` : ""}</div>
+      </div>
+      <div class="mp-chips">${elo}${room ? `<button class="mp-chip link" id="mp-room">${ICONS.external} FACEIT room</button>` : ""}</div>
+      <nav class="mp-tabs">${tabs.map(([k, label]) => `<a href="${matchHref(id, k === "overview" ? "" : k)}" class="${k === tab ? "active" : ""}">${label}</a>`).join("")}</nav>
+    </section>
+    <div class="mp-body" id="mp-body"></div>`;
+  view.querySelector("#mp-room")?.addEventListener("click", () => openFaceitRoom(room));
+  const body = view.querySelector("#mp-body");
+  if (!m) return renderStatsOnly(body, s.played_at.slice(0, 10), s);
+  if (tab === "highlights") return renderHighlights(body, [id]);
+  if (tab === "lowlights") {
+    const list = (m.lowlights || []).map((l) => ({ ...l, match_id: id, map: m.map, played_at: m.played_at, source: m.source, source_label: s.source_label || "", score_mine: m.score_mine, score_theirs: m.score_theirs }));
+    body.innerHTML = list.length ? `<div class="ll-grid">${list.map(lowlightCard).join("")}</div>` : `<div class="empty">No lowlights: no deaths right after a miss this match.</div>`;
+    return;
+  }
+  renderMatchScoreboard(body, m);
+}
+
+// Both teams, Leetify's match-details columns (no Leetify rating), sortable by any column.
+function renderMatchScoreboard(body, m) {
+  const me = state.index.me;
+  const COLS = [["kills", "Kills"], ["assists", "Assists"], ["deaths", "Deaths"], ["kd", "K/D"], ["adr", "ADR"], ["kast", "KAST"],
+    ["k2", "2K"], ["k3", "3K"], ["k4", "4K"], ["k5", "5K"], ["rws", "RWS"], ["rating", "HLTV 3.0"]];
+  const by = MATCH_SORTS[matchSort.key];
+  const sorted = (side) => m.players.filter((p) => p.side === side).sort((a, b) => {
+    const x = by(a), y = by(b);
+    return (x < y ? -1 : x > y ? 1 : 0) * (matchSort.desc ? -1 : 1);
+  });
+  const rank = (p) => p.rank_type === 11 && p.rank ? premierChip(p.rank) : "";
+  const cell = (p, k) => {
+    const c = p.counts, d = p.derived;
+    switch (k) {
+      case "kills": return `<td>${c.kills}</td>`;
+      case "assists": return `<td>${c.assists}</td>`;
+      case "deaths": return `<td>${c.deaths}</td>`;
+      case "kd": return `<td class="${gradeClass("kd", d.kd)}">${f2(d.kd)}</td>`;
+      case "adr": return `<td class="${gradeClass("adr", d.adr)}">${Math.round(d.adr)}</td>`;
+      case "kast": return `<td class="${gradeClass("kast", d.kast)}">${Math.round(d.kast)}%</td>`;
+      case "rws": return `<td class="${gradeClass("rws", d.rws)}">${f1(d.rws)}</td>`;
+      case "rating": return `<td><span class="mp-rating ${ratingClass(r3(d))}">${f2(r3(d))}</span></td>`;
+      default: return `<td class="${c.multikill_rounds[Number(k[1])] ? "" : "zero"}">${c.multikill_rounds[Number(k[1])]}</td>`;
+    }
+  };
+  const head = (title, won) => `<tr class="mp-team"><th class="mp-name">${title} <span class="mp-badge ${won ? "win" : "loss"}">${won ? "WIN" : m.result === "tie" ? "TIE" : "LOSS"}</span></th>
+    ${COLS.map(([k, t]) => `<th data-sort="${k}" class="${matchSort.key === k ? "on" : ""}">${t}${matchSort.key === k ? (matchSort.desc ? " ↓" : " ↑") : ""}</th>`).join("")}</tr>`;
+  const row = (p, won) => `<tr class="${won ? "won" : "lost"} ${p.steamid === me ? "me" : ""}">
+    <td class="mp-name">${p.party ? `<span class="mp-party" title="In your party">${ICONS.party || "●"}</span>` : ""}<span>${esc(p.name)}</span>${rank(p)}</td>
+    ${COLS.map(([k]) => cell(p, k)).join("")}</tr>`;
+  const mineWon = m.result === "win", theirsWon = m.result === "loss";
+  body.innerHTML = `
+    <div class="mp-board-wrap"><table class="mp-board">
+      <thead>${head("My Team", mineWon)}</thead>
+      <tbody>${sorted("mine").map((p) => row(p, mineWon)).join("")}</tbody>
+      <thead>${head("Enemy Team", theirsWon)}</thead>
+      <tbody>${sorted("enemy").map((p) => row(p, theirsWon)).join("")}</tbody>
+    </table></div>
+    <div class="note">Kills, assists and deaths come from CS2's end-of-match scoreboard. HLTV 3.0 is estimated from the demo. Click a column to sort.</div>`;
+  body.querySelectorAll("th[data-sort]").forEach((th) => (th.onclick = () => {
+    const k = th.dataset.sort;
+    matchSort.desc = matchSort.key === k ? !matchSort.desc : k !== "name";
+    matchSort.key = k;
+    renderMatchScoreboard(body, m);
+  }));
+}
+
 // ---- highlights ---------------------------------------------------------------------------------
 
 async function renderHighlights(body, ids) {
@@ -494,7 +616,7 @@ async function renderHighlights(body, ids) {
             <div class="hl-info">
               <div class="hl-title">${esc(h.title)}</div>
               <div class="hl-meta"><span>${esc(h.name || "")}</span><span>${esc(mapName(m.map))} · round ${h.round}</span></div>
-              <div class="tags">${h.tags.map((t) => `<span class="tag">${esc(t)}</span>`).join("")}</div>
+              <div class="tags">${h.tags.map((t) => tagHtml(t)).join("")}</div>
             </div>
           </div>`).join("")}
         </div>
@@ -745,7 +867,7 @@ function renderProfile(view) {
       b.addEventListener("mouseenter", () => { tip.textContent = b.dataset.tip; tip.hidden = false; b.classList.add("hover"); });
       b.addEventListener("mousemove", (e) => { const r = chart.getBoundingClientRect(); tip.style.left = `${e.clientX - r.left + 12}px`; tip.style.top = `${e.clientY - r.top - 30}px`; });
       b.addEventListener("mouseleave", () => { tip.hidden = true; b.classList.remove("hover"); });
-      b.addEventListener("click", () => { const m = summaryOf(b.dataset.m); if (m) location.hash = `#/day/${m.played_at.slice(0, 10)}/m/${encodeURIComponent(m.id)}`; });
+      b.addEventListener("click", () => { const m = summaryOf(b.dataset.m); if (m) location.hash = matchHref(m.id); });
     });
   }
   view.querySelectorAll(".profile-top [data-hl]").forEach((c2) => (c2.onclick = () => {
@@ -788,7 +910,7 @@ function historyRow(r) {
     ? `<button class="sqbtn ${r.hl ? "hl" : "dim"}" data-act="hl" title="${r.hl ? `${r.hl} highlight${r.hl === 1 ? "" : "s"}` : "No highlights in this match"}">${ICONS.star}${r.hl}</button>`
     : `<button class="sqbtn" data-act="demo" title="Get the demo: Veloxify opens the match room, you click FACEIT's download, Veloxify does the rest">${ICONS.download}</button>`;
   return `
-    <div class="ml-grid ml-row ${r.result} clickable" data-id="${esc(r.id)}" data-href="#/day/${r.date}/m/${encodeURIComponent(r.id)}" ${r.room ? `data-room="${esc(r.room)}"` : ""}>
+    <div class="ml-grid ml-row ${r.result} clickable" data-id="${esc(r.id)}" data-href="${matchHref(r.id)}" ${r.room ? `data-room="${esc(r.room)}"` : ""}>
       <div class="ml-date">${fcDate(r.when)}</div>
       <div class="ml-score"><span class="wl ${r.result}">${r.result === "win" ? "W" : r.result === "loss" ? "L" : "T"}</span><span><b class="${r.result}">${r.mine}</b> : <span class="theirs">${r.theirs}</span></span></div>
       <div class="ml-elo">${elo}</div>
@@ -1240,7 +1362,7 @@ async function renderLowlight(view, matchId, id) {
         <span class="grow"></span>
         ${l.clip ? `<button class="btn primary" id="ll-watch">${ICONS.star.replace("currentColor", "currentColor")} Watch</button>`
           : tauri ? `<button class="btn primary" id="ll-render" title="Veloxify renders it in the background as soon as CS2 is free">Render clip</button>` : ""}
-        <a class="btn ghost" href="#/day/${m.played_at.slice(0, 10)}/m/${encodeURIComponent(matchId)}/lowlights">Open match</a>
+        <a class="btn ghost" href="${matchHref(matchId, "lowlights")}">Open match</a>
         ${tauri ? `<button class="btn ghost" id="ll-delete">Delete</button>` : ""}
       </div>
       <div class="ll-verdict big">${esc(l.verdict)}</div>
@@ -1389,7 +1511,8 @@ function filtered() {
     && (!browser.types.length || TYPE_FILTERS.some(([k, , f]) => browser.types.includes(k) && f(h)))
     && (!preset || preset[2](h))
     && browser.tags.every((t) => h.tags.includes(t))
-    && (!browser.playableOnly || playable(h)));
+    && (!browser.playableOnly || playable(h))
+    && !(browser.hideEco && h.tags.includes(ECO_TAG)));
   const best = (a, b) => b.hand - a.hand || b.score - a.score;
   if (folder) return list.sort((a, b) => folder.items.indexOf(a.id) - folder.items.indexOf(b.id));
   if (browser.preset === "clutch") list.sort((a, b) => b.clutch_vs - a.clutch_vs || best(a, b));
@@ -1419,7 +1542,7 @@ function cardHtml(h, big = false) {
       <div class="hl-info">
         <div class="hl-title">${esc(h.title)}</div>
         <div class="hl-meta"><span>${esc(mapName(h.map))} · ${h.score_mine}-${h.score_theirs}</span><span>${when}</span></div>
-        <div class="tags">${h.tags.map((t) => `<span class="tag">${esc(t)}</span>`).join("")}</div>
+        <div class="tags">${h.tags.map((t) => tagHtml(t)).join("")}</div>
       </div>
     </div>`;
 }
@@ -1525,6 +1648,7 @@ function renderHighlightsTab(view) {
       <div class="controls">
         <div class="chips">${TYPE_FILTERS.map(([k, label]) => `<button class="chip ${browser.types.includes(k) ? "on" : ""}" data-type="${k}">${label}</button>`).join("")}</div>
         <label class="check"><input type="checkbox" id="playable" ${browser.playableOnly ? "checked" : ""}> Playable only</label>
+        <label class="check" title="Hide highlights where most of the kills were on players who'd saved (under $2,000 of equipment)"><input type="checkbox" id="hide-eco" ${browser.hideEco ? "checked" : ""}> Hide vs eco</label>
         <span class="grow"></span>
         <span class="sub">${list.length} highlight${list.length === 1 ? "" : "s"}</span>
         <button class="btn ghost" id="reset">Reset filters</button>
@@ -1571,6 +1695,7 @@ function renderHighlightsTab(view) {
   };
   wireCardMenus(view, folder);
   view.querySelector("#playable").onchange = (e) => { browser.playableOnly = e.target.checked; rerender(); };
+  view.querySelector("#hide-eco").onchange = (e) => { browser.hideEco = e.target.checked; rerender(); };
   view.querySelector("#reset").onclick = () => { browser = { ...BROWSER_DEFAULTS, heroPeriod: browser.heroPeriod, folder: browser.folder }; rerender(); };
   for (const id of ["from", "to"]) {
     const el = view.querySelector(`#${id}`);
@@ -1843,6 +1968,51 @@ function showStatus(st) {
   if (st.state === "rendering") el.title = "CS2 is rendering your highlights in the background. Click to stop and hand CS2 back.";
 }
 
+const demoRunActive = () => !!(live.queue?.items?.length && !live.queue.finished && !live.queue.cancelled);
+
+// Match rows while Get demos runs: a ring that fills as the current demo downloads (spinning
+// while FACEIT gets it ready), a clock for the ones still to come, a check once downloaded, a
+// cross if FACEIT no longer has it. Repainted on every queue update and whenever a page renders.
+const RING_C = 2 * Math.PI * 9;
+const DL_TITLES = {
+  now: "Downloading",
+  paused: "Paused while CS2 is open",
+  queued: "Waiting to download",
+  done: "Downloaded: analyzed once the rest are in",
+  failed: "FACEIT doesn't have this demo any more",
+};
+function demoRowState(room) {
+  const q = live.queue;
+  if (!q?.items?.length || q.cancelled) return "";
+  const i = q.items.findIndex((it) => it.match_id === room);
+  if (i < 0) return "";
+  if ((q.skipped || []).includes(room)) return "failed";
+  if (i < q.pos) return "done";
+  if (q.finished) return "";
+  return i === q.pos ? (q.paused ? "paused" : "now") : "queued";
+}
+function paintDemoRows() {
+  const q = live.queue;
+  document.querySelectorAll('.ml-row[data-room] [data-act="demo"]').forEach((btn) => {
+    const s = demoRowState(btn.closest(".ml-row").dataset.room);
+    if (btn.dataset.dl !== s) {
+      btn.dataset.dl = s;
+      btn.className = `sqbtn${s ? ` dl-${s}` : ""}`;
+      btn.innerHTML = s === "now" || s === "paused"
+        ? `<svg class="dl-ring" viewBox="0 0 24 24" aria-hidden="true"><circle class="track" cx="12" cy="12" r="9"/><circle class="fill" cx="12" cy="12" r="9" stroke-dasharray="${RING_C.toFixed(2)}" stroke-dashoffset="${RING_C.toFixed(2)}"/></svg>`
+        : s === "queued" ? ICONS.clock : s === "done" ? ICONS.check : s === "failed" ? ICONS.cross : ICONS.download;
+    }
+    btn.title = DL_TITLES[s] || (demoRunActive() ? "Get demos is already running" : "Get the demo");
+    if (s === "now" || s === "paused") {
+      const frac = Math.max(0, Math.min(1, q.progress || 0));
+      // Before the download starts (opening the match, FACEIT's check): a spinning quarter ring.
+      btn.classList.toggle("spin", s === "now" && frac === 0);
+      btn.querySelector(".fill").style.strokeDashoffset = (RING_C * (1 - (frac > 0 ? frac : 0.25))).toFixed(2);
+      if (s === "now" && frac > 0) btn.title = `Downloading: ${Math.round(frac * 100)}%`;
+    }
+  });
+}
+
 // The big banner under the top bar: what Veloxify is doing right now (downloading demos, then
 // analyzing them, then capturing clips) with progress, or what needs you.
 const live = { queue: null, status: null };
@@ -1901,7 +2071,14 @@ function renderBanner() {
 }
 
 if (tauri) {
-  const setQueue = (q) => { live.queue = q; renderBanner(); };
+  const setQueue = (q) => { live.queue = q; renderBanner(); paintDemoRows(); };
+  // Pages re-render their rows: paint them again (paintDemoRows only touches what changed).
+  let paintQueued = false;
+  new MutationObserver(() => {
+    if (paintQueued) return;
+    paintQueued = true;
+    requestAnimationFrame(() => { paintQueued = false; paintDemoRows(); });
+  }).observe(document.getElementById("view"), { childList: true, subtree: true });
   const setStatus = (st) => { live.status = st; showStatus(st); renderBanner(); };
   tauri.core.invoke("demo_queue_state").then(setQueue);
   tauri.event.listen("veloxify://demos", (e) => setQueue(e.payload));

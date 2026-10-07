@@ -416,6 +416,11 @@ pub fn detect(m: &Match, a: &Analysis, player: u64, flicks: &HashMap<usize, f64>
             }
         }
         let duration_s = merged.iter().map(|s| (s.end_tick - s.start_tick) as f64 / TICKRATE).sum();
+        let title = title(&tags, n, most_used_weapon(m, &kills), round.number);
+        // Most of the kills on players who'd saved: marked so they're easy to spot or hide.
+        if n > 0 && ks.iter().filter(|k| is_eco_kill(k)).count() * 2 >= n {
+            tag("vs eco".into(), &mut tags);
+        }
 
         out.push(Highlight {
             player,
@@ -424,7 +429,7 @@ pub fn detect(m: &Match, a: &Analysis, player: u64, flicks: &HashMap<usize, f64>
             tier,
             score: (score * 10.0).round() / 10.0,
             hand: hand(n, &ks, &tags, clutch),
-            title: title(&tags, n, most_used_weapon(m, &kills), round.number),
+            title,
             tags,
             kills,
             segments: merged,

@@ -49,6 +49,8 @@ pub struct Queue {
     pub saved: usize,
     /// Matches whose demo couldn't be downloaded.
     pub failed: usize,
+    /// Their match ids.
+    pub skipped: Vec<String>,
     /// How far the current match's download is, 0 to 1.
     pub progress: f32,
     /// Waiting for CS2 to close.
@@ -279,6 +281,7 @@ fn process(app: AppHandle, run: u64) {
                 eprintln!("demo {}: {why}", item.match_id);
                 update(&app, |q| {
                     q.failed += 1;
+                    q.skipped.push(item.match_id.clone());
                     q.pos += 1;
                     q.progress = 0.0;
                     q.message.clear();

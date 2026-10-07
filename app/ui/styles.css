@@ -314,6 +314,19 @@ table.sb { width: 100%; border-collapse: separate; border-spacing: 0; font-varia
 .sqbtn svg { width: 15px; height: 15px; }
 .sqbtn.hl { color: var(--gold); }
 .sqbtn.dim { color: var(--faint); }
+.tag.eco { background: transparent; color: var(--muted); box-shadow: inset 0 0 0 1px var(--line-2); }
+/* Get demos, per match row: ring = downloading now, clock = waiting, check = done, cross = gone */
+.sqbtn .dl-ring { width: 19px; height: 19px; transform: rotate(-90deg); }
+.dl-ring circle { fill: none; stroke-width: 3; }
+.dl-ring .track { stroke: var(--line-2); }
+.dl-ring .fill { stroke: var(--accent); stroke-linecap: round; transition: stroke-dashoffset 0.4s linear; }
+.sqbtn.dl-now, .sqbtn.dl-paused { border-color: var(--accent-line); cursor: default; }
+.sqbtn.dl-paused .fill { stroke: var(--faint); }
+.sqbtn.spin .dl-ring { animation: dl-spin 0.9s linear infinite; }
+@keyframes dl-spin { from { transform: rotate(-90deg); } to { transform: rotate(270deg); } }
+.sqbtn.dl-queued { color: var(--faint); cursor: default; }
+.sqbtn.dl-done { color: var(--win); cursor: default; }
+.sqbtn.dl-failed { color: var(--loss); cursor: default; }
 .ml-note { color: var(--faint); font-size: 12px; margin-top: 12px; }
 
 /* FACEIT level badge and Premier rating chip */
@@ -613,6 +626,65 @@ input[type=color] { width: 44px; height: 30px; padding: 2px; background: var(--r
   .banner { padding: 10px 16px; }
   .banner-in { flex-wrap: wrap; gap: 10px; }
   .banner-bar { flex-basis: 100%; order: 5; }
+}
+
+/* ---- match page ---------------------------------------------------------------------------- */
+.mp-hero {
+  position: relative; display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 8px 22px;
+  padding: 22px 26px 0; margin-bottom: 18px; border-radius: var(--radius); border: 1px solid var(--line); overflow: hidden;
+  background: linear-gradient(115deg, color-mix(in srgb, var(--loss) 14%, var(--card)) 0%, var(--card) 55%);
+}
+.mp-hero.win { background: linear-gradient(115deg, color-mix(in srgb, var(--win) 14%, var(--card)) 0%, var(--card) 55%); }
+.mp-map { width: 64px; height: 64px; }
+.mp-map svg, .mp-map img { width: 100%; height: 100%; }
+.mp-result { display: flex; align-items: baseline; gap: 18px; }
+.mp-result b { font-size: 40px; font-weight: 900; text-transform: uppercase; letter-spacing: 0.02em; line-height: 1; }
+.mp-score { font-size: 40px; font-weight: 900; line-height: 1; font-variant-numeric: tabular-nums; }
+.mp-score .win { color: var(--win); }
+.mp-score .loss { color: var(--loss); }
+.mp-meta { margin-top: 8px; color: var(--muted); font-weight: 600; font-size: 13.5px; }
+.mp-meta i { font-style: normal; margin: 0 9px; color: var(--faint); }
+.mp-chips { display: flex; gap: 10px; align-self: start; }
+.mp-chip {
+  display: inline-flex; align-items: center; gap: 7px; padding: 7px 12px; border-radius: var(--radius-sm);
+  background: var(--row); border: 1px solid var(--line-2); font-weight: 700; font-size: 13px; color: var(--text);
+}
+.mp-chip.link { cursor: pointer; }
+.mp-chip.link:hover { background: var(--row-hi); }
+.mp-chip svg { width: 14px; height: 14px; }
+.mp-tabs { grid-column: 1 / -1; display: flex; gap: 4px; margin-top: 16px; overflow-x: auto; }
+.mp-tabs a { padding: 12px 14px; font-weight: 600; font-size: 14px; color: var(--muted); border-bottom: 2px solid transparent; white-space: nowrap; }
+.mp-tabs a:hover { color: var(--text); }
+.mp-tabs a.active { color: var(--accent); border-bottom-color: var(--accent); }
+.mp-board-wrap { overflow-x: auto; }
+.mp-board { width: 100%; border-collapse: separate; border-spacing: 0 4px; font-variant-numeric: tabular-nums; }
+.mp-board th, .mp-board td { padding: 0 14px; height: 46px; text-align: center; white-space: nowrap; }
+.mp-board th { height: 50px; background: var(--head); font-size: 13px; font-weight: 700; color: var(--text); }
+.mp-board th[data-sort] { cursor: pointer; }
+.mp-board th[data-sort]:hover, .mp-board th.on { color: var(--accent); }
+.mp-board td { background: var(--row); font-weight: 600; }
+.mp-board tr > :first-child { border-radius: var(--radius-sm) 0 0 var(--radius-sm); }
+.mp-board tr > :last-child { border-radius: 0 var(--radius-sm) var(--radius-sm) 0; }
+.mp-board .mp-team th:first-child { text-align: left; }
+.mp-board thead + tbody + thead .mp-team th { border-top: 18px solid var(--bg); }
+.mp-board td.mp-name { text-align: left; min-width: 230px; box-shadow: inset 4px 0 0 var(--loss); }
+.mp-board tr.won td.mp-name { box-shadow: inset 4px 0 0 var(--win); }
+.mp-board td.mp-name > span { vertical-align: middle; }
+.mp-board td.mp-name > * + * { margin-left: 8px; }
+.mp-board tr.me td { background: var(--row-hi); }
+.mp-board tr.me td.mp-name { color: var(--accent-text); }
+.mp-board td.zero { color: var(--faint); }
+.mp-party { color: var(--t); }
+.mp-party svg { width: 14px; height: 14px; }
+.mp-badge { margin-left: 8px; padding: 2px 7px; border-radius: 4px; font-size: 11px; font-weight: 800; }
+.mp-badge.win { background: color-mix(in srgb, var(--win) 22%, transparent); color: var(--win); }
+.mp-badge.loss { background: color-mix(in srgb, var(--loss) 22%, transparent); color: var(--loss); }
+.mp-rating { display: inline-block; min-width: 54px; padding: 5px 8px; border-radius: var(--radius-sm); background: var(--chip); font-weight: 800; }
+.mp-body .stats-only-note, .mp-body .kpis { margin-top: 0; }
+@media (max-width: 760px) {
+  .mp-hero { grid-template-columns: auto 1fr; padding: 16px 16px 0; }
+  .mp-chips { grid-column: 1 / -1; }
+  .mp-result b, .mp-score { font-size: 28px; }
 }
 
 /* ---- player modal ------------------------------------------------------------------------ */

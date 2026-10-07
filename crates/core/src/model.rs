@@ -21,6 +21,11 @@ const EVENTS: &[&str] = &[
     "player_blind",
     "bomb_planted",
     "bomb_defused",
+    "bomb_exploded",
+    "hegrenade_detonate",
+    "flashbang_detonate",
+    "smokegrenade_detonate",
+    "inferno_startburn",
     "player_disconnect",
     "weapon_fire",
 ];
@@ -117,6 +122,11 @@ pub struct Kill {
     pub distance: f32,
     pub attacker_equip_value: Option<u32>,
     pub victim_equip_value: Option<u32>,
+    /// Where each stood (map units) and the callout CS2 shows for it ("BombsiteA", "Palace").
+    pub attacker_xy: Option<[f32; 2]>,
+    pub victim_xy: Option<[f32; 2]>,
+    pub attacker_place: String,
+    pub victim_place: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -157,6 +167,27 @@ pub struct BombEvent {
     pub round: usize,
     pub player: u64,
     pub defused: bool,
+    /// The planter's or defuser's callout, e.g. "BombsiteA".
+    pub place: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GrenadeKind {
+    He,
+    Flash,
+    Smoke,
+    Molotov,
+}
+
+/// Where a grenade went off (a molotov: where it started burning).
+#[derive(Debug, Clone, Serialize)]
+pub struct Grenade {
+    pub tick: i32,
+    pub round: usize,
+    pub player: u64,
+    pub kind: GrenadeKind,
+    pub xy: [f32; 2],
 }
 
 /// CS2's own end-of-match scoreboard row for a player (authoritative for MVPs, score, and the
@@ -189,6 +220,9 @@ pub struct Match {
     pub damages: Vec<Damage>,
     pub blinds: Vec<Blind>,
     pub bomb: Vec<BombEvent>,
+    /// Ticks at which the bomb exploded.
+    pub explosions: Vec<i32>,
+    pub grenades: Vec<Grenade>,
     pub shots: Vec<Shot>,
     pub score_a: u32,
     pub score_b: u32,
@@ -376,6 +410,8 @@ pub fn load_match(demo: &[u8]) -> Result<Match> {
     let mut damages = vec![];
     let mut blinds = vec![];
     let mut bomb = vec![];
+    let mut explosions = vec![];
+    let mut grenades = vec![];
     let mut shots = vec![];
     // Health tracking so damage is capped at what the victim actually had.
     let mut health: HashMap<u64, i32> = HashMap::new();
@@ -409,6 +445,10 @@ pub fn load_match(demo: &[u8]) -> Result<Match> {
                     distance: get_float(e, "distance").unwrap_or(0.0),
                     attacker_equip_value: get_int(e, "attacker_current_equip_value").map(|v| v as u32),
                     victim_equip_value: get_int(e, "user_current_equip_value").map(|v| v as u32),
+                    attacker_xy: get_xy(e, "attacker"),
+                    victim_xy: get_xy(e, "user"),
+                    attacker_place: get_str(e, "attacker_last_place_name").unwrap_or("").to_string(),
+                    victim_place: get_str(e, "user_last_place_name").unwrap_or("").to_string(),
                 });
             }
             "player_hurt" => {
@@ -448,7 +488,20 @@ pub fn load_match(demo: &[u8]) -> Result<Match> {
             }
             "bomb_planted" | "bomb_defused" => {
                 if let Some(player) = get_steamid(e, "user_steamid") {
-                    bomb.push(BombEvent { tick: e.tick, round, player, defused: e.name == "bomb_defused" });
+                    let place = get_str(e, "user_last_place_name").unwrap_or("").to_string();
+                    bomb.push(BombEvent { tick: e.tick, round, player, defused: e.name == "bomb_defused", place });
+                }
+            }
+            "bomb_exploded" => explosions.push(e.tick),
+            "hegrenade_detonate" | "flashbang_detonate" | "smokegrenade_detonate" | "inferno_startburn" => {
+                let kind = match e.name.as_str() {
+                    "hegrenade_detonate" => GrenadeKind::He,
+                    "flashbang_detonate" => GrenadeKind::Flash,
+                    "smokegrenade_detonate" => GrenadeKind::Smoke,
+                    _ => GrenadeKind::Molotov,
+                };
+                if let (Some(player), Some(x), Some(y)) = (get_steamid(e, "user_steamid"), get_float(e, "x"), get_float(e, "y")) {
+                    grenades.push(Grenade { tick: e.tick, round, player, kind, xy: [x, y] });
                 }
             }
             _ => {}
@@ -482,7 +535,7 @@ pub fn load_match(demo: &[u8]) -> Result<Match> {
         })
         .collect();
 
-    Ok(Match { map, server_name, source, players, rounds, kills, damages, blinds, bomb, shots, score_a, score_b, scoreboard })
+    Ok(Match { map, server_name, source, players, rounds, kills, damages, blinds, bomb, explosions, grenades, shots, score_a, score_b, scoreboard })
 }
 
 // ---- Event field helpers --------------------------------------------------------------------------
@@ -520,6 +573,11 @@ fn get_float(e: &GameEvent, name: &str) -> Option<f32> {
         Variant::F32(v) => Some(*v),
         _ => None,
     }
+}
+
+/// `<prefix>_X`, `<prefix>_Y` (e.g. "attacker", "user").
+fn get_xy(e: &GameEvent, prefix: &str) -> Option<[f32; 2]> {
+    Some([get_float(e, &format!("{prefix}_X"))?, get_float(e, &format!("{prefix}_Y"))?])
 }
 
 fn get_steamid(e: &GameEvent, name: &str) -> Option<u64> {

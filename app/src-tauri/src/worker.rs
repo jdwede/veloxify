@@ -173,6 +173,10 @@ impl Worker {
                 }
                 continue;
             };
+            // Steam is back (e.g. after logging out and in again): that message no longer applies.
+            if self.status.lock().unwrap().message.starts_with("Log in to Steam") {
+                self.set("idle", "Up to date", 0, 0);
+            }
             // CS2 is closed and nothing's rendering: if a render was cut short, put the user's
             // own video settings back before they next start CS2.
             if cs2hl_render::session::repair_cut_short_render(me) {

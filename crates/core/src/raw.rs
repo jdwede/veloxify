@@ -10,7 +10,8 @@ use parser::second_pass::variants::VarVec;
 use std::collections::HashMap;
 
 /// Player props attached to every event as `<prefix>_<prop>` (e.g. `attacker_team_num`).
-const EVENT_PLAYER_PROPS: &[&str] = &["team_num", "health", "current_equip_value", "is_alive"];
+/// Position and callout ("BombsiteA", "Palace") feed the match page's map views.
+const EVENT_PLAYER_PROPS: &[&str] = &["team_num", "health", "current_equip_value", "is_alive", "X", "Y", "last_place_name"];
 /// Non-player props attached to every event (rules/team entities).
 const EVENT_OTHER_PROPS: &[&str] = &["total_rounds_played", "is_warmup_period", "is_freeze_period"];
 
