@@ -1,7 +1,8 @@
-//! Map emblems (the icons CS2's own menus use) for the match lists, taken from the CS2 install
-//! on this PC: `panorama/images/map_icons/map_icon_<map>.vsvg_c` inside `pak01_dir.vpk`. Those
-//! files are compiled resources that carry the original SVG text, which is written out as
-//! `library/maps/<map>.svg`.
+//! Map emblems and weapon silhouettes (the icons CS2's own menus use), taken from the CS2 install
+//! on this PC: `panorama/images/map_icons/map_icon_<map>.vsvg_c` and
+//! `panorama/images/icons/equipment/<weapon>.vsvg_c` inside `pak01_dir.vpk`. Those files are
+//! compiled resources that carry the original SVG text, which is written out as
+//! `library/maps/<map>.svg` and `library/weapons/<weapon>.svg`.
 
 use anyhow::{bail, Context, Result};
 use std::fs::File;
@@ -9,6 +10,7 @@ use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 
 const PREFIX: &str = "panorama/images/map_icons";
+const WEAPONS: &str = "panorama/images/icons/equipment";
 
 struct Entry {
     name: String,
@@ -39,8 +41,9 @@ fn u32le(r: &mut impl Read) -> Result<u32> {
     Ok(u32::from_le_bytes(b))
 }
 
-/// Map-icon entries in a VPK directory file, plus where its embedded data starts.
-fn icon_entries(dir_vpk: &Path) -> Result<(Vec<Entry>, u64)> {
+/// SVG entries (`.vsvg_c`) in a VPK directory file that `want(path, name)` picks, plus where its
+/// embedded data starts.
+fn icon_entries(dir_vpk: &Path, want: impl Fn(&str, &str) -> bool) -> Result<(Vec<Entry>, u64)> {
     let mut r = BufReader::new(File::open(dir_vpk)?);
     if u32le(&mut r)? != 0x55AA_1234 {
         bail!("not a VPK file");
@@ -75,7 +78,7 @@ fn icon_entries(dir_vpk: &Path) -> Result<(Vec<Entry>, u64)> {
                 let _end = u16le(&mut r)?;
                 let mut preload = vec![0; preload_len as usize];
                 r.read_exact(&mut preload)?;
-                if ext == "vsvg_c" && path == PREFIX && name.starts_with("map_icon_") {
+                if ext == "vsvg_c" && want(&path, &name) {
                     out.push(Entry { name, archive, offset, length, preload });
                 }
             }
@@ -104,7 +107,7 @@ fn read_entry(dir_vpk: &Path, e: &Entry, data_start: u64) -> Result<Vec<u8>> {
 /// Writes `maps/<map>.svg` for every map CS2 ships an emblem for. Returns how many were written.
 pub fn extract(library: &Path) -> Result<usize> {
     let vpk = cs2hl_render::steam::cs2_csgo_dir()?.join("pak01_dir.vpk");
-    let (entries, data_start) = icon_entries(&vpk)?;
+    let (entries, data_start) = icon_entries(&vpk, |p, n| p == PREFIX && n.starts_with("map_icon_"))?;
     let out = library.join("maps");
     std::fs::create_dir_all(&out)?;
     let mut n = 0;
@@ -120,6 +123,43 @@ pub fn extract(library: &Path) -> Result<usize> {
         n += 1;
     }
     Ok(n)
+}
+
+/// Writes `weapons/<weapon>.svg` for every equipment icon (ak47, awp, knife_karambit, ...).
+pub fn extract_weapons(library: &Path) -> Result<usize> {
+    let vpk = cs2hl_render::steam::cs2_csgo_dir()?.join("pak01_dir.vpk");
+    let (entries, data_start) = icon_entries(&vpk, |p, _| p == WEAPONS)?;
+    let out = library.join("weapons");
+    std::fs::create_dir_all(&out)?;
+    let mut n = 0;
+    for e in &entries {
+        let data = read_entry(&vpk, e, data_start)?;
+        let text = String::from_utf8_lossy(&data);
+        let (Some(a), Some(b)) = (text.find("<svg"), text.rfind("</svg>")) else { continue };
+        std::fs::write(out.join(format!("{}.svg", e.name)), &text[a..b + 6])?;
+        n += 1;
+    }
+    Ok(n)
+}
+
+/// Extracts the weapon icons once (again after CS2 updates).
+pub fn ensure_weapons(library: &Path) {
+    let dir = library.join("weapons");
+    let stamp = cs2hl_render::steam::cs2_csgo_dir()
+        .ok()
+        .and_then(|d| std::fs::metadata(d.join("pak01_dir.vpk")).ok())
+        .and_then(|m| m.modified().ok())
+        .map(|t| format!("{t:?}"))
+        .unwrap_or_default();
+    if std::fs::read_to_string(dir.join(".source")).ok().as_deref() == Some(stamp.as_str()) {
+        return;
+    }
+    match extract_weapons(library) {
+        Ok(_) => {
+            let _ = std::fs::write(dir.join(".source"), stamp);
+        }
+        Err(e) => eprintln!("weapon icons: {e}"),
+    }
 }
 
 /// Extracts the emblems when a map in the library doesn't have one yet (first run, new maps).

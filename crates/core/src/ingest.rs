@@ -77,6 +77,9 @@ pub fn add_demo(root: &Path, path: &Path, me: u64, policy: &ClipPolicy, refresh:
         }
     }
     std::fs::write(&out, serde_json::to_string_pretty(&entry)?)?;
+    if let Err(e) = crate::details::write(root, &id, &demo, &m, &a, me) {
+        eprintln!("details {id}: {e:#}");
+    }
     Ok(Added::Added {
         id,
         map: entry.map,
@@ -91,7 +94,7 @@ fn rendered_clips(root: &Path) -> Result<Vec<(String, String, i64, String, Optio
     let mut out = vec![];
     for f in std::fs::read_dir(root.join("matches"))? {
         let f = f?.path();
-        if !f.extension().is_some_and(|e| e == "json") {
+        if !library::is_entry_file(&f) {
             continue;
         }
         let m: MatchEntry = serde_json::from_str(&std::fs::read_to_string(&f)?)?;
@@ -228,7 +231,7 @@ pub fn rebuild_index(root: &Path, me: u64) -> Result<Index> {
     let mut all: Vec<MatchEntry> = vec![];
     for f in std::fs::read_dir(&dir)? {
         let f = f?.path();
-        if f.extension().is_some_and(|e| e == "json") {
+        if library::is_entry_file(&f) {
             all.push(serde_json::from_str(&std::fs::read_to_string(&f)?)?);
         }
     }

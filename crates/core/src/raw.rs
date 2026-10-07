@@ -185,6 +185,56 @@ fn num_at(v: &VarVec, row: usize) -> Option<f64> {
     }
 }
 
+/// A player prop value: a number, a list of steamids (`approximate_spotted_by`) or a list of
+/// strings (`inventory`).
+#[derive(Debug, Clone)]
+pub enum Val {
+    Num(f64),
+    Ids(Vec<u64>),
+    Strs(Vec<String>),
+}
+
+/// Props for every player at the given ticks: (steamid, tick) -> prop -> value.
+pub fn players_values(demo: &[u8], props: &[&str], ticks: &[i32]) -> Result<HashMap<(u64, i32), HashMap<String, Val>>> {
+    let (real, names) = friendly_to_real(props)?;
+    let out = run(demo, |i| {
+        i.wanted_player_props = real;
+        i.real_name_to_og_name = names;
+        i.wanted_ticks = ticks.to_vec();
+    })?;
+    let ids: Vec<(u32, String)> = out
+        .prop_controller
+        .prop_infos
+        .iter()
+        .filter(|p| props.contains(&p.prop_friendly_name.as_str()))
+        .map(|p| (p.id, p.prop_friendly_name.clone()))
+        .collect();
+    let (Some(VarVec::U64(sids)), Some(VarVec::I32(row_ticks))) = (
+        out.df.get(&STEAMID_ID).and_then(|c| c.data.as_ref()),
+        out.df.get(&TICK_ID).and_then(|c| c.data.as_ref()),
+    ) else {
+        return Ok(HashMap::new());
+    };
+    let mut result: HashMap<(u64, i32), HashMap<String, Val>> = HashMap::new();
+    for (row, (sid, tick)) in sids.iter().zip(row_ticks).enumerate() {
+        let (Some(sid), Some(tick)) = (sid, tick) else { continue };
+        let mut vals = HashMap::new();
+        for (id, name) in &ids {
+            let Some(data) = out.df.get(id).and_then(|c| c.data.as_ref()) else { continue };
+            let v = match data {
+                VarVec::U64Vec(x) => x.get(row).map(|v| Val::Ids(v.clone())),
+                VarVec::StringVec(x) => x.get(row).map(|v| Val::Strs(v.clone())),
+                _ => num_at(data, row).map(Val::Num),
+            };
+            if let Some(v) = v {
+                vals.insert(name.clone(), v);
+            }
+        }
+        result.insert((*sid, *tick), vals);
+    }
+    Ok(result)
+}
+
 /// Numeric props for several players at the given ticks: (steamid, tick) -> prop -> value.
 /// Vector props (e.g. `aim_punch_angle`) come back as `<name>_0`, `<name>_1`, `<name>_2`.
 pub fn players_series(demo: &[u8], steamids: &[u64], props: &[&str], ticks: &[i32]) -> Result<HashMap<(u64, i32), HashMap<String, f64>>> {

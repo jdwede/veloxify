@@ -1,6 +1,7 @@
 pub mod analysis;
 pub mod curation;
 pub mod demo_io;
+pub mod details;
 pub mod faceit;
 pub mod highlights;
 pub mod ingest;

@@ -28,6 +28,7 @@ const EVENTS: &[&str] = &[
     "inferno_startburn",
     "player_disconnect",
     "weapon_fire",
+    "weapon_reload",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
@@ -153,6 +154,13 @@ pub struct Shot {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct Reload {
+    pub tick: i32,
+    pub round: usize,
+    pub player: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct Blind {
     pub tick: i32,
     pub round: usize,
@@ -224,6 +232,7 @@ pub struct Match {
     pub explosions: Vec<i32>,
     pub grenades: Vec<Grenade>,
     pub shots: Vec<Shot>,
+    pub reloads: Vec<Reload>,
     pub score_a: u32,
     pub score_b: u32,
     pub scoreboard: HashMap<u64, ScoreboardRow>,
@@ -413,6 +422,7 @@ pub fn load_match(demo: &[u8]) -> Result<Match> {
     let mut explosions = vec![];
     let mut grenades = vec![];
     let mut shots = vec![];
+    let mut reloads = vec![];
     // Health tracking so damage is capped at what the victim actually had.
     let mut health: HashMap<u64, i32> = HashMap::new();
     let mut health_round = usize::MAX;
@@ -493,6 +503,11 @@ pub fn load_match(demo: &[u8]) -> Result<Match> {
                 }
             }
             "bomb_exploded" => explosions.push(e.tick),
+            "weapon_reload" => {
+                if let Some(player) = get_steamid(e, "user_steamid") {
+                    reloads.push(Reload { tick: e.tick, round, player });
+                }
+            }
             "hegrenade_detonate" | "flashbang_detonate" | "smokegrenade_detonate" | "inferno_startburn" => {
                 let kind = match e.name.as_str() {
                     "hegrenade_detonate" => GrenadeKind::He,
@@ -535,7 +550,7 @@ pub fn load_match(demo: &[u8]) -> Result<Match> {
         })
         .collect();
 
-    Ok(Match { map, server_name, source, players, rounds, kills, damages, blinds, bomb, explosions, grenades, shots, score_a, score_b, scoreboard })
+    Ok(Match { map, server_name, source, players, rounds, kills, damages, blinds, bomb, explosions, grenades, shots, reloads, score_a, score_b, scoreboard })
 }
 
 // ---- Event field helpers --------------------------------------------------------------------------

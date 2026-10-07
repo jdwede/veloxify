@@ -183,6 +183,9 @@ impl Worker {
                 eprintln!("put back your CS2 video settings after a render was cut short");
             }
             let imported = self.import(&settings, me);
+            if imported {
+                let _ = cs2hl_core::details::write_benchmarks(&settings.library_dir);
+            }
             // Get demos started meanwhile: finish downloading before analyzing or rendering more.
             if crate::demos::downloading(&self.app) {
                 continue;
@@ -218,6 +221,10 @@ impl Worker {
                 let _ = ingest::rebuild_index(&settings.library_dir, me);
                 self.library_changed();
             }
+            // Older matches: their match-page details (aim, utility, ...), a minute at a time.
+            if self.backfill_details(&settings, me) {
+                self.library_changed();
+            }
             if self.status.lock().unwrap().state != "error" {
                 self.set("idle", "Up to date", 0, 0);
             }
@@ -229,6 +236,56 @@ impl Worker {
                 _ => {}
             }
         }
+    }
+
+    /// Builds missing (or outdated) match-page details for matches whose demo is still on disk,
+    /// newest first, for up to a minute; stops when CS2 opens or Get demos starts. Returns whether
+    /// any were built (benchmarks are refreshed then).
+    fn backfill_details(&self, settings: &Settings, me: u64) -> bool {
+        let lib = &settings.library_dir;
+        let Ok(index) = std::fs::read_to_string(lib.join("index.json")).map_err(anyhow::Error::from).and_then(|t| Ok(serde_json::from_str::<Index>(&t)?))
+        else {
+            return false;
+        };
+        let mut todo: Vec<(i64, String)> = index
+            .matches
+            .iter()
+            .filter(|m| cs2hl_core::details::stale(lib, &m.id))
+            .map(|m| (m.played_ts, m.id.clone()))
+            .collect();
+        todo.sort_by_key(|(ts, _)| std::cmp::Reverse(*ts));
+        let total = todo.len();
+        let started = Instant::now();
+        let mut built = 0;
+        for (i, (_, id)) in todo.into_iter().enumerate() {
+            if started.elapsed() > Duration::from_secs(60) || system::cs2_running() || crate::demos::downloading(&self.app) {
+                break;
+            }
+            let Some(entry) = std::fs::read_to_string(lib.join("matches").join(format!("{id}.json")))
+                .ok()
+                .and_then(|t| serde_json::from_str::<MatchEntry>(&t).ok())
+            else {
+                continue;
+            };
+            let demo_path = Path::new(&entry.demo_path);
+            if !demo_path.exists() {
+                continue; // the demo was deleted (storage limit): nothing to build from
+            }
+            self.set("details", format!("Match details {} of {total}", i + 1), i, total);
+            let result = cs2hl_core::demo_io::read_demo(demo_path).and_then(|demo| {
+                let m = cs2hl_core::model::load_match(&demo)?;
+                let a = cs2hl_core::analysis::analyze(&m);
+                cs2hl_core::details::write(lib, &id, &demo, &m, &a, me)
+            });
+            match result {
+                Ok(()) => built += 1,
+                Err(e) => eprintln!("details {id}: {e:#}"),
+            }
+        }
+        if built > 0 {
+            let _ = cs2hl_core::details::write_benchmarks(lib);
+        }
+        built > 0
     }
 
     /// Names the user may go by on FACEIT: the one set in Settings, the names they played under
@@ -287,6 +344,7 @@ impl Worker {
         maps.sort();
         maps.dedup();
         mapicons::ensure(lib, &maps);
+        mapicons::ensure_weapons(lib);
     }
 
     /// New demo files in the watched folders, newest first, skipping ones still downloading.

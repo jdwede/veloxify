@@ -105,6 +105,12 @@ pub struct HighlightDetails {
     pub eco_kills: u32,
 }
 
+/// A match entry file in `matches/` (`<id>.json`, not `<id>.details.json`).
+pub fn is_entry_file(p: &std::path::Path) -> bool {
+    let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    name.ends_with(".json") && !name.ends_with(".details.json")
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MatchEntry {
     pub id: String,

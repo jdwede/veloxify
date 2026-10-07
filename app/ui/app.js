@@ -14,7 +14,7 @@ async function initLib() {
 }
 const assetUrl = (rel) => (tauri ? tauri.core.convertFileSrc(`${LIB}\\${rel.replaceAll("/", "\\")}`) : `${LIB}/${rel}`);
 
-const state = { index: null, faceit: null, matches: new Map(), month: null, playlist: [], playing: -1 };
+const state = { index: null, faceit: null, matches: new Map(), details: new Map(), benchmarks: undefined, month: null, playlist: [], playing: -1 };
 const BROWSER_DEFAULTS = { heroPeriod: "week", sort: "best", when: "all", from: "", to: "", source: "all", map: "all", types: [], playableOnly: true, hideEco: false, preset: "", tags: [], folder: "" };
 let browser = { ...BROWSER_DEFAULTS };
 try { browser = { ...BROWSER_DEFAULTS, ...JSON.parse(localStorage.getItem("veloxify.browser") || "{}") }; } catch (e) { /* defaults */ }
@@ -166,6 +166,8 @@ const f2 = (x) => x.toFixed(2);
 const GRADES = {
   rating: [1.2, 1.05, 0.95, 0.85], rws: [13, 11, 9, 7], win: [0.6, 0.53, 0.47, 0.4],
   kd: [1.3, 1.1, 0.9, 0.75], adr: [95, 82, 70, 60], kast: [80, 73, 66, 58],
+  // Round Swing, % per round: 0 is neutral (it's zero-sum).
+  swing: [1.5, 0.5, -0.5, -1.5],
 };
 const GRADE_COLORS = ["#2fd36f", "#9ddb8c", "var(--text)", "#f3a5a0", "#ff5252"];
 const gradeOf = (kind, v) => GRADES[kind].filter((t) => v < t).length;
@@ -493,7 +495,7 @@ const MATCH_SORTS = {
   name: (p) => p.name.toLowerCase(), kills: (p) => p.counts.kills, assists: (p) => p.counts.assists, deaths: (p) => p.counts.deaths,
   kd: (p) => p.derived.kd, adr: (p) => p.derived.adr, kast: (p) => p.derived.kast,
   k2: (p) => p.counts.multikill_rounds[2], k3: (p) => p.counts.multikill_rounds[3], k4: (p) => p.counts.multikill_rounds[4], k5: (p) => p.counts.multikill_rounds[5],
-  rws: (p) => p.derived.rws, rating: (p) => r3(p.derived),
+  rws: (p) => p.derived.rws, swing: (p) => p.derived.swing || 0, rating: (p) => r3(p.derived),
 };
 const matchSort = { key: "kills", desc: true };
 
@@ -502,7 +504,8 @@ async function renderMatchPage(view, id, tab) {
   if (!s) { view.innerHTML = `<a class="day-back" href="#/matches">◀ Match history</a><div class="empty">Match not found.</div>`; return; }
   const m = s.stats_only ? null : await loadMatch(id);
   const tabs = [["overview", "Overview"]];
-  if (m) tabs.push(["highlights", `Highlights${m.highlights.length ? ` (${m.highlights.length})` : ""}`], ["lowlights", `Lowlights${(m.lowlights || []).length ? ` (${m.lowlights.length})` : ""}`]);
+  if (m) tabs.push(["aim", "Aim"], ["utility", "Utility"], ["activity", "Activity"], ["opening", "Opening Duels"], ["clutches", "Clutches"],
+    ["highlights", `Highlights${m.highlights.length ? ` (${m.highlights.length})` : ""}`], ["lowlights", `Lowlights${(m.lowlights || []).length ? ` (${m.lowlights.length})` : ""}`]);
   if (!tabs.some(([k]) => k === tab)) tab = "overview";
   const fm = s.faceit;
   const eloNow = s.elo ?? fm?.elo, eloDelta = s.elo_delta ?? fm?.elo_delta;
@@ -533,14 +536,19 @@ async function renderMatchPage(view, id, tab) {
     body.innerHTML = list.length ? `<div class="ll-grid">${list.map(lowlightCard).join("")}</div>` : `<div class="empty">No lowlights: no deaths right after a miss this match.</div>`;
     return;
   }
-  renderMatchScoreboard(body, m);
+  if (tab === "aim" || tab === "utility" || tab === "activity") return renderStatTab(body, m, id, tab);
+  if (tab === "opening") return renderOpeningTab(body, m, id);
+  if (tab === "clutches") return renderClutchTab(body, m, id);
+  body.innerHTML = `<div id="mp-summary"></div><div id="mp-board"></div>`;
+  renderMatchScoreboard(body.querySelector("#mp-board"), m);
+  await renderMatchSummary(body.querySelector("#mp-summary"), m, id);
 }
 
 // Both teams, Leetify's match-details columns (no Leetify rating), sortable by any column.
 function renderMatchScoreboard(body, m) {
   const me = state.index.me;
   const COLS = [["kills", "Kills"], ["assists", "Assists"], ["deaths", "Deaths"], ["kd", "K/D"], ["adr", "ADR"], ["kast", "KAST"],
-    ["k2", "2K"], ["k3", "3K"], ["k4", "4K"], ["k5", "5K"], ["rws", "RWS"], ["rating", "HLTV 3.0"]];
+    ["k2", "2K"], ["k3", "3K"], ["k4", "4K"], ["k5", "5K"], ["rws", "RWS"], ["swing", "Swing"], ["rating", "HLTV 3.0"]];
   const by = MATCH_SORTS[matchSort.key];
   const sorted = (side) => m.players.filter((p) => p.side === side).sort((a, b) => {
     const x = by(a), y = by(b);
@@ -557,6 +565,7 @@ function renderMatchScoreboard(body, m) {
       case "adr": return `<td class="${gradeClass("adr", d.adr)}">${Math.round(d.adr)}</td>`;
       case "kast": return `<td class="${gradeClass("kast", d.kast)}">${Math.round(d.kast)}%</td>`;
       case "rws": return `<td class="${gradeClass("rws", d.rws)}">${f1(d.rws)}</td>`;
+      case "swing": return `<td class="${gradeClass("swing", d.swing || 0)}" title="Round Swing: average change in the team's chance to win each round (HLTV Rating 3.0)">${fmtSwing(d.swing || 0)}</td>`;
       case "rating": return `<td><span class="mp-rating ${ratingClass(r3(d))}">${f2(r3(d))}</span></td>`;
       default: return `<td class="${c.multikill_rounds[Number(k[1])] ? "" : "zero"}">${c.multikill_rounds[Number(k[1])]}</td>`;
     }
@@ -581,6 +590,394 @@ function renderMatchScoreboard(body, m) {
     matchSort.key = k;
     renderMatchScoreboard(body, m);
   }));
+}
+
+// ---- match details: HLTV-style summary, Aim, Utility, Activity, Opening duels, Clutches ----------
+
+async function loadDetails(id) {
+  if (!state.details.has(id)) {
+    let d = null;
+    try {
+      const r = await fetch(assetUrl(`matches/${id}.details.json`), { cache: "no-store" });
+      if (r.ok) d = await r.json();
+    } catch (e) { /* not built yet */ }
+    state.details.set(id, d);
+  }
+  return state.details.get(id);
+}
+
+async function loadBenchmarks() {
+  if (state.benchmarks === undefined) {
+    try {
+      const r = await fetch(assetUrl("benchmarks.json"), { cache: "no-store" });
+      state.benchmarks = r.ok ? await r.json() : null;
+    } catch (e) { state.benchmarks = null; }
+  }
+  return state.benchmarks;
+}
+
+// Where a value sits among every player-match in your library: 0 = worst, 1 = best.
+function standing(key, v) {
+  const b = state.benchmarks?.[key];
+  if (!b || v == null || !b.quantiles?.length) return null;
+  const q = b.quantiles, last = q.length - 1;
+  let p;
+  if (v <= q[0]) p = 0;
+  else if (v >= q[last]) p = 1;
+  else {
+    let i = 0;
+    while (i < last - 1 && q[i + 1] <= v) i++;
+    const lo = q[i], hi = q[i + 1];
+    p = (i + (hi > lo ? (v - lo) / (hi - lo) : 0.5)) / last;
+  }
+  return b.lower_is_better ? 1 - p : p;
+}
+// Leetify's bands: bottom 10% Poor, 10-30% Subpar, 30-70% Average, 70-90% Good, top 10% Great.
+const bandOf = (p) => (p == null ? "" : p >= 0.9 ? "g0" : p >= 0.7 ? "g1" : p >= 0.3 ? "g2" : p >= 0.1 ? "g3" : "g4");
+const BAND_WORDS = { g0: "Great", g1: "Good", g2: "Average", g3: "Subpar", g4: "Poor" };
+function erf(x) {
+  // Abramowitz & Stegun 7.1.26
+  const s = Math.sign(x), a = Math.abs(x), t = 1 / (1 + 0.3275911 * a);
+  return s * (1 - ((((1.061405429 * t - 1.453152027) * t + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * Math.exp(-a * a));
+}
+const phi = (x) => 0.5 * (1 + erf(x / Math.SQRT2));
+// Standard score against the library, oriented so higher is better, clamped to +-3.
+function zOf(key, v) {
+  const b = state.benchmarks?.[key];
+  if (!b || v == null || !b.sd) return null;
+  const x = (v - b.mean) / b.sd;
+  return Math.max(-3, Math.min(3, b.lower_is_better ? -x : x));
+}
+// A 0-100 rating from the average standard score of some stats (50 = the average player).
+function ratingFrom(keys, stats) {
+  const zs = keys.map((k) => zOf(k, stats[k])).filter((x) => x != null);
+  return zs.length >= Math.ceil(keys.length / 2) ? Math.round(phi(zs.reduce((a, b) => a + b, 0) / zs.length) * 100) : null;
+}
+const AIM_RATING_KEYS = ["spotted_accuracy", "ttd_ms", "ttk_ms", "crosshair_deg", "head_accuracy", "hs_kill_pct", "first_bullet", "spray_accuracy", "counter_strafe"];
+const QUALITY_KEYS = ["flash_assist_pct", "enemies_per_flash", "friends_per_flash", "blind_time", "he_damage_avg", "he_team_damage_avg"];
+const aimRating = (s) => ratingFrom(AIM_RATING_KEYS, s);
+// Leetify's published Quantity formula; Quality is the flash/HE stats against your library.
+const quantityRating = (s) => (s.nades_per_round == null ? null : Math.round(Math.min(100, (s.nades_per_round / 3) ** (2 / 3) * 100)));
+const qualityRating = (s) => ratingFrom(QUALITY_KEYS, s);
+function utilityRating(s) {
+  const q = qualityRating(s), n = quantityRating(s);
+  return q == null || n == null ? null : Math.round(Math.sqrt(q * n));
+}
+const ratingChip = (v) => `<span class="mp-rating ${v == null ? "" : bandOf(v / 100)}">${v == null ? "–" : v}</span>`;
+
+const WEAPON_NAMES = {
+  ak47: "AK-47", m4a1: "M4A4", m4a1_silencer: "M4A1-S", awp: "AWP", ssg08: "SSG 08", deagle: "Desert Eagle", revolver: "R8 Revolver",
+  usp_silencer: "USP-S", glock: "Glock-18", hkp2000: "P2000", p250: "P250", fiveseven: "Five-SeveN", tec9: "Tec-9", cz75a: "CZ75-Auto",
+  elite: "Dual Berettas", famas: "FAMAS", galilar: "Galil AR", aug: "AUG", sg556: "SG 553", g3sg1: "G3SG1", scar20: "SCAR-20",
+  mac10: "MAC-10", mp9: "MP9", mp7: "MP7", mp5sd: "MP5-SD", ump45: "UMP-45", p90: "P90", bizon: "PP-Bizon", nova: "Nova",
+  xm1014: "XM1014", mag7: "MAG-7", sawedoff: "Sawed-Off", m249: "M249", negev: "Negev", hegrenade: "HE grenade",
+  inferno: "Molotov", molotov: "Molotov", incgrenade: "Incendiary", flashbang: "Flashbang", taser: "Zeus x27", world: "World",
+};
+const weaponName = (w) => WEAPON_NAMES[w] || (w.startsWith("knife") || w === "bayonet" ? "Knife" : w);
+const weaponFile = (w) => (w.startsWith("knife") || w === "bayonet" ? "knife" : w === "molotov" ? "inferno" : w);
+function weaponIcon(w) {
+  if (!w) return `<span class="sub">N/A</span>`;
+  const name = esc(weaponName(w));
+  return `<img class="wicon" src="${assetUrl(`weapons/${weaponFile(w)}.svg`)}" alt="${name}" title="${name}" onerror="this.outerHTML='<span class=&quot;wtext&quot;>${name}</span>'">`;
+}
+
+// Players of one side with their row data and details, for the tab tables.
+function detailRows(m, d) {
+  const byId = new Map((d?.players || []).map((p) => [p.steamid, p]));
+  return m.players.map((p) => ({ p, d: byId.get(p.steamid), s: byId.get(p.steamid)?.stats || {} }));
+}
+
+// Both teams in Leetify's table look: `cols` = [{ key, label, tip, value(row) -> number|null, cell(row, ctx) -> html }].
+function teamTables(body, m, rows, cols, sortState, rerender) {
+  const me = state.index.me;
+  const value = (r, c) => (c.value ? c.value(r) : null);
+  const col = cols.find((c) => c.key === sortState.key) || cols[0];
+  const sorted = (side) => rows.filter((r) => r.p.side === side).sort((a, b) => {
+    const x = value(a, col), y = value(b, col);
+    if (x == null && y == null) return 0;
+    if (x == null) return 1;
+    if (y == null) return -1;
+    return (x - y) * (sortState.desc ? -1 : 1);
+  });
+  // Best value across all ten players per column (for the star and the in-cell bars).
+  const ctx = {};
+  for (const c of cols) {
+    const vals = rows.map((r) => value(r, c)).filter((v) => v != null);
+    ctx[c.key] = { max: Math.max(0, ...vals), best: c.lower ? Math.min(...vals) : Math.max(...vals) };
+  }
+  const rank = (p) => (p.rank_type === 11 && p.rank ? premierChip(p.rank) : "");
+  const head = (title, won, tie) => `<tr class="mp-team"><th class="mp-name">${title} <span class="mp-badge ${won ? "win" : "loss"}">${won ? "WIN" : tie ? "TIE" : "LOSS"}</span></th>
+    ${cols.map((c) => `<th data-sort="${c.key}" class="${sortState.key === c.key ? "on" : ""}" ${c.tip ? `title="${esc(c.tip)}"` : ""}>${c.label}${sortState.key === c.key ? (sortState.desc ? " ↓" : " ↑") : ""}</th>`).join("")}</tr>`;
+  const row = (r, won) => `<tr class="${won ? "won" : "lost"} ${r.p.steamid === me ? "me" : ""}">
+    <td class="mp-name">${r.p.party ? `<span class="mp-party" title="In your party">${ICONS.party}</span>` : ""}<span>${esc(r.p.name)}</span>${rank(r.p)}</td>
+    ${cols.map((c) => c.cell(r, ctx[c.key])).join("")}</tr>`;
+  const mineWon = m.result === "win", theirsWon = m.result === "loss", tie = m.result === "tie";
+  body.innerHTML = `<div class="mp-board-wrap"><table class="mp-board">
+      <thead>${head("My Team", mineWon, tie)}</thead><tbody>${sorted("mine").map((r) => row(r, mineWon)).join("")}</tbody>
+      <thead>${head("Enemy Team", theirsWon, tie)}</thead><tbody>${sorted("enemy").map((r) => row(r, theirsWon)).join("")}</tbody>
+    </table></div>`;
+  body.querySelectorAll("th[data-sort]").forEach((th) => (th.onclick = () => {
+    const k = th.dataset.sort;
+    const c = cols.find((x) => x.key === k);
+    sortState.desc = sortState.key === k ? !sortState.desc : !c?.lower;
+    sortState.key = k;
+    rerender();
+  }));
+}
+
+// A stat cell colored by where it sits in your library, with an optional star for the match's best.
+function statCell(key, fmt, opts = {}) {
+  return (r, ctx) => {
+    const v = r.s[key];
+    if (v == null) return `<td class="na">n/a</td>`;
+    const star = opts.star && ctx && v === ctx.best ? ` <span class="star">★</span>` : "";
+    return `<td class="${bandOf(standing(key, v))}">${fmt(v)}${star}</td>`;
+  };
+}
+const pct0 = (v) => `${Math.round(v)}%`;
+const ms0 = (v) => `${Math.round(v)}ms`;
+const deg2 = (v) => `${v.toFixed(2)}°`;
+
+const AIM_COLS = [
+  { key: "aim_rating", label: "Aim Rating", tip: "Your aim stats against every player in your library (50 = average). Accuracy (All) isn't counted.",
+    value: (r) => aimRating(r.s), cell: (r) => `<td>${ratingChip(aimRating(r.s))}</td>` },
+  { key: "spotted_accuracy", label: "Spotted Accuracy", tip: "When you were firing at a spotted enemy, how many of those shots hit. All hits divided by all shots at the spotted enemy.", value: (r) => r.s.spotted_accuracy, cell: statCell("spotted_accuracy", pct0) },
+  { key: "ttd_ms", label: "Time to Damage", lower: true, tip: "Average time from seeing an enemy to first damaging them. Waits over 1 s (holding an angle) are excluded. Not reaction time: it includes accuracy, crosshair placement and fire rate.", value: (r) => r.s.ttd_ms, cell: statCell("ttd_ms", ms0) },
+  { key: "ttk_ms", label: "Time to Kill", lower: true, tip: "Median time from seeing an enemy to killing them. Kills that took over 5 s from the first hit are ignored.", value: (r) => r.s.ttk_ms, cell: statCell("ttk_ms", ms0) },
+  { key: "crosshair_deg", label: "Cross. Placement", lower: true, tip: "Median angle your crosshair moved from first seeing an enemy until the first hit on them. Lower is better.", value: (r) => r.s.crosshair_deg, cell: statCell("crosshair_deg", deg2) },
+  { key: "head_accuracy", label: "Head Accuracy", tip: "Hits on enemies that were in the head, divided by all hits on enemies. AWP shots excluded.", value: (r) => r.s.head_accuracy, cell: statCell("head_accuracy", pct0) },
+  { key: "hs_kill_pct", label: "HS Kill %", tip: "Kills that were headshots.", value: (r) => r.s.hs_kill_pct, cell: statCell("hs_kill_pct", pct0) },
+  { key: "first_bullet", label: "First Bullet", tip: "How often your first bullet hits after spotting an enemy. Only shots fired with the recoil fully reset; shotguns and snipers excluded.", value: (r) => r.s.first_bullet, cell: statCell("first_bullet", pct0) },
+  { key: "spray_accuracy", label: "Spray Accuracy", tip: "Rifles only. A spray is 3+ shots in a row; shots in sprays that hit, divided by all spray shots, with an enemy spotted.", value: (r) => r.s.spray_accuracy, cell: statCell("spray_accuracy", pct0) },
+  { key: "counter_strafe", label: "Counter-Strafing", tip: "Rifle shots with an enemy spotted (not fully crouched) fired below 34% of the gun's max speed, where inaccuracy kicks in.", value: (r) => r.s.counter_strafe, cell: statCell("counter_strafe", pct0) },
+  { key: "accuracy", label: "Accuracy (All)", tip: "All hits divided by all shots. Not part of the Aim Rating.", value: (r) => r.s.accuracy, cell: statCell("accuracy", pct0) },
+];
+
+const UTIL_COLORS = { flashes: "#3fb6c9", smokes: "#4a7cf0", hes: "#c27a3e", molotovs: "#d0453f" };
+const UTIL_NAMES = { flashes: "Flashes", smokes: "Smokes", hes: "HEs", molotovs: "Molotovs" };
+function utilMix(u) {
+  const parts = [["flashes", u.flashes], ["smokes", u.smokes], ["hes", u.hes], ["molotovs", u.molotovs]];
+  return `<span class="umix">${parts.filter(([, n]) => n).map(([k, n]) => `<i style="flex:${n};background:${UTIL_COLORS[k]}" title="${n} ${k}">${n}</i>`).join("")}</span>`;
+}
+const UTIL_COLS = [
+  { key: "utility_rating", label: "Utility Rating", tip: "Geometric mean of Quality and Quantity (Leetify's method).", value: (r) => utilityRating(r.s), cell: (r) => `<td>${ratingChip(utilityRating(r.s))}</td>` },
+  { key: "quality", label: "Quality Rating", tip: "Flash assists, enemies and friends flashed, blind time, HE damage and HE team damage, against every player in your library (50 = average).", value: (r) => qualityRating(r.s), cell: (r) => `<td>${ratingChip(qualityRating(r.s))}</td>` },
+  { key: "flash_assist_pct", label: "Flash Assists", tip: "Kills your flashes assisted, per flash thrown.", value: (r) => r.s.flash_assist_pct, cell: statCell("flash_assist_pct", pct0) },
+  { key: "enemies_per_flash", label: "Enemies flashed", tip: "Enemies blinded for 1.1 s or more, per flash.", value: (r) => r.s.enemies_per_flash, cell: statCell("enemies_per_flash", (v) => v.toFixed(2)) },
+  { key: "friends_per_flash", label: "Friends flashed", lower: true, tip: "Teammates blinded for 1.1 s or more, per flash.", value: (r) => r.s.friends_per_flash, cell: statCell("friends_per_flash", (v) => v.toFixed(2)) },
+  { key: "blind_time", label: "Avg blind time", tip: "Average time enemies stayed blind from your flashes.", value: (r) => r.s.blind_time, cell: statCell("blind_time", (v) => `${v.toFixed(1)}sec`) },
+  { key: "he_damage_avg", label: "Avg HE damage", tip: "Damage to enemies per HE grenade.", value: (r) => r.s.he_damage_avg, cell: statCell("he_damage_avg", (v) => v.toFixed(2)) },
+  { key: "he_team_damage_avg", label: "Avg HE team damage", lower: true, tip: "Damage to teammates per HE grenade.", value: (r) => r.s.he_team_damage_avg, cell: statCell("he_team_damage_avg", (v) => v.toFixed(2)) },
+  { key: "quantity", label: "Quantity Rating & Utility Usage", tip: "Grenades thrown per round (decoys aside): min(100, (per round / 3)^(2/3) x 100).", value: (r) => quantityRating(r.s),
+    cell: (r) => `<td class="uq">${ratingChip(quantityRating(r.s))}${r.d ? utilMix(r.d.utility) : ""}</td>` },
+  { key: "unused_utility", label: "Avg unused utility", lower: true, tip: "Value of the grenades you still had when you died, per death.", value: (r) => r.s.unused_utility, cell: statCell("unused_utility", (v) => `${Math.round(v)}$`) },
+];
+
+// Activity: in-cell bars against the match's highest value, a star for the best.
+function barCell(key, fmt, color) {
+  return (r, ctx) => {
+    const v = r.s[key];
+    if (v == null) return `<td class="na">n/a</td>`;
+    const w = ctx.max ? Math.max(2, (v / ctx.max) * 100) : 0;
+    const star = v === ctx.best && v > 0 ? ` <span class="star">★</span>` : "";
+    return `<td class="barcell"><i style="width:${w}%;background:${color}"></i><span>${fmt(r, v)}${star}</span></td>`;
+  };
+}
+const ACT_COLS = [
+  { key: "damage", label: "Total Damage", value: (r) => r.s.damage, cell: barCell("damage", (r, v) => Math.round(v), "var(--bar-neutral)") },
+  { key: "he_damage", label: "HE dmg", value: (r) => r.s.he_damage, cell: barCell("he_damage", (r, v) => Math.round(v), "#7a2f33") },
+  { key: "molotov_damage", label: "Molotov dmg", value: (r) => r.s.molotov_damage, cell: barCell("molotov_damage", (r, v) => Math.round(v), "#7a4a24") },
+  { key: "enemies_flashed", label: "Enemies Flashed", tip: "Enemies blinded for 1.1 s or more.", value: (r) => r.s.enemies_flashed, cell: barCell("enemies_flashed", (r, v) => Math.round(v), "#255a66") },
+  { key: "shots", label: "Shots Fired", value: (r) => r.s.shots, cell: barCell("shots", (r, v) => Math.round(v), "var(--bar-neutral)") },
+  { key: "wasted_magazine", label: "Wasted Magazine %", lower: true, tip: "How much of the magazine was still loaded when you reloaded (bullets left / magazine size, over all reloads).", value: (r) => r.s.wasted_magazine,
+    cell: (r, ctx) => {
+      const v = r.s.wasted_magazine;
+      if (v == null) return `<td class="na">n/a</td>`;
+      const star = v === ctx.best ? ` <span class="star">★</span>` : "";
+      return `<td class="barcell"><i style="width:${Math.max(2, v)}%;background:var(--bar-neutral)"></i><span>${Math.round(v)}% (${r.d.activity.wasted_bullets} bullets)${star}</span></td>`;
+    } },
+  { key: "rounds_survived_pct", label: "Rounds Survived", value: (r) => r.s.rounds_survived_pct,
+    cell: (r, ctx) => {
+      const v = r.s.rounds_survived_pct;
+      if (v == null) return `<td class="na">n/a</td>`;
+      return `<td class="barcell"><i style="width:${Math.max(2, v)}%;background:var(--bar-neutral)"></i><span>${r.d.activity.rounds_survived} (${Math.round(v)}%)</span></td>`;
+    } },
+];
+
+const detailSorts = { aim: { key: "aim_rating", desc: true }, utility: { key: "utility_rating", desc: true }, activity: { key: "damage", desc: true }, opening: { key: "attempts", desc: true } };
+const detailSide = { opening: "all", clutches: "all" };
+
+const noDetails = (body) => (body.innerHTML = `<div class="empty">This match's details aren't built yet. Veloxify analyzes older matches in the background while CS2 is closed; this tab fills in when it gets to this one.</div>`);
+
+async function renderStatTab(body, m, id, tab) {
+  const [d] = await Promise.all([loadDetails(id), loadBenchmarks()]);
+  if (!d) return noDetails(body);
+  const rows = detailRows(m, d);
+  const cols = { aim: AIM_COLS, utility: UTIL_COLS, activity: ACT_COLS }[tab];
+  const draw = () => {
+    teamTables(body, m, rows, cols, detailSorts[tab], draw);
+    if (tab === "utility") {
+      // Each team's utility mix above its table.
+      body.querySelectorAll("tbody").forEach((tb, i) => {
+        const side = i === 0 ? "mine" : "enemy";
+        const t = { flashes: 0, smokes: 0, hes: 0, molotovs: 0 };
+        for (const r of rows.filter((x) => x.p.side === side && x.d)) for (const k in t) t[k] += r.d.utility[k];
+        const total = t.flashes + t.smokes + t.hes + t.molotovs;
+        const pct = (n) => (total ? Math.round((n / total) * 100) : 0);
+        const bar = document.createElement("tr");
+        bar.className = "umix-row";
+        bar.innerHTML = `<td colspan="${cols.length + 1}"><div class="umix-total"><b>${total} total</b>
+          <div class="umix-bar">${Object.entries(t).filter(([, n]) => n).map(([k, n]) => `<i style="flex:${n};background:${UTIL_COLORS[k]}">${pct(n)}%</i>`).join("")}</div></div>
+          <div class="umix-legend">${Object.entries(t).map(([k, n]) => `<span><i style="background:${UTIL_COLORS[k]}"></i>${UTIL_NAMES[k]}: ${n}</span>`).join("")}</div></td>`;
+        tb.parentNode.insertBefore(bar, tb.previousElementSibling);
+      });
+    }
+    const note = document.createElement("div");
+    note.className = "note";
+    note.textContent = {
+      aim: "Colors compare each value with every player-match in your library: bottom 10% Poor, 10-30% Subpar, 30-70% Average, 70-90% Good, top 10% Great. \"Spotted\" is CS2's own spotted state, so Time to Damage and Crosshair Placement run lower than Leetify's numbers (it flags a visible enemy a moment later than Leetify's own line-of-sight check).",
+      utility: "Utility, Quality and Quantity ratings: 50 = the average player in your library. A flash counts from 1.1 s of blindness.",
+      activity: "Bars compare the ten players in this match; ★ marks the best.",
+    }[tab];
+    body.appendChild(note);
+  };
+  draw();
+}
+
+// Opening duels: who took the first fight of each round, with what, and how it went.
+async function renderOpeningTab(body, m, id) {
+  const d = await loadDetails(id);
+  if (!d) return noDetails(body);
+  const side = detailSide.opening;
+  const names = new Map(m.players.map((p) => [p.steamid, p.name]));
+  const team = new Map(m.players.map((p) => [p.steamid, p.side]));
+  const openings = d.kills.filter((k) => k.opening);
+  const onSide = (s, sideOf) => side === "all" || sideOf === side;
+  const roundsOn = (sid) => d.rounds.filter((r) => side === "all" || (team.get(sid) === "mine" ? r.mine_side : r.mine_side === "T" ? "CT" : "T") === side).length;
+  const mode = (arr) => {
+    const c = new Map();
+    for (const x of arr) c.set(x, (c.get(x) || 0) + 1);
+    return [...c.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] || "";
+  };
+  const rows = m.players.map((p) => {
+    const won = openings.filter((k) => k.attacker === p.steamid && onSide(p.steamid, k.attacker_side));
+    const lost = openings.filter((k) => k.victim === p.steamid && onSide(p.steamid, k.victim_side));
+    const n = won.length + lost.length, rounds = roundsOn(p.steamid);
+    return {
+      p, s: {}, won, lost,
+      attempts: rounds ? (n / rounds) * 100 : null,
+      success: n ? (won.length / n) * 100 : null,
+      traded: lost.length ? (lost.filter((k) => k.traded).length / lost.length) * 100 : null,
+      victim: mode(won.map((k) => k.victim)), weapon: mode(won.map((k) => k.weapon)), diedTo: mode(lost.map((k) => k.weapon)),
+    };
+  });
+  const pctBar = (key) => (r, ctx) => {
+    const v = r[key];
+    if (v == null) return `<td class="na">–</td>`;
+    const star = v === ctx.best && v > 0 ? ` <span class="star">★</span>` : "";
+    return `<td class="barcell"><i style="width:${Math.max(2, v)}%;background:var(--bar-neutral)"></i><span>${Math.round(v)}%${star}</span></td>`;
+  };
+  const cols = [
+    { key: "attempts", label: "Attempts", tip: "Rounds in which this player took the round's first duel (won or lost).", value: (r) => r.attempts, cell: pctBar("attempts") },
+    { key: "success", label: "Success", tip: "Opening duels won.", value: (r) => r.success, cell: pctBar("success") },
+    { key: "traded", label: "Traded", tip: "Opening deaths a teammate traded within 5 s.", value: (r) => r.traded, cell: pctBar("traded") },
+    { key: "victim", label: "Most Killed Player", cell: (r) => `<td class="left">${r.victim ? esc(names.get(r.victim) || "") : "N/A"}</td>` },
+    { key: "weapon", label: "Best Weapon", cell: (r) => `<td>${weaponIcon(r.weapon)}</td>` },
+    { key: "diedTo", label: "Most Died To", cell: (r) => `<td>${weaponIcon(r.diedTo)}</td>` },
+  ];
+  const sideSeg = `<div class="seg side-seg">${[["all", "Overall"], ["T", "T Side"], ["CT", "CT Side"]].map(([k, l]) => `<button data-side="${k}" class="${side === k ? "on" : ""}">${l}</button>`).join("")}</div>`;
+  body.innerHTML = `${sideSeg}<div id="op-tables"></div>
+    <div class="h3 mp-sub">Round Breakdown</div>
+    <table class="mp-list"><thead><tr><th>Round</th><th>Attacker</th><th>Attacker Side</th><th>Attacker Weapon</th><th>Victim</th><th>Victim Side</th><th>Round Time</th></tr></thead>
+    <tbody>${openings.filter((k) => onSide(k.attacker, k.attacker_side)).map((k) => `<tr class="${team.get(k.attacker) === "mine" ? "mine" : "enemy"}">
+      <td>${k.round}</td><td>${esc(names.get(k.attacker) || "World")}</td><td class="${k.attacker_side === "T" ? "t-text" : "ct-text"}">${k.attacker_side}</td>
+      <td>${weaponIcon(k.weapon)}</td><td>${esc(names.get(k.victim) || "")}</td><td class="${k.victim_side === "T" ? "t-text" : "ct-text"}">${k.victim_side}</td><td>${Math.round(k.t)} sec</td></tr>`).join("")}</tbody></table>`;
+  const tables = body.querySelector("#op-tables");
+  const draw = () => teamTables(tables, m, rows, cols, detailSorts.opening, draw);
+  draw();
+  body.querySelectorAll("[data-side]").forEach((b) => (b.onclick = () => { detailSide.opening = b.dataset.side; renderOpeningTab(body, m, id); }));
+}
+
+// Clutches: every 1vX, per team and per player, as Leetify lays them out.
+async function renderClutchTab(body, m, id) {
+  const d = await loadDetails(id);
+  if (!d) return noDetails(body);
+  const side = detailSide.clutches;
+  const team = new Map(m.players.map((p) => [p.steamid, p.side]));
+  const list = d.clutches.filter((c) => side === "all" || c.side === side);
+  const panel = (which, title) => {
+    const players = m.players.filter((p) => p.side === which);
+    const mine = list.filter((c) => team.get(c.player) === which);
+    const won = mine.filter((c) => c.result === "won").length, saved = mine.filter((c) => c.result === "saved").length;
+    const lost = mine.length - won;
+    const kills = mine.reduce((a, c) => a + c.kills, 0);
+    const wonPct = mine.length ? Math.round((won / mine.length) * 100) : 0;
+    const cols = players.map((p) => `<div class="cl-col"><div class="cl-name">${esc(p.name)}</div>
+      ${mine.filter((c) => c.player === p.steamid).sort((a, b) => a.round - b.round).map((c) => `<div class="cl-card ${c.result}">
+        <b>1v${c.vs}</b><span title="Kills in the clutch">☠ ${c.kills}</span><span class="sub">Round ${c.round}</span><em>${c.result.toUpperCase()}</em></div>`).join("")}</div>`).join("");
+    return `<section class="panel cl-team"><div class="panel-head"><div class="h3">${title}</div></div>
+      <div class="cl-summary">
+        <div class="cl-rate"><div class="cl-pcts"><b class="up">${wonPct}%</b><b class="down">${mine.length ? 100 - wonPct : 0}%</b></div>
+          <div class="cl-bar"><i style="width:${wonPct}%"></i></div>
+          <div class="cl-counts"><span>${won} clutch${won === 1 ? "" : "es"} won</span><span>${lost} clutch${lost === 1 ? "" : "es"} lost${saved ? `<br>${saved} save${saved === 1 ? "" : "s"}` : ""}</span></div></div>
+        <div class="cl-kills"><div class="cl-ring">${kills}</div><div><b>Total kills</b><span class="sub">in clutches</span></div></div>
+      </div>
+      <div class="cl-cols">${cols || `<div class="empty">No clutches.</div>`}</div></section>`;
+  };
+  body.innerHTML = `<div class="seg side-seg">${[["all", "Overall"], ["T", "T Side"], ["CT", "CT Side"]].map(([k, l]) => `<button data-side="${k}" class="${side === k ? "on" : ""}">${l}</button>`).join("")}</div>
+    <div class="cl-grid">${panel("mine", "My Team")}${panel("enemy", "Enemy Team")}</div>
+    <div class="note">A clutch starts when a player is the last one alive on their team. Saved = lost the round but survived.</div>`;
+  body.querySelectorAll("[data-side]").forEach((b) => (b.onclick = () => { detailSide.clutches = b.dataset.side; renderClutchTab(body, m, id); }));
+}
+
+// HLTV-style summary above the scoreboard: team comparisons, the match's leaders and every
+// player's Rating 3.0 against HLTV's Bad / Average / Good bands.
+async function renderMatchSummary(el, m, id) {
+  const d = await loadDetails(id);
+  const teams = { mine: m.players.filter((p) => p.side === "mine"), enemy: m.players.filter((p) => p.side === "enemy") };
+  const avg = (ps, f) => (ps.length ? ps.reduce((a, p) => a + f(p), 0) / ps.length : 0);
+  const total = (ps, f) => ps.reduce((a, p) => a + f(p), 0);
+  const cmp = (label, a, b, fmt = (x) => x) => `<div class="hs-row"><span>${label}</span><b class="${a > b ? "up" : a < b ? "down" : ""}">${fmt(a)}</b><i>:</i><b class="${b > a ? "up" : b < a ? "down" : ""}">${fmt(b)}</b></div>`;
+  const awp = new Map();
+  for (const k of d?.kills || []) if (k.weapon === "awp" && !k.team_kill) awp.set(k.attacker, (awp.get(k.attacker) || 0) + 1);
+  const leader = (label, f, fmt = (x) => x) => {
+    const p = [...m.players].sort((a, b) => f(b) - f(a))[0];
+    if (!p || !(f(p) > 0)) return "";
+    return `<div class="hs-leader ${p.side}"><div><b>${esc(p.name)}</b><span>${label}</span></div><em>${fmt(f(p))}</em></div>`;
+  };
+  const players = [...m.players].sort((a, b) => r3(b.derived) - r3(a.derived));
+  const top = Math.max(1.5, ...players.map((p) => r3(p.derived) + 0.1));
+  const x = (v) => `${(v / top) * 100}%`;
+  el.innerHTML = `
+    <div class="hs-wrap">
+      <section class="hs-card">
+        <div class="hs-teams"><div><b>My Team</b><em class="${m.result === "win" ? "up" : "down"}">${m.score_mine}</em></div>
+          <div class="hs-map">${mapIcon(m.map)}<span>${esc(mapName(m.map))}</span></div>
+          <div><b>Enemy Team</b><em class="${m.result === "loss" ? "up" : "down"}">${m.score_theirs}</em></div></div>
+        ${cmp("Team rating 3.0", avg(teams.mine, (p) => r3(p.derived)), avg(teams.enemy, (p) => r3(p.derived)), f2)}
+        ${cmp("First kills", total(teams.mine, (p) => p.counts.opening_kills), total(teams.enemy, (p) => p.counts.opening_kills))}
+        ${cmp("Clutches won", total(teams.mine, (p) => sum(p.counts.clutches_won)), total(teams.enemy, (p) => sum(p.counts.clutches_won)))}
+      </section>
+      <section class="hs-leaders">
+        ${leader("Most kills", (p) => p.counts.kills)}
+        ${leader("Most damage", (p) => p.derived.adr, f1)}
+        ${leader("Most assists", (p) => p.counts.assists)}
+        ${d ? leader("Most AWP kills", (p) => awp.get(p.steamid) || 0) : ""}
+        ${leader("Most first kills", (p) => p.counts.opening_kills)}
+        ${leader("Best rating 3.0", (p) => r3(p.derived), f2)}
+      </section>
+    </div>
+    <section class="hs-perf">
+      <div class="hs-perf-head"><div class="h3">Performance · Rating 3.0</div>
+        <span class="legend"><i class="mine"></i>My Team <i class="enemy"></i>Enemy Team</span></div>
+      <div class="hs-chart">
+        <div class="hs-bands"><i class="bad" style="width:${x(0.85)}"></i><i class="avg" style="left:${x(0.85)};width:${(0.3 / top) * 100}%"></i><i class="good" style="left:${x(1.15)};right:0"></i></div>
+        ${players.map((p) => `<div class="hs-bar-row ${p.side}" title="${esc(p.name)}: ${f2(r3(p.derived))}"><span>${esc(p.name)}</span>
+          <div class="hs-track"><i style="width:${x(r3(p.derived))}"></i><b style="left:${x(r3(p.derived))}">${f2(r3(p.derived))}</b></div></div>`).join("")}
+        <div class="hs-axis"><span></span><div>${[0, 0.4, 0.85, 1.15, top].map((v) => `<em style="left:${x(v)}">${f2(v)}</em>`).join("")}</div></div>
+        <div class="hs-axis words"><span></span><div><em style="left:${x(0.42)}">Bad</em><em style="left:${x(1.0)}">Average</em><em style="left:${x((1.15 + top) / 2)}">Good</em></div></div>
+      </div>
+    </section>`;
 }
 
 // ---- highlights ---------------------------------------------------------------------------------
@@ -820,6 +1217,7 @@ function renderProfile(view) {
           <div class="side-dials">
             ${dial(f2(r3(p.t)), (r3(p.t) - 0.4) / 1.2, "T rating", "", 86, "var(--t)")}
             ${dial(f2(r3(p.ct)), (r3(p.ct) - 0.4) / 1.2, "CT rating", "", 86, "var(--ct)")}
+            ${dial(fmtSwing(d.swing || 0), ((d.swing || 0) + 3) / 6, "Swing / round", "", 86, GRADE_COLORS[gradeOf("swing", d.swing || 0)])}
           </div>
         </div>
         <div class="stack">
@@ -2035,6 +2433,8 @@ function renderBanner() {
         ["Cancel", () => tauri.core.invoke("demo_queue", { action: "cancel" })],
       ],
     };
+  } else if (st?.state === "details" && st.total) {
+    b = { kind: "busy", title: "Analyzing older matches", count: `${Math.min(st.done + 1, st.total)}/${st.total}`, frac: st.done / st.total, actions: [] };
   } else if (st?.state === "importing" && st.total) {
     b = { kind: "busy", title: "Analyzing matches", count: `${Math.min(st.done + 1, st.total)}/${st.total}`, frac: st.done / st.total, actions: [] };
   } else if (st?.state === "rendering") {
@@ -2098,6 +2498,8 @@ if (tauri) {
     }
     state.index = null;
     state.matches.clear();
+    state.details.clear();
+    state.benchmarks = undefined;
     route();
   };
   tauri.event.listen("veloxify://library", reload);
