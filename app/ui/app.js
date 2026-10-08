@@ -14,7 +14,7 @@ async function initLib() {
 }
 const assetUrl = (rel) => (tauri ? tauri.core.convertFileSrc(`${LIB}\\${rel.replaceAll("/", "\\")}`) : `${LIB}/${rel}`);
 
-const state = { index: null, faceit: null, matches: new Map(), details: new Map(), benchmarks: undefined, myStats: undefined, month: null, playlist: [], playing: -1 };
+const state = { index: null, faceit: null, matches: new Map(), details: new Map(), benchmarks: undefined, myStats: undefined, avatars: new Map(), rosters: new Map(), month: null, playlist: [], playing: -1 };
 const BROWSER_DEFAULTS = { heroPeriod: "week", sort: "best", when: "all", from: "", to: "", source: "all", map: "all", types: [], playableOnly: true, hideEco: false, preset: "", tags: [], folder: "" };
 let browser = { ...BROWSER_DEFAULTS };
 try { browser = { ...BROWSER_DEFAULTS, ...JSON.parse(localStorage.getItem("veloxify.browser") || "{}") }; } catch (e) { /* defaults */ }
@@ -492,6 +492,62 @@ async function renderMatch(el, date, id, tab) {
     <div class="note">K/A/D, MVPs and score come from CS2's own end-of-match scoreboard. ● marks party members.</div>`;
 }
 
+// ---- avatars and ranks ---------------------------------------------------------------------------
+
+// Steam avatars (fetched once per player by the app, cached) that open the Steam profile.
+const AVATAR_BLANK = "data:image/svg+xml," + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" fill="#2a2a2a"/><circle cx="16" cy="12" r="6" fill="#555"/><path d="M5 30c1-7 6-10 11-10s10 3 11 10z" fill="#555"/></svg>');
+const avatarHtml = (sid, size = 28) =>
+  `<a class="pav" data-steam="${esc(sid)}" title="Steam profile" style="width:${size}px;height:${size}px"><img data-avatar="${esc(sid)}" src="${esc(state.avatars.get(sid) || AVATAR_BLANK)}" alt="" loading="lazy"></a>`;
+let avatarsBusy = false;
+async function fillAvatars(root) {
+  if (!tauri || avatarsBusy) return;
+  const imgs = [...root.querySelectorAll("img[data-avatar]")];
+  const need = [...new Set(imgs.map((i) => i.dataset.avatar).filter((id) => !state.avatars.has(id)))];
+  if (need.length) {
+    avatarsBusy = true;
+    try {
+      const got = await tauri.core.invoke("player_avatars", { ids: need });
+      for (const [k, v] of Object.entries(got)) state.avatars.set(k, v);
+    } catch (e) { for (const id of need) state.avatars.set(id, ""); }
+    avatarsBusy = false;
+  }
+  for (const i of root.querySelectorAll("img[data-avatar]")) {
+    const u = state.avatars.get(i.dataset.avatar);
+    if (u && i.src !== u) i.src = u;
+  }
+}
+document.addEventListener("click", (e) => {
+  const a = e.target.closest("[data-steam]");
+  if (!a) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const url = `https://steamcommunity.com/profiles/${a.dataset.steam}`;
+  if (tauri) tauri.core.invoke("open_link", { url }); else window.open(url, "_blank");
+}, true);
+
+// A player's rank in this match's mode: FACEIT level + ELO, Premier rating, or "?" when unranked.
+const unrankedChip = () => `<span class="rank-chip none" title="Unranked or unknown">?</span>`;
+function rankHtml(p, roster) {
+  if (roster) {
+    const r = roster[p.steamid];
+    return r?.level ? `<span class="rank-chip faceit" title="FACEIT level ${r.level} · ${r.elo.toLocaleString("en-US")} ELO">${levelBadge(r.level, 20)}<b>${r.elo.toLocaleString("en-US")}</b></span>` : unrankedChip();
+  }
+  return p.rank_type === 11 && p.rank ? premierChip(p.rank) : unrankedChip();
+}
+// Everyone's FACEIT ELO/level in a FACEIT match (from FACEIT's room, cached by the app).
+async function loadRoster(m) {
+  if (m.source !== "faceit" || !tauri) return null;
+  if (!state.rosters.has(m.id)) {
+    const room = m.id.replace(/^faceit-/, "1-").replace(/-m\d+$/, "");
+    let r = null;
+    try { r = await tauri.core.invoke("faceit_roster", { matchId: room }); } catch (e) { /* offline */ }
+    state.rosters.set(m.id, r && Object.keys(r).length ? r : null);
+  }
+  return state.rosters.get(m.id);
+}
+const nameCell = (p, roster) =>
+  `${p.party ? `<span class="mp-party" title="In your party">${ICONS.party}</span>` : ""}${avatarHtml(p.steamid)}${rankHtml(p, roster)}<span class="mp-pname">${esc(p.name)}</span>`;
+
 // ---- match page (Leetify-style): header, scoreboard and the match's sections ------------------
 
 const matchHref = (id, tab) => `#/match/${encodeURIComponent(id)}${tab ? `/${tab}` : ""}`;
@@ -507,8 +563,9 @@ async function renderMatchPage(view, id, tab) {
   const s = summaryOf(id);
   if (!s) { view.innerHTML = `<a class="day-back" href="#/matches">◀ Match history</a><div class="empty">Match not found.</div>`; return; }
   const m = s.stats_only ? null : await loadMatch(id);
+  if (m) m._roster = await loadRoster(m);
   const tabs = [["overview", "Overview"]];
-  if (m) tabs.push(["timeline", "Timeline"], ["aim", "Aim"], ["utility", "Utility"], ["activity", "Activity"], ["opening", "Opening Duels"], ["clutches", "Clutches"], ["ratings", "Ratings"],
+  if (m) tabs.push(["timeline", "Timeline"], ["replay", "2D Replay"], ["lineups", "Lineups"], ["aim", "Aim"], ["utility", "Utility"], ["activity", "Activity"], ["trades", "Trades"], ["opening", "Opening Duels"], ["clutches", "Clutches"], ["h2h", "Head to Head"], ["zones", "Map Zones"], ["ratings", "Ratings"],
     ["highlights", `Highlights${m.highlights.length ? ` (${m.highlights.length})` : ""}`], ["lowlights", `Lowlights${(m.lowlights || []).length ? ` (${m.lowlights.length})` : ""}`]);
   if (!tabs.some(([k]) => k === tab)) tab = "overview";
   const fm = s.faceit;
@@ -542,9 +599,14 @@ async function renderMatchPage(view, id, tab) {
   }
   if (tab === "aim" || tab === "utility" || tab === "activity") return renderStatTab(body, m, id, tab);
   if (tab === "opening") return renderOpeningTab(body, m, id);
+  if (tab === "trades") return renderTradesTab(body, m, id);
+  if (tab === "h2h") return renderH2HTab(body, m, id);
+  if (tab === "zones") return renderZonesTab(body, m, id);
   if (tab === "clutches") return renderClutchTab(body, m, id);
   if (tab === "ratings") return renderRatingsTab(body, m, id);
   if (tab === "timeline") return renderTimelineTab(body, m, id);
+  if (tab === "lineups") return renderLineupsTab(body, m, id);
+  if (tab === "replay") return renderReplayTab(body, m, id);
   body.innerHTML = `<div id="mp-summary"></div><div id="mp-board"></div>`;
   renderMatchScoreboard(body.querySelector("#mp-board"), m);
   await renderMatchSummary(body.querySelector("#mp-summary"), m, id);
@@ -560,7 +622,6 @@ function renderMatchScoreboard(body, m) {
     const x = by(a), y = by(b);
     return (x < y ? -1 : x > y ? 1 : 0) * (matchSort.desc ? -1 : 1);
   });
-  const rank = (p) => p.rank_type === 11 && p.rank ? premierChip(p.rank) : "";
   const cell = (p, k) => {
     const c = p.counts, d = p.derived;
     switch (k) {
@@ -579,7 +640,7 @@ function renderMatchScoreboard(body, m) {
   const head = (title, won) => `<tr class="mp-team"><th class="mp-name">${title} <span class="mp-badge ${won ? "win" : "loss"}">${won ? "WIN" : m.result === "tie" ? "TIE" : "LOSS"}</span></th>
     ${COLS.map(([k, t]) => `<th data-sort="${k}" class="${matchSort.key === k ? "on" : ""}">${t}${matchSort.key === k ? (matchSort.desc ? " ↓" : " ↑") : ""}</th>`).join("")}</tr>`;
   const row = (p, won) => `<tr class="${won ? "won" : "lost"} ${p.steamid === me ? "me" : ""}">
-    <td class="mp-name">${p.party ? `<span class="mp-party" title="In your party">${ICONS.party || "●"}</span>` : ""}<span>${esc(p.name)}</span>${rank(p)}</td>
+    <td class="mp-name">${nameCell(p, m._roster)}</td>
     ${COLS.map(([k]) => cell(p, k)).join("")}</tr>`;
   const mineWon = m.result === "win", theirsWon = m.result === "loss";
   body.innerHTML = `
@@ -620,6 +681,18 @@ async function loadBenchmarks() {
     } catch (e) { state.benchmarks = null; }
   }
   return state.benchmarks;
+}
+
+// Each gun's usual spray pattern (aim punch pitch, yaw per bullet), learned from the Premier demos
+// in the library: FACEIT demos don't record recoil, so their whiffs are compared against this.
+async function loadRecoil() {
+  if (state.recoil === undefined) {
+    try {
+      const r = await fetch(assetUrl("recoil.json"), { cache: "no-store" });
+      state.recoil = r.ok ? await r.json() : null;
+    } catch (e) { state.recoil = null; }
+  }
+  return state.recoil;
 }
 
 // Where a value sits among every player-match in your library: 0 = worst, 1 = best.
@@ -711,11 +784,10 @@ function teamTables(body, m, rows, cols, sortState, rerender) {
     const vals = rows.map((r) => value(r, c)).filter((v) => v != null);
     ctx[c.key] = { max: Math.max(0, ...vals), best: c.lower ? Math.min(...vals) : Math.max(...vals) };
   }
-  const rank = (p) => (p.rank_type === 11 && p.rank ? premierChip(p.rank) : "");
   const head = (title, won, tie) => `<tr class="mp-team"><th class="mp-name">${title} <span class="mp-badge ${won ? "win" : "loss"}">${won ? "WIN" : tie ? "TIE" : "LOSS"}</span></th>
     ${cols.map((c) => `<th data-sort="${c.key}" class="${sortState.key === c.key ? "on" : ""}" ${c.tip ? `title="${esc(c.tip)}"` : ""}>${c.label}${sortState.key === c.key ? (sortState.desc ? " ↓" : " ↑") : ""}</th>`).join("")}</tr>`;
   const row = (r, won) => `<tr class="${won ? "won" : "lost"} ${r.p.steamid === me ? "me" : ""}">
-    <td class="mp-name">${r.p.party ? `<span class="mp-party" title="In your party">${ICONS.party}</span>` : ""}<span>${esc(r.p.name)}</span>${rank(r.p)}</td>
+    <td class="mp-name">${nameCell(r.p, m._roster)}</td>
     ${cols.map((c) => c.cell(r, ctx[c.key])).join("")}</tr>`;
   const mineWon = m.result === "win", theirsWon = m.result === "loss", tie = m.result === "tie";
   body.innerHTML = `<div class="mp-board-wrap"><table class="mp-board">
@@ -810,7 +882,7 @@ const ACT_COLS = [
     } },
 ];
 
-const detailSorts = { aim: { key: "aim_rating", desc: true }, utility: { key: "utility_rating", desc: true }, activity: { key: "damage", desc: true }, opening: { key: "attempts", desc: true } };
+const detailSorts = { aim: { key: "aim_rating", desc: true }, utility: { key: "utility_rating", desc: true }, activity: { key: "damage", desc: true }, trades: { key: "trade_kill_opps", desc: true }, opening: { key: "attempts", desc: true } };
 const detailSide = { opening: "all", clutches: "all" };
 
 const noDetails = (body) => (body.innerHTML = `<div class="empty">This match's details aren't built yet. Veloxify analyzes older matches in the background while CS2 is closed; this tab fills in when it gets to this one.</div>`);
@@ -848,6 +920,160 @@ async function renderStatTab(body, m, id, tab) {
     body.appendChild(note);
   };
   draw();
+}
+
+// ---- match page: trades, head to head, map zones ---------------------------------------------------
+
+// "67% (2/3)", colored against the library like the other stats.
+function fracCell(key, num, den) {
+  return (r) => {
+    const v = r.s[key];
+    if (v == null || !r.d) return `<td class="na">n/a</td>`;
+    return `<td class="${bandOf(standing(key, v))}">${Math.round(v)}% <span class="sub">(${r.d.trades[num]}/${r.d.trades[den]})</span></td>`;
+  };
+}
+
+const TRADE_COLS = [
+  { key: "trade_kill_opps", label: "Trade Kill Opportunities", tip: "A teammate died and you were alive and close enough to the killer to trade them (within about 19 m), or got to them anyway.",
+    value: (r) => r.s.trade_kill_opps, cell: barCell("trade_kill_opps", (r, v) => Math.round(v), "var(--bar-neutral)") },
+  { key: "trade_kill_attempt_pct", label: "Trade Kill Attempts", tip: "Of those, how often you hit the killer within 5 seconds.", value: (r) => r.s.trade_kill_attempt_pct, cell: fracCell("trade_kill_attempt_pct", "kill_attempts", "kill_opps") },
+  { key: "trade_kill_success_pct", label: "Trade Kill Success", tip: "Of your attempts, how often you killed the killer within 5 seconds.", value: (r) => r.s.trade_kill_success_pct, cell: fracCell("trade_kill_success_pct", "kill_success", "kill_attempts") },
+  { key: "traded_death_opps", label: "Traded Death Opportunities", tip: "You died with a teammate alive and close enough to trade your killer.",
+    value: (r) => r.s.traded_death_opps, cell: barCell("traded_death_opps", (r, v) => Math.round(v), "var(--bar-neutral)") },
+  { key: "traded_death_attempt_pct", label: "Traded Death Attempts", tip: "Of those, how often a teammate hit your killer within 5 seconds.", value: (r) => r.s.traded_death_attempt_pct, cell: fracCell("traded_death_attempt_pct", "death_attempts", "death_opps") },
+  { key: "traded_death_success_pct", label: "Traded Death Success", tip: "Of those attempts, how often a teammate killed your killer within 5 seconds.", value: (r) => r.s.traded_death_success_pct, cell: fracCell("traded_death_success_pct", "death_success", "death_attempts") },
+];
+
+async function renderTradesTab(body, m, id) {
+  const [d] = await Promise.all([loadDetails(id), loadBenchmarks()]);
+  if (!d) return noDetails(body);
+  if (!d.players.some((p) => p.trades)) { body.innerHTML = `<div class="empty">Trades need this match analyzed again; Veloxify does that in the background while CS2 is closed.</div>`; return; }
+  const rows = detailRows(m, d);
+  const draw = () => {
+    teamTables(body, m, rows, TRADE_COLS, detailSorts.trades, draw);
+    // Your own deaths, traded or not: the untraded ones are the ones to talk through.
+    const me = state.index.me;
+    const names = new Map(m.players.map((p) => [p.steamid, p.name]));
+    const mine = d.kills.filter((k) => k.victim === me && !k.team_kill && k.attacker);
+    const list = document.createElement("section");
+    list.className = "panel tr-deaths";
+    list.innerHTML = `<div class="panel-head"><div class="h3">Your deaths</div><span class="grow"></span><span class="sub">${mine.filter((k) => k.traded).length} of ${mine.length} traded</span></div>
+      <div class="tr-list">${mine.map((k) => `<a class="tr-row ${k.traded ? "ok" : ""}" href="${matchHref(id, "replay")}" data-round="${k.round}" data-t="${k.t}">
+        <span class="tr-r">R${k.round}</span><span>${esc(names.get(k.attacker) || "")} ${weaponIcon(k.weapon)} you · ${mmss(k.t)}${k.victim_place ? ` · ${esc(placeName(k.victim_place))}` : ""}</span>
+        <b>${k.traded ? "Traded" : "Not traded"}</b></a>`).join("") || `<div class="empty small">You didn't die this match.</div>`}</div>`;
+    body.appendChild(list);
+    list.querySelectorAll("[data-round]").forEach((a) => (a.onclick = () => { Object.assign(replay, { matchId: id, round: Number(a.dataset.round), t: Math.max(0, Number(a.dataset.t) - 4), playing: false }); }));
+    const note = document.createElement("div");
+    note.className = "note";
+    note.textContent = "A trade is a kill on the enemy who just killed a teammate, within 5 seconds. Colors compare each value with every player-match in your library. Click a death to watch it in the 2D replay.";
+    body.appendChild(note);
+  };
+  draw();
+}
+
+const placeName = (s) => (s || "").replace(/([a-z])([A-Z])/g, "$1 $2").replace("Bombsite", "Site ");
+
+// Head to head: every player on your team against every enemy (kills each way).
+const h2h = { cell: null };
+async function renderH2HTab(body, m, id) {
+  const d = await loadDetails(id);
+  if (!d) return noDetails(body);
+  const me = state.index.me;
+  const mine = m.players.filter((p) => p.side === "mine").sort((a, b) => (a.steamid === me ? -1 : b.steamid === me ? 1 : b.kills - a.kills));
+  const enemy = m.players.filter((p) => p.side === "enemy").sort((a, b) => b.kills - a.kills);
+  const kills = d.kills.filter((k) => !k.team_kill && k.attacker);
+  const duels = (a, b) => kills.filter((k) => (k.attacker === a && k.victim === b) || (k.attacker === b && k.victim === a));
+  const count = (a, b) => kills.filter((k) => k.attacker === a && k.victim === b).length;
+  if (h2h.matchId !== id) Object.assign(h2h, { matchId: id, cell: null });
+  const cell = (p, e) => {
+    const k = count(p.steamid, e.steamid), dd = count(e.steamid, p.steamid);
+    const open = duels(p.steamid, e.steamid).filter((x) => x.opening).length;
+    const cls = !k && !dd ? "none" : k > dd ? "up" : k < dd ? "down" : "even";
+    const on = h2h.cell === `${p.steamid}:${e.steamid}`;
+    return `<td class="h2h-c ${cls} ${on ? "on" : ""}" data-cell="${p.steamid}:${e.steamid}" title="${esc(p.name)} killed ${esc(e.name)} ${k}×, died to them ${dd}×${open ? ` (${open} opening duel${open > 1 ? "s" : ""})` : ""}">
+      ${!k && !dd ? "–" : `<b>${k}</b><i>:</i><span>${dd}</span>`}${open ? `<em>●</em>` : ""}</td>`;
+  };
+  const [a, b] = (h2h.cell || ":").split(":");
+  const sel = h2h.cell ? duels(a, b).sort((x, y) => x.round - y.round || x.t - y.t) : [];
+  const names = new Map(m.players.map((p) => [p.steamid, p.name]));
+  body.innerHTML = `
+    <section class="panel h2h">
+      <table class="h2h-t"><thead><tr><th class="h2h-corner"><span>My team ↓</span><span>Enemy →</span></th>
+        ${enemy.map((e) => `<th>${avatarHtml(e.steamid, 28)}<div>${esc(e.name)}</div></th>`).join("")}<th>Total</th></tr></thead>
+        <tbody>${mine.map((p) => {
+          const k = enemy.reduce((n, e) => n + count(p.steamid, e.steamid), 0), dd = enemy.reduce((n, e) => n + count(e.steamid, p.steamid), 0);
+          return `<tr class="${p.steamid === me ? "me" : ""}"><th>${avatarHtml(p.steamid, 28)}<span>${esc(p.name)}</span></th>${enemy.map((e) => cell(p, e)).join("")}
+            <td class="h2h-tot"><b>${k}</b><i>:</i><span>${dd}</span></td></tr>`;
+        }).join("")}</tbody></table>
+      <div class="sub h2h-legend"><span class="up">■</span> won the matchup <span class="down">■</span> lost it <span class="even">■</span> even · <em>●</em> includes an opening duel · numbers are kills : deaths for the row player</div>
+    </section>
+    ${h2h.cell ? `<section class="panel h2h-detail"><div class="panel-head"><div class="h3">${esc(names.get(a) || "")} vs ${esc(names.get(b) || "")}</div><span class="grow"></span><button class="btn ghost" id="h2h-close">Close</button></div>
+      <div class="tl-list">${sel.map((k) => `<div class="tl-ev"><div><b style="color:${TEAM_COLOR[k.attacker === a ? "mine" : "enemy"]}">${esc(names.get(k.attacker) || "")}</b>${weaponIcon(k.weapon)}${k.headshot ? `<span class="hs">◎</span>` : ""}<b style="color:${TEAM_COLOR[k.victim === a ? "mine" : "enemy"]}">${esc(names.get(k.victim) || "")}</b>${k.opening ? `<span class="tag">Opening</span>` : ""}</div>
+        <span>Round ${k.round} · ${mmss(k.t)}${k.attacker_place ? ` · ${esc(placeName(k.attacker_place))}` : ""}</span></div>`).join("") || `<div class="empty small">They never fought.</div>`}</div></section>` : ""}`;
+  body.querySelectorAll("[data-cell]").forEach((td) => (td.onclick = () => { h2h.cell = h2h.cell === td.dataset.cell ? null : td.dataset.cell; renderH2HTab(body, m, id); }));
+  body.querySelector("#h2h-close")?.addEventListener("click", () => { h2h.cell = null; renderH2HTab(body, m, id); });
+}
+
+// Map zones: where on the map a player won and lost their fights.
+const zones = { player: null, side: "all", sel: null };
+async function renderZonesTab(body, m, id) {
+  const [d, radar] = await Promise.all([loadDetails(id), loadRadar(m.map)]);
+  if (!d) return noDetails(body);
+  if (zones.matchId !== id) Object.assign(zones, { matchId: id, player: state.index.me, sel: null });
+  const who = zones.player;
+  const fights = [];
+  for (const k of d.kills) {
+    if (k.team_kill || !k.attacker) continue;
+    if (k.attacker === who && k.attacker_xy && k.attacker_place) fights.push({ won: true, xy: k.attacker_xy, place: k.attacker_place, side: k.attacker_side, k });
+    if (k.victim === who && k.victim_xy && k.victim_place) fights.push({ won: false, xy: k.victim_xy, place: k.victim_place, side: k.victim_side, k });
+  }
+  const shown = fights.filter((f) => zones.side === "all" || f.side === zones.side);
+  const byPlace = new Map();
+  for (const f of shown) {
+    const z = byPlace.get(f.place) || { place: f.place, kills: 0, deaths: 0, open_k: 0, open_d: 0, xs: [], ys: [] };
+    if (f.won) { z.kills++; z.open_k += f.k.opening ? 1 : 0; } else { z.deaths++; z.open_d += f.k.opening ? 1 : 0; }
+    z.xs.push(f.xy[0]); z.ys.push(f.xy[1]);
+    byPlace.set(f.place, z);
+  }
+  const avg = (v) => v.reduce((a, b) => a + b, 0) / v.length;
+  const list = [...byPlace.values()].map((z) => ({ ...z, n: z.kills + z.deaths, win: z.kills / (z.kills + z.deaths), x: avg(z.xs), y: avg(z.ys) }))
+    .sort((a, b) => b.n - a.n || b.kills - a.kills);
+  const size = radar?.size || 1024;
+  const at = (x, y) => (radar ? [(x - radar.pos_x) / radar.scale, (radar.pos_y - y) / radar.scale] : [0, 0]);
+  const color = (w) => (w >= 0.6 ? "var(--win)" : w <= 0.4 ? "var(--loss)" : "#c9a227");
+  const maxN = Math.max(1, ...list.map((z) => z.n));
+  const sel = list.find((z) => z.place === zones.sel);
+  const players = m.players.slice().sort((a, b) => (a.side === b.side ? a.name.localeCompare(b.name) : a.side === "mine" ? -1 : 1));
+  const dots = (sel ? shown.filter((f) => f.place === sel.place) : []).map((f) => {
+    const [x, y] = at(f.xy[0], f.xy[1]);
+    return `<circle cx="${x}" cy="${y}" r="6" class="mz-fight ${f.won ? "won" : "lost"}"><title>Round ${f.k.round}: ${f.won ? "kill" : "death"}</title></circle>`;
+  }).join("");
+  body.innerHTML = `
+    <div class="ln-bar">
+      <select id="mz-player">${players.map((p) => `<option value="${p.steamid}" ${p.steamid === who ? "selected" : ""}>${esc(p.name)}</option>`).join("")}</select>
+      <div class="seg" id="mz-side">${[["all", "Both sides"], ["T", "T side"], ["CT", "CT side"]].map(([k, l]) => `<button data-side="${k}" class="${zones.side === k ? "on" : ""}">${l}</button>`).join("")}</div>
+      <span class="sub">${shown.filter((f) => f.won).length} kills · ${shown.filter((f) => !f.won).length} deaths in ${list.length} zones</span>
+    </div>
+    <div class="ln-main">
+      <section class="tl-map"><div class="tl-viewport rp-viewport"><div class="tl-canvas">
+        ${radar ? `<img src="${assetUrl(`radars/${m.map}.png`)}" alt="${esc(mapName(m.map))} radar" draggable="false">` : `<div class="tl-noradar">Radar not available for ${esc(mapName(m.map))} yet</div>`}
+        <svg viewBox="0 0 ${size} ${size}">${list.map((z) => {
+          const [x, y] = at(z.x, z.y), r = 16 + 22 * Math.sqrt(z.n / maxN);
+          return `<g class="mz-zone ${sel && sel !== z ? "dim" : ""}" data-zone="${esc(z.place)}"><circle cx="${x}" cy="${y}" r="${r}" fill="${color(z.win)}" class="mz-bubble"/>
+            <text x="${x}" y="${y + 5}" text-anchor="middle" class="mz-kd">${z.kills}-${z.deaths}</text>
+            <text x="${x}" y="${y + r + 15}" text-anchor="middle" class="mz-name">${esc(placeName(z.place))}</text></g>`;
+        }).join("")}${dots}</svg></div></div></section>
+      <section class="tl-events ln-side">
+        <table class="mz-t"><thead><tr><th>Zone</th><th>K</th><th>D</th><th>Won</th><th>Opening</th></tr></thead>
+          <tbody>${list.map((z) => `<tr data-zone="${esc(z.place)}" class="${sel === z ? "on" : ""}"><td>${esc(placeName(z.place))}</td><td>${z.kills}</td><td>${z.deaths}</td>
+            <td><span class="mz-win" style="color:${color(z.win)}">${Math.round(z.win * 100)}%</span></td><td>${z.open_k || z.open_d ? `${z.open_k}-${z.open_d}` : "–"}</td></tr>`).join("") || `<tr><td colspan="5" class="empty small">No fights.</td></tr>`}</tbody></table>
+      </section>
+    </div>
+    <div class="note">Each bubble is a zone (CS2's own callouts) where this player got kills or died: the score is kills-deaths, the color how many of those fights they won (green 60%+, red 40% or less), the size how many fights. Click a zone to see each fight.</div>`;
+  const rerender = () => renderZonesTab(body, m, id);
+  body.querySelector("#mz-player").onchange = (e) => { zones.player = e.target.value; zones.sel = null; rerender(); };
+  body.querySelectorAll("[data-side]").forEach((b) => (b.onclick = () => { zones.side = b.dataset.side; zones.sel = null; rerender(); }));
+  body.querySelectorAll("[data-zone]").forEach((el) => (el.onclick = () => { zones.sel = zones.sel === el.dataset.zone ? null : el.dataset.zone; rerender(); }));
 }
 
 // Opening duels: who took the first fight of each round, with what, and how it went.
@@ -1412,22 +1638,7 @@ async function renderTimelineTab(body, m, id) {
   const round = rounds.find((r) => r.number === timeline.round) || rounds[0];
   const nr = round.number;
 
-  // Round strip: regulation halves of 12, then overtime halves of 3.
-  const halves = [];
-  for (const r of rounds) {
-    const h = r.number <= 12 ? "First half" : r.number <= 24 ? "Second half" : `Overtime ${Math.floor((r.number - 25) / 6) + 1} · half ${Math.floor(((r.number - 25) % 6) / 3) + 1}`;
-    if (!halves.length || halves[halves.length - 1].name !== h) halves.push({ name: h, rounds: [] });
-    halves[halves.length - 1].rounds.push(r);
-  }
-  const strip = halves.map((h) => {
-    const last = h.rounds[h.rounds.length - 1];
-    return `<div class="tl-half" style="flex:${h.rounds.length} 1 0"><div class="tl-half-head"><span>${esc(h.name.toUpperCase())}</span><b><i class="mine">${last.score_mine}</i>:<i class="enemy">${last.score_theirs}</i></b></div>
-      <div class="tl-tiles" style="grid-template-columns:repeat(${h.rounds.length},minmax(30px,1fr))">${h.rounds.map((r) => {
-        const [icon, why] = roundEnd(r);
-        return `<button class="tl-tile ${r.winner} ${r.number === nr ? "on" : ""}" data-round="${r.number}" title="Round ${r.number}: ${r.winner === "mine" ? "your team" : "enemy"} won (${why}) · ${r.score_mine}-${r.score_theirs}">
-          <b>${r.number}</b><span>${ROUND_ICONS[icon]}</span></button>`;
-      }).join("")}</div></div>`;
-  }).join(`<div class="tl-sep"></div>`);
+  const strip = roundStripHtml(rounds, nr);
 
   // Teams with each player's round.
   const rp = new Map((round.players || []).map((p) => [p.steamid, p]));
@@ -1444,7 +1655,7 @@ async function renderTimelineTab(body, m, id) {
         const s = rp.get(p.steamid);
         const sw = s ? s.swing : null;
         return `<tr class="${p.steamid === state.index.me ? "me" : ""}"><td><input type="checkbox" data-player="${p.steamid}" ${timeline.hidden.has(p.steamid) ? "" : "checked"} aria-label="Show ${esc(p.name)} on the map"></td>
-          <td class="left">${esc(p.name)}</td>
+          <td class="left tl-pname">${avatarHtml(p.steamid, 22)}<span>${esc(p.name)}</span></td>
           <td class="${sw == null ? "" : sw > 0.05 ? "up" : sw < -0.05 ? "down" : ""}">${sw == null ? "–" : `${sw > 0 ? "+" : ""}${sw.toFixed(2)}%`}</td>
           <td>${s ? s.damage : "–"}</td><td>${s ? `${s.kills}/${s.deaths}/${s.assists}` : "–"}</td></tr>`;
       }).join("")}</tbody></table></section>`;
@@ -1548,6 +1759,475 @@ async function renderTimelineTab(body, m, id) {
   };
 }
 
+// ---- whiff analyzer: the clip with your crosshair, spray control and movement in sync ---------------
+
+const SPEEDS = [0.25, 0.5, 1];
+let waSpeed = 0.5;
+try { waSpeed = Number(localStorage.getItem("veloxify.whiffSpeed")) || 0.5; } catch (e) { /* default */ }
+
+// Builds the analyzer above the lowlight's breakdown. `l.trace` holds every tick from a second
+// before the first shot to the death (64 per second).
+function whiffAnalyzer(l, m, VCOL) {
+  const tr = l.trace;
+  if (!tr || !tr.look?.length) return "";
+  return `
+    <section class="wa">
+      <div class="wa-video">
+        ${l.clip ? `<video id="wa-video" src="${assetUrl(l.clip)}" playsinline preload="auto"></video>`
+          : `<div class="wa-novideo"><b>No clip yet</b><span>The panels below replay the moment from the demo. Render the clip to watch it alongside.</span></div>`}
+        <div class="wa-controls">
+          <button class="btn primary" id="wa-play">▶ Play</button>
+          <div class="seg" id="wa-speeds">${SPEEDS.map((s) => `<button data-speed="${s}" class="${s === waSpeed ? "on" : ""}">${s}x</button>`).join("")}</div>
+          <input type="range" id="wa-scrub" min="0" max="${tr.look.length - 1}" value="0" step="1" aria-label="Moment">
+          <span class="wa-time" id="wa-time"></span>
+        </div>
+      </div>
+      <div class="wa-panels">
+        <div class="wa-panel"><div class="h2">Your crosshair vs ${esc(l.killer_name)}</div><svg id="wa-target" viewBox="0 0 320 320" role="img" aria-label="Your crosshair and bullets on his body"></svg>
+          <div class="sub">Line = your crosshair's path · ✕ = where the next bullet would go (crosshair + recoil) · dots = bullets fired.</div></div>
+        <div class="wa-panel"><div class="h2">Spray control: recoil vs your pull</div><svg id="wa-spray" viewBox="0 0 280 320" role="img" aria-label="The gun's recoil against your mouse pull"></svg>
+          <div class="sub" id="wa-spray-note">Grey = where recoil pushed the bullets. Blue = your mouse pull, flipped: on top of the grey means you countered it perfectly.</div></div>
+        <div class="wa-panel"><div class="h2">Movement</div>
+          <div class="wa-keys" id="wa-keys">
+            <span></span><kbd data-k="1">W</kbd><span></span>
+            <kbd data-k="4">A</kbd><kbd data-k="2">S</kbd><kbd data-k="8">D</kbd>
+            <kbd data-k="128" class="wide">Shift</kbd><kbd data-k="32" class="wide">Ctrl</kbd><kbd data-k="16" class="wide">Space</kbd>
+          </div>
+          <div class="wa-speedline"><b id="wa-speed-now">0</b> u/s <span id="wa-speed-state"></span></div>
+          <svg id="wa-speedgraph" viewBox="0 0 300 120" role="img" aria-label="Your speed over the moment"></svg>
+          <div class="sub">Accurate below ${Math.round(tr.accurate_speed)} u/s (34% of the gun's max speed).</div></div>
+      </div>
+    </section>`;
+}
+
+function wireWhiffAnalyzer(view, l, VCOL) {
+  const tr = l.trace;
+  if (!tr || !tr.look?.length) return;
+  const n = tr.look.length;
+  const seg = l.segments?.[0] || [tr.start_tick, tr.start_tick + n];
+  // Shots by trace index, with their verdicts.
+  const shotIdx = (l.shot_details || []).map((s) => ({ ...s, i: Math.round(l.death_tick - s.t * 64) - tr.start_tick })).filter((s) => s.i >= 0 && s.i < n);
+  const firstShot = shotIdx.length ? Math.min(...shotIdx.map((s) => s.i)) : 0;
+  const video = view.querySelector("#wa-video"), scrub = view.querySelector("#wa-scrub"), playBtn = view.querySelector("#wa-play");
+  const target = view.querySelector("#wa-target"), spray = view.querySelector("#wa-spray"), graph = view.querySelector("#wa-speedgraph");
+
+  // Recoil, in degrees on screen (x right, y up): the demo's own aim punch where it records it
+  // (Premier), else this gun's usual pattern learned from Premier demos (FACEIT demos don't record
+  // it), else unknown. Bullets go where you look plus twice the punch.
+  const wrap = (a) => ((a + 540) % 360) - 180;
+  const hasAngles = tr.view?.length === n && tr.punch?.length === n;
+  const demoPunch = hasAngles && tr.punch.some(([a, b]) => a || b);
+  const pattern = hasAngles && !demoPunch ? state.recoil?.[(l.weapon || "").replace(/^weapon_/, "")] : null;
+  const recoilFrom = demoPunch ? "demo" : pattern ? "pattern" : hasAngles ? null : "legacy";
+  const bulletAt = new Array(n).fill(-1);
+  for (const s of shotIdx.slice().sort((a, b) => a.i - b.i)) for (let j = s.i; j < n; j++) bulletAt[j] = s.bullet - 1;
+  const recoil = recoilFrom === "demo" ? tr.punch.map(([py, pp]) => [-2 * py, -2 * pp])
+    : recoilFrom === "pattern" ? bulletAt.map((k) => { const [pp, py] = k < 0 ? [0, 0] : pattern[Math.min(k, pattern.length - 1)]; return [-2 * py, -2 * pp]; })
+    : recoilFrom === "legacy" ? tr.aim.map((a, i) => [a[0] - tr.look[i][0], a[1] - tr.look[i][1]]) : null;
+  // Where the bullets went on him (cm): the crosshair plus the recoil at his distance. The demo's
+  // own punch is already in the trace; a learned pattern is added here.
+  const distCm = (l.distance_m || 10) * 100;
+  const cmOf = (deg) => Math.tan((deg * Math.PI) / 180) * distCm;
+  const aim = recoilFrom === "pattern" ? tr.look.map(([x, y], i) => [x + cmOf(recoil[i][0]), y + cmOf(recoil[i][1])]) : tr.aim;
+  const shotAt = (s) => (s.off_x_cm == null ? null : recoilFrom === "pattern" ? [s.off_x_cm + cmOf(recoil[s.i][0]), s.off_y_cm + cmOf(recoil[s.i][1])] : [s.off_x_cm, s.off_y_cm]);
+
+  // Target view scale: fit his body and what the crosshair did around the spray.
+  const near = tr.look.slice(Math.max(0, firstShot - 16)).concat(aim.slice(Math.max(0, firstShot - 16)));
+  const ext = Math.min(300, Math.max(110, ...near.map(([x, y]) => Math.max(Math.abs(x), Math.abs(y) * 0.8)).map((v) => v * 1.1)));
+  const TW = 320, sc = (TW / 2 - 12) / ext, cx = TW / 2, cy = 120;
+  const X = (x) => Math.max(6, Math.min(TW - 6, cx + x * sc)), Y = (y) => Math.max(6, Math.min(314, cy - y * sc));
+  const body = `<circle cx="${cx}" cy="${cy}" r="${13 * sc}" class="tg-body"/>
+    <rect x="${cx - 24 * sc}" y="${cy + 18 * sc}" width="${48 * sc}" height="${80 * sc}" rx="${8 * sc}" class="tg-body"/>
+    <rect x="${cx - 20 * sc}" y="${cy + 98 * sc}" width="${17 * sc}" height="${70 * sc}" rx="${5 * sc}" class="tg-body"/>
+    <rect x="${cx + 3 * sc}" y="${cy + 98 * sc}" width="${17 * sc}" height="${70 * sc}" rx="${5 * sc}" class="tg-body"/>`;
+
+  // Spray, in degrees on screen (x right, y up): where recoil pushed the bullets (twice the punch),
+  // and your mouse movement since the first shot, flipped so countering it overlaps the recoil.
+  // From raw view angles when the trace has them (independent of how he moved); else relative to him.
+  const v0 = hasAngles ? tr.view[firstShot] : tr.look[firstShot];
+  const pull = hasAngles ? tr.view.map(([y, p]) => [wrap(y - v0[0]), p - v0[1]]) : tr.look.map((p) => [-(p[0] - v0[0]), -(p[1] - v0[1])]);
+  const unit = hasAngles ? 0.35 : 8; // "off" threshold: degrees, or cm relative to him
+  const sprayPts = (recoil || []).slice(firstShot).concat(pull.slice(firstShot));
+  const sext = Math.max(hasAngles ? 3 : 40, ...sprayPts.map(([x, y]) => Math.max(Math.abs(x) * 1.6, Math.abs(y))));
+  // Both climb from the bottom like a CS spray chart: recoil pushes bullets up, pulling down counters it.
+  const SW = 280, SH = 320, ssc = (SH - 40) / sext, scx = SW / 2, scy = SH - 20;
+  const SX = (x) => scx + x * ssc, SY = (y) => scy - y * ssc;
+
+  const maxSpeed = Math.max(250, ...tr.speed);
+  const GW = 300, GH = 120;
+  const gx = (i) => 6 + (i / Math.max(1, n - 1)) * (GW - 12), gy = (v) => GH - 10 - (v / maxSpeed) * (GH - 20);
+  const speedPath = tr.speed.map((v, i) => `${i ? "L" : "M"}${gx(i).toFixed(1)},${gy(v).toFixed(1)}`).join(" ");
+  const shotMarks = shotIdx.map((s) => `<line x1="${gx(s.i)}" x2="${gx(s.i)}" y1="${GH - 10}" y2="${GH - 4}" stroke="${VCOL[s.verdict] || "#8a8f98"}" stroke-width="3"/>`).join("");
+
+  const draw = (i) => {
+    i = Math.max(0, Math.min(n - 1, Math.round(i)));
+    scrub.value = i;
+    const fired = shotIdx.filter((s) => s.i <= i);
+    // Target view.
+    const from = Math.max(0, i - 40);
+    const trail = tr.look.slice(from, i + 1).map(([x, y], k) => `${k ? "L" : "M"}${X(x).toFixed(1)},${Y(y).toFixed(1)}`).join(" ");
+    const [ax, ay] = aim[i];
+    target.innerHTML = `<line x1="${cx}" y1="0" x2="${cx}" y2="320" class="tg-axis"/><line x1="0" y1="${cy}" x2="${TW}" y2="${cy}" class="tg-axis"/>${body}
+      <path d="${trail}" class="wa-trail"/>
+      ${fired.map((s) => { const p = shotAt(s); return p ? `<g class="tg-shot"><circle cx="${X(p[0])}" cy="${Y(p[1])}" r="8" fill="${VCOL[s.verdict] || "#8a8f98"}"/><text x="${X(p[0])}" y="${Y(p[1]) + 4}" text-anchor="middle">${s.bullet}</text></g>` : ""; }).join("")}
+      ${recoil ? `<path d="M${X(ax) - 7},${Y(ay) - 7}L${X(ax) + 7},${Y(ay) + 7}M${X(ax) + 7},${Y(ay) - 7}L${X(ax) - 7},${Y(ay) + 7}" class="wa-cross"/>` : ""}
+      <circle cx="${X(tr.look[i][0])}" cy="${Y(tr.look[i][1])}" r="4" class="wa-look"/>`;
+    // Spray control (only once the spray has started).
+    if (i >= firstShot) {
+      const r = recoil ? recoil.slice(firstShot, i + 1) : null, p = pull.slice(firstShot, i + 1);
+      const path = (pts) => pts.map(([x, y], k) => `${k ? "L" : "M"}${SX(x).toFixed(1)},${SY(y).toFixed(1)}`).join(" ");
+      // Bullets sit on the recoil line, or on your pull when the recoil isn't known.
+      const marks = recoil || pull;
+      spray.innerHTML = `<line x1="${scx}" y1="8" x2="${scx}" y2="${SH - 8}" class="tg-axis"/>
+        ${r ? `<path d="${path(r)}" class="wa-recoil"/>` : ""}<path d="${path(p)}" class="wa-pull"/>
+        ${fired.map((s) => { const q = marks[s.i]; return q ? `<circle cx="${SX(q[0])}" cy="${SY(q[1])}" r="5" fill="${VCOL[s.verdict] || "#8a8f98"}"><title>Bullet ${s.bullet}</title></circle>` : ""; }).join("")}`;
+      const note = view.querySelector("#wa-spray-note");
+      if (!r) {
+        note.textContent = "This demo doesn't record recoil and there's no learned pattern for this gun yet (it's learned from Premier demos in your library). Blue = your mouse pull; dots = bullets (green hit).";
+      } else if (r.length > 8) {
+        // Running read on the pull: compare where you pulled to where recoil went.
+        const last = r.length - 1;
+        const dy = p[last][1] - r[last][1], dx = p[last][0] - r[last][0];
+        const parts = [];
+        if (Math.abs(dy) > unit * 1.5) parts.push(dy < 0 ? "pulling down too little (bullets rise over him)" : "pulling down too much (bullets drop under him)");
+        if (Math.abs(dx) > unit * 1.5) parts.push(dx > 0 ? "pulling too far left (bullets drift left of him)" : "pulling too far right (bullets drift right of him)");
+        note.textContent = (parts.length ? `Right now: ${parts.join(", ")}.` : "Right now: your pull matches the recoil.")
+          + (recoilFrom === "pattern" ? " (Recoil = this gun's usual pattern from your Premier demos; FACEIT demos don't record it.)" : "");
+      }
+    } else {
+      spray.innerHTML = `<text x="${scx}" y="${SH / 2}" text-anchor="middle" class="wa-wait">Spray starts at bullet 1</text>`;
+    }
+    // Movement.
+    const k = tr.keys[i] || 0;
+    view.querySelectorAll("#wa-keys kbd").forEach((el) => el.classList.toggle("on", (k & Number(el.dataset.k)) !== 0));
+    const v = tr.speed[i] || 0, air = tr.air[i];
+    view.querySelector("#wa-speed-now").textContent = Math.round(v);
+    const st = view.querySelector("#wa-speed-state");
+    st.textContent = air ? "in the air" : v <= tr.accurate_speed ? "accurate" : "too fast to be accurate";
+    st.className = air || v > tr.accurate_speed ? "down" : "up";
+    graph.innerHTML = `<line x1="6" x2="${GW - 6}" y1="${gy(tr.accurate_speed)}" y2="${gy(tr.accurate_speed)}" class="sp-acc"/>
+      <path d="${speedPath}" class="sp-line"/>${shotMarks}<line x1="${gx(i)}" x2="${gx(i)}" y1="4" y2="${GH - 4}" class="wa-cursor"/>`;
+    view.querySelector("#wa-time").textContent = `${((i - (n - 1)) / 64).toFixed(2)} s to death`;
+  };
+
+  // Video drives the panels; without a clip, a timer replays the trace.
+  const tickOfVideo = () => seg[0] + (video.currentTime * 64) - tr.start_tick;
+  let timer = null, idx = 0;
+  const setSpeed = (s) => {
+    waSpeed = s;
+    try { localStorage.setItem("veloxify.whiffSpeed", String(s)); } catch (e) { /* not saved */ }
+    view.querySelectorAll("[data-speed]").forEach((b) => b.classList.toggle("on", Number(b.dataset.speed) === s));
+    if (video) video.playbackRate = s;
+  };
+  view.querySelectorAll("[data-speed]").forEach((b) => (b.onclick = () => setSpeed(Number(b.dataset.speed))));
+  if (video) {
+    video.playbackRate = waSpeed;
+    // Start a moment before the first shot.
+    video.addEventListener("loadedmetadata", () => { video.currentTime = Math.max(0, (tr.start_tick - seg[0]) / 64); }, { once: true });
+    const loop = () => { draw(tickOfVideo()); if (!video.paused) requestAnimationFrame(loop); };
+    video.addEventListener("play", () => { playBtn.textContent = "❚❚ Pause"; requestAnimationFrame(loop); });
+    video.addEventListener("pause", () => { playBtn.textContent = "▶ Play"; draw(tickOfVideo()); });
+    video.addEventListener("seeked", () => draw(tickOfVideo()));
+    playBtn.onclick = () => (video.paused ? video.play() : video.pause());
+    scrub.oninput = () => { video.pause(); video.currentTime = Math.max(0, (Number(scrub.value) + tr.start_tick - seg[0]) / 64); draw(Number(scrub.value)); };
+  } else {
+    const stop = () => { clearInterval(timer); timer = null; playBtn.textContent = "▶ Play"; };
+    playBtn.onclick = () => {
+      if (timer) return stop();
+      if (idx >= n - 1) idx = 0;
+      playBtn.textContent = "❚❚ Pause";
+      timer = setInterval(() => { idx += 1; draw(idx); if (idx >= n - 1) stop(); }, 1000 / (64 * waSpeed));
+    };
+    scrub.oninput = () => { stop(); idx = Number(scrub.value); draw(idx); };
+  }
+  draw(0);
+}
+
+// ---- match page: grenade lineups ----------------------------------------------------------------
+
+const lineups = { kinds: new Set(["smoke", "molotov", "flash", "he"]), setOnly: true, team: "all", player: "", sel: null, zoom: 1, pan: [0, 0] };
+const NADE_INFO = { smoke: ["Smokes", "smokegrenade", "#cfd3d8"], molotov: ["Molotovs", "molotov", "#f06e28"], flash: ["Flashes", "flashbang", "#ffffff"], he: ["HEs", "hegrenade", "#e2445f"] };
+const TECH = { stand: "Standing", jump: "Jump-throw", crouch: "Crouching", walk: "Walking", run: "Running" };
+const CLICK = { left: "left click", right: "right click (underhand)", both: "left + right (middle)" };
+
+// Callout names near a spot, from where CS2 placed the players in this match's kills.
+function calloutFinder(d) {
+  const pts = [];
+  for (const k of d.kills) {
+    if (k.attacker_xy && k.attacker_place) pts.push([k.attacker_xy, k.attacker_place]);
+    if (k.victim_xy && k.victim_place) pts.push([k.victim_xy, k.victim_place]);
+  }
+  return (xy) => {
+    let best = null, bd = 450 * 450;
+    for (const [p, name] of pts) {
+      const dd = (p[0] - xy[0]) ** 2 + (p[1] - xy[1]) ** 2;
+      if (dd < bd) { bd = dd; best = name; }
+    }
+    return best ? best.replace(/([a-z])([A-Z])/g, "$1 $2").replace("Bombsite", "Site ") : "";
+  };
+}
+
+async function renderLineupsTab(body, m, id) {
+  const [d, radar] = await Promise.all([loadDetails(id), loadRadar(m.map)]);
+  if (!d) return noDetails(body);
+  if (!d.throws) { body.innerHTML = `<div class="empty">Lineups need this match analyzed again; Veloxify does that in the background while CS2 is closed.</div>`; return; }
+  if (lineups.matchId !== id) Object.assign(lineups, { matchId: id, sel: null, player: "", zoom: 1, pan: [0, 0] });
+  const names = new Map(m.players.map((p) => [p.steamid, p.name]));
+  const team = new Map(m.players.map((p) => [p.steamid, p.side]));
+  const callout = calloutFinder(d);
+  const all = d.throws.filter((t) => (!lineups.setOnly || t.set));
+  // The same lineup thrown again (same spot, same aim, same landing) counts once, with how often.
+  const groups = [];
+  for (const t of all.slice().sort((a, b) => a.round - b.round || a.t - b.t)) {
+    const g = groups.find((x) => x.kind === t.kind && x.player === t.player && Math.hypot(x.from[0] - t.from[0], x.from[1] - t.from[1]) < 32
+      && Math.hypot(x.to[0] - t.to[0], x.to[1] - t.to[1]) < 120 && Math.abs(x.pitch - t.pitch) < 2 && Math.abs(((x.yaw - t.yaw + 540) % 360) - 180) < 2);
+    if (g) g.rounds.push(t.round); else groups.push({ ...t, rounds: [t.round] });
+  }
+  const shown = groups.filter((g) => lineups.kinds.has(g.kind) && (lineups.team === "all" || team.get(g.player) === lineups.team) && (!lineups.player || g.player === lineups.player));
+  const sel = lineups.sel != null && lineups.sel < shown.length ? lineups.sel : null;
+  const size = radar?.size || 1024;
+  const at = (xy) => (radar ? [(xy[0] - radar.pos_x) / radar.scale, (radar.pos_y - xy[1]) / radar.scale] : null);
+  const R = { smoke: 144, molotov: 120, flash: 40, he: 70 };
+  const overlay = shown.map((g, i) => {
+    const a = at(g.from), b = at(g.to);
+    if (!a || !b) return "";
+    const dim = sel != null && sel !== i;
+    const tc = TEAM_COLOR[team.get(g.player)] || "#ccc";
+    const r = R[g.kind] / (radar?.scale || 5);
+    return `<g class="ln ${g.kind} ${dim ? "dim" : ""} ${sel === i ? "on" : ""}" data-ln="${i}">
+      <line x1="${a[0]}" y1="${a[1]}" x2="${b[0]}" y2="${b[1]}" class="ln-path"/>
+      <circle cx="${b[0]}" cy="${b[1]}" r="${r}" class="ln-land"/>
+      <circle cx="${a[0]}" cy="${a[1]}" r="6" fill="${tc}" class="ln-from"/>
+      ${g.rounds.length > 1 ? `<text x="${b[0]}" y="${b[1] + 4}" text-anchor="middle" class="ln-count">×${g.rounds.length}</text>` : ""}
+      <title>${esc(names.get(g.player) || "")}: ${NADE_INFO[g.kind][0].slice(0, -1)} ${esc(callout(g.from))} → ${esc(callout(g.to))}</title></g>`;
+  }).join("");
+  const counts = Object.fromEntries(Object.keys(NADE_INFO).map((k) => [k, groups.filter((g) => g.kind === k).length]));
+  const s = sel != null ? shown[sel] : null;
+  const setpos = s ? `setpos ${s.from[0].toFixed(2)} ${s.from[1].toFixed(2)} ${s.from[2].toFixed(2)};setang ${s.pitch.toFixed(2)} ${s.yaw.toFixed(2)} 0` : "";
+  const players = m.players.slice().sort((a, b) => (a.side === b.side ? a.name.localeCompare(b.name) : a.side === "mine" ? -1 : 1));
+  body.innerHTML = `
+    <div class="ln-bar">
+      <div class="chips">${Object.entries(NADE_INFO).map(([k, [label, w]]) => `<button class="chip ${lineups.kinds.has(k) ? "on" : ""}" data-kind="${k}">${weaponIcon(w)} ${label} <span class="sub">${counts[k]}</span></button>`).join("")}</div>
+      <label class="check"><input type="checkbox" id="ln-set" ${lineups.setOnly ? "checked" : ""}> Set lineups only</label>
+      <div class="seg" id="ln-team">${[["all", "Both teams"], ["mine", "My team"], ["enemy", "Enemy"]].map(([k, l]) => `<button data-team="${k}" class="${lineups.team === k ? "on" : ""}">${l}</button>`).join("")}</div>
+      <select id="ln-player"><option value="">Everyone</option>${players.map((p) => `<option value="${p.steamid}" ${lineups.player === p.steamid ? "selected" : ""}>${esc(p.name)}</option>`).join("")}</select>
+    </div>
+    <div class="ln-main">
+      <section class="tl-map">
+        <input class="tl-zoom" type="range" min="1" max="3" step="0.1" value="${lineups.zoom}" aria-label="Zoom" orient="vertical">
+        <div class="tl-viewport"><div class="tl-canvas" style="transform:translate(${lineups.pan[0]}px,${lineups.pan[1]}px) scale(${lineups.zoom})">
+          ${radar ? `<img src="${assetUrl(`radars/${m.map}.png`)}" alt="${esc(mapName(m.map))} radar" draggable="false">` : `<div class="tl-noradar">Radar not available for ${esc(mapName(m.map))} yet</div>`}
+          <svg viewBox="0 0 ${size} ${size}">${overlay}</svg></div></div>
+      </section>
+      <section class="tl-events ln-side">
+        ${s ? `<div class="ln-detail">
+          <div class="ln-title">${weaponIcon(NADE_INFO[s.kind][1])}<b>${esc(callout(s.from) || "Spot")} → ${esc(callout(s.to) || "landing")}</b></div>
+          <div class="sub">${esc(names.get(s.player) || "")} · ${s.side} · round${s.rounds.length > 1 ? "s" : ""} ${s.rounds.join(", ")} · ${mmss(s.t)}</div>
+          <ul class="ln-facts"><li>${TECH[s.technique] || s.technique}, ${CLICK[s.click] || s.click}</li>
+            <li>Stood still ${s.still_s.toFixed(2)} s, aim moved ${s.aim_moved_deg.toFixed(1)}° before the throw</li>
+            <li>Thrown ${Math.round(Math.hypot(s.to[0] - s.from[0], s.to[1] - s.from[1]))} units</li></ul>
+          <div class="ln-cmd"><code>${esc(setpos)}</code><button class="btn" id="ln-copy">Copy</button></div>
+          <div class="sub">Paste in the console on a practice server (sv_cheats 1) to stand exactly here, aiming exactly here.</div>
+          <button class="btn ghost" id="ln-back">◀ All lineups</button></div>` : ""}
+        <div class="tl-list">${shown.map((g, i) => `<button class="tl-ev ${sel === i ? "on" : ""}" data-ln="${i}">
+          <div>${weaponIcon(NADE_INFO[g.kind][1])}<b style="color:${TEAM_COLOR[team.get(g.player)]}">${esc(names.get(g.player) || "")}</b>${g.rounds.length > 1 ? `<span class="ln-x">×${g.rounds.length}</span>` : ""}</div>
+          <span>${esc(callout(g.from) || "?")} → ${esc(callout(g.to) || "?")} · R${g.rounds[0]} ${mmss(g.t)} · ${TECH[g.technique] || g.technique}</span></button>`).join("") || `<div class="empty small">No lineups with these filters.</div>`}</div>
+      </section>
+    </div>
+    <div class="note">A set lineup: the thrower stood still (or jump-threw from a standstill), held their aim on a spot and threw it a fair way. Throws on the move or snap flashes are left out unless you untick "Set lineups only".</div>`;
+
+  const rerender = () => renderLineupsTab(body, m, id);
+  body.querySelectorAll("[data-kind]").forEach((b) => (b.onclick = () => { const k = b.dataset.kind; if (lineups.kinds.has(k)) lineups.kinds.delete(k); else lineups.kinds.add(k); lineups.sel = null; rerender(); }));
+  body.querySelector("#ln-set").onchange = (e) => { lineups.setOnly = e.target.checked; lineups.sel = null; rerender(); };
+  body.querySelectorAll("[data-team]").forEach((b) => (b.onclick = () => { lineups.team = b.dataset.team; lineups.sel = null; rerender(); }));
+  body.querySelector("#ln-player").onchange = (e) => { lineups.player = e.target.value; lineups.sel = null; rerender(); };
+  body.querySelectorAll("[data-ln]").forEach((el) => (el.onclick = () => { lineups.sel = Number(el.dataset.ln); rerender(); }));
+  body.querySelector("#ln-back")?.addEventListener("click", () => { lineups.sel = null; rerender(); });
+  body.querySelector("#ln-copy")?.addEventListener("click", (e) => { navigator.clipboard?.writeText(setpos); e.target.textContent = "Copied"; });
+  const canvas = body.querySelector(".tl-canvas"), zoom = body.querySelector(".tl-zoom"), vp = body.querySelector(".tl-viewport");
+  const apply = () => { canvas.style.transform = `translate(${lineups.pan[0]}px,${lineups.pan[1]}px) scale(${lineups.zoom})`; zoom.value = lineups.zoom; };
+  zoom.oninput = () => { lineups.zoom = Number(zoom.value); if (lineups.zoom === 1) lineups.pan = [0, 0]; apply(); };
+  vp.onwheel = (e) => { e.preventDefault(); lineups.zoom = Math.max(1, Math.min(3, lineups.zoom - Math.sign(e.deltaY) * 0.2)); if (lineups.zoom === 1) lineups.pan = [0, 0]; apply(); };
+  vp.onpointerdown = (e) => {
+    if (lineups.zoom === 1 || e.target.closest("[data-ln]")) return;
+    const start = [e.clientX - lineups.pan[0], e.clientY - lineups.pan[1]];
+    vp.setPointerCapture(e.pointerId);
+    vp.onpointermove = (ev) => { lineups.pan = [ev.clientX - start[0], ev.clientY - start[1]]; apply(); };
+    vp.onpointerup = () => { vp.onpointermove = null; };
+  };
+}
+
+// ---- match page: 2D replay ------------------------------------------------------------------------
+
+async function loadReplay(id) {
+  state.replays = state.replays || new Map();
+  if (!state.replays.has(id)) {
+    let r = null;
+    try {
+      const res = await fetch(assetUrl(`matches/${id}.replay.json.gz`), { cache: "no-store" });
+      if (res.ok) {
+        const stream = res.body.pipeThrough(new DecompressionStream("gzip"));
+        r = JSON.parse(await new Response(stream).text());
+      }
+    } catch (e) { /* not built yet */ }
+    state.replays.set(id, r);
+  }
+  return state.replays.get(id);
+}
+
+// The round strip (halves, how each round ended), shared by the timeline and the replay.
+function roundStripHtml(rounds, nr) {
+  const halves = [];
+  for (const r of rounds) {
+    const h = r.number <= 12 ? "First half" : r.number <= 24 ? "Second half" : `Overtime ${Math.floor((r.number - 25) / 6) + 1} · half ${Math.floor(((r.number - 25) % 6) / 3) + 1}`;
+    if (!halves.length || halves[halves.length - 1].name !== h) halves.push({ name: h, rounds: [] });
+    halves[halves.length - 1].rounds.push(r);
+  }
+  return halves.map((h) => {
+    const last = h.rounds[h.rounds.length - 1];
+    return `<div class="tl-half" style="flex:${h.rounds.length} 1 0"><div class="tl-half-head"><span>${esc(h.name.toUpperCase())}</span><b><i class="mine">${last.score_mine}</i>:<i class="enemy">${last.score_theirs}</i></b></div>
+      <div class="tl-tiles" style="grid-template-columns:repeat(${h.rounds.length},minmax(30px,1fr))">${h.rounds.map((r) => {
+        const [icon, why] = roundEnd(r);
+        return `<button class="tl-tile ${r.winner} ${r.number === nr ? "on" : ""}" data-round="${r.number}" title="Round ${r.number}: ${r.winner === "mine" ? "your team" : "enemy"} won (${why}) · ${r.score_mine}-${r.score_theirs}">
+          <b>${r.number}</b><span>${ROUND_ICONS[icon]}</span></button>`;
+      }).join("")}</div></div>`;
+  }).join(`<div class="tl-sep"></div>`);
+}
+
+const replay = { round: 1, t: 0, speed: 1, playing: false, names: true };
+let replayRaf = null;
+
+async function renderReplayTab(body, m, id) {
+  cancelAnimationFrame(replayRaf);
+  const [d, radar, rp] = await Promise.all([loadDetails(id), loadRadar(m.map), loadReplay(id)]);
+  if (!d || !rp) { body.innerHTML = `<div class="empty">This match's 2D replay isn't built yet. Veloxify builds it in the background while CS2 is closed.</div>`; return; }
+  if (replay.matchId !== id) Object.assign(replay, { matchId: id, round: 1, t: 0, playing: false });
+  const round = d.rounds.find((r) => r.number === replay.round) || d.rounds[0];
+  const rr = rp.rounds.find((r) => r.number === round.number);
+  if (!rr) { body.innerHTML = `<div class="empty">No replay data for round ${round.number}.</div>`; return; }
+  const names = new Map(m.players.map((p) => [p.steamid, p.name]));
+  const team = new Map(m.players.map((p) => [p.steamid, p.side]));
+  const ids = rp.players;
+  const offset = (round.live_tick - rr.start) / 64; // replay frames start a few ticks before the round goes live
+  const duration = (rr.frames.length - 1) * rp.step / 64 - offset;
+  const kills = d.kills.filter((k) => k.round === round.number && !k.team_kill);
+  const nades = (d.grenades || []).filter((g) => g.round === round.number);
+  const throws = (d.throws || []).filter((t) => t.round === round.number);
+  const size = radar?.size || 1024;
+  const at = (x, y) => (radar ? [(x - radar.pos_x) / radar.scale, (radar.pos_y - y) / radar.scale] : [0, 0]);
+  const plant = round.plant ? { t: round.plant[0], who: round.plant[2] } : null;
+  const LAST = { smoke: 18, molotov: 7, flash: 0.5, he: 0.6 };
+  const R = { smoke: 144, molotov: 120, flash: 60, he: 90 };
+
+  body.innerHTML = `
+    <section class="tl-strip">${roundStripHtml(d.rounds, round.number)}</section>
+    <div class="rp-main">
+      <section class="rp-teams" id="rp-teams"></section>
+      <section class="rp-stage">
+        <div class="tl-map"><div class="tl-viewport rp-viewport"><div class="tl-canvas">
+          ${radar ? `<img src="${assetUrl(`radars/${m.map}.png`)}" alt="${esc(mapName(m.map))} radar" draggable="false">` : `<div class="tl-noradar">Radar not available</div>`}
+          <svg viewBox="0 0 ${size} ${size}" id="rp-svg"></svg></div></div></div>
+        <div class="rp-controls">
+          <button class="btn primary" id="rp-play">${replay.playing ? "❚❚" : "▶"}</button>
+          <div class="seg" id="rp-speeds">${[0.5, 1, 2, 4].map((s) => `<button data-rspeed="${s}" class="${replay.speed === s ? "on" : ""}">${s}x</button>`).join("")}</div>
+          <input type="range" id="rp-scrub" min="0" max="${duration.toFixed(2)}" step="0.05" value="${replay.t}" aria-label="Round time">
+          <span class="rp-time" id="rp-time"></span>
+          <label class="check"><input type="checkbox" id="rp-names" ${replay.names ? "checked" : ""}> Names</label>
+        </div>
+      </section>
+      <section class="tl-events rp-feed"><div class="h3" style="padding:4px 6px 8px">Round ${round.number} kills</div>
+        <div class="tl-list">${kills.map((k, i) => `<button class="tl-ev" data-kt="${k.t}" data-ki="${i}"><div><b style="color:${TEAM_COLOR[team.get(k.attacker)] || "#ccc"}">${esc(names.get(k.attacker) || "World")}</b>${weaponIcon(k.weapon)}${k.headshot ? `<span class="hs">◎</span>` : ""}<b style="color:${TEAM_COLOR[team.get(k.victim)] || "#ccc"}">${esc(names.get(k.victim) || "")}</b></div><span>${mmss(k.t)}</span></button>`).join("") || `<div class="empty small">No kills.</div>`}</div>
+      </section>
+    </div>`;
+
+  const svg = body.querySelector("#rp-svg"), scrub = body.querySelector("#rp-scrub"), timeEl = body.querySelector("#rp-time"), teamsEl = body.querySelector("#rp-teams"), playBtn = body.querySelector("#rp-play");
+  const lerpYaw = (a, b, f) => a + ((((b - a) % 360) + 540) % 360 - 180) * f;
+  // Everyone at round time t (interpolated between samples).
+  const stateAt = (t) => {
+    const fpos = Math.max(0, (t + offset) * 64 / rp.step);
+    const f0 = Math.min(rr.frames.length - 1, Math.floor(fpos)), f1 = Math.min(rr.frames.length - 1, f0 + 1), w = fpos - f0;
+    const a = rr.frames[f0], b = rr.frames[f1];
+    return ids.map((sid, i) => {
+      const o = i * 4;
+      const hp = a[o + 3];
+      const lerp = (k) => a[o + k] + (b[o + k] - a[o + k]) * (b[o + 3] > 0 ? w : 0);
+      return { sid, x: lerp(0), y: lerp(1), yaw: lerpYaw(a[o + 2], b[o + 2], b[o + 3] > 0 ? w : 0), hp };
+    });
+  };
+  const draw = () => {
+    const t = replay.t;
+    const ps = stateAt(t);
+    let out = "";
+    // Grenades: thrown (dashed path until it goes off), then smoke/fire/flash/HE where it landed.
+    for (const th of throws) {
+      const g = nades.find((n) => n.player === th.player && n.kind === th.kind && n.t >= th.t && n.t - th.t < 12);
+      const end = g ? g.t : th.t + 2;
+      if (t >= th.t && t < end) {
+        const [ax, ay] = at(th.from[0], th.from[1]), [bx, by] = at(th.to[0], th.to[1]);
+        const f = Math.min(1, (t - th.t) / Math.max(0.3, end - th.t));
+        out += `<line x1="${ax}" y1="${ay}" x2="${ax + (bx - ax) * f}" y2="${ay + (by - ay) * f}" class="rp-throw ${th.kind}"/>`;
+      }
+    }
+    for (const g of nades) {
+      if (t >= g.t && t < g.t + LAST[g.kind]) {
+        const [x, y] = at(g.xy[0], g.xy[1]);
+        const fade = g.kind === "smoke" ? Math.min(1, (g.t + LAST.smoke - t) / 2) : 1;
+        out += `<circle cx="${x}" cy="${y}" r="${R[g.kind] / (radar?.scale || 5)}" class="rp-nade ${g.kind}" style="opacity:${fade}"/>`;
+      }
+    }
+    // Bomb, once planted: where the planter stood.
+    if (plant && t >= plant.t) {
+      const pl = stateAt(plant.t).find((p) => p.sid === plant.who);
+      if (pl) { const [x, y] = at(pl.x, pl.y); out += `<g class="rp-bomb"><rect x="${x - 8}" y="${y - 8}" width="16" height="16" rx="3"/><text x="${x}" y="${y + 5}" text-anchor="middle">C4</text></g>`; }
+    }
+    // Deaths so far: ✕ where they fell.
+    for (const k of kills.filter((k) => k.t <= t && k.victim_xy)) {
+      const [x, y] = at(k.victim_xy[0], k.victim_xy[1]);
+      out += `<path d="M${x - 7},${y - 7}L${x + 7},${y + 7}M${x + 7},${y - 7}L${x - 7},${y + 7}" class="rp-dead" stroke="${TEAM_COLOR[team.get(k.victim)] || "#888"}"/>`;
+    }
+    // Live players: dot, view direction, name.
+    for (const p of ps) {
+      if (p.hp <= 0) continue;
+      const [x, y] = at(p.x, p.y);
+      const c = TEAM_COLOR[team.get(p.sid)] || "#ccc";
+      const rad = (p.yaw * Math.PI) / 180;
+      out += `<g class="rp-p"><line x1="${x}" y1="${y}" x2="${x + Math.cos(rad) * 20}" y2="${y - Math.sin(rad) * 20}" class="rp-look"/>
+        <circle cx="${x}" cy="${y}" r="9" fill="${c}" class="rp-dot"/>
+        ${replay.names ? `<text x="${x}" y="${y - 14}" text-anchor="middle" class="rp-name">${esc(names.get(p.sid) || "")}</text>` : ""}</g>`;
+    }
+    svg.innerHTML = out;
+    // Side panel: HP per player.
+    teamsEl.innerHTML = ["mine", "enemy"].map((side) => `<div class="rp-team ${side}"><div class="h3">${side === "mine" ? "My Team" : "Enemy Team"} <span class="tl-side ${(side === "mine" ? round.mine_side : round.mine_side === "T" ? "CT" : "T") === "T" ? "t" : "ct"}">${side === "mine" ? round.mine_side : round.mine_side === "T" ? "CT" : "T"}</span></div>
+      ${ps.filter((p) => team.get(p.sid) === side).sort((a, b) => b.hp - a.hp).map((p) => `<div class="rp-pl ${p.hp <= 0 ? "dead" : ""}"><span>${esc(names.get(p.sid) || "")}</span><i style="width:${p.hp}%;background:${TEAM_COLOR[side]}"></i><b>${p.hp > 0 ? p.hp : "✕"}</b></div>`).join("")}</div>`).join("");
+    scrub.value = t;
+    timeEl.textContent = `${mmss(Math.max(0, t)).replace("s", "")} / ${mmss(duration).replace("s", "")}`;
+    body.querySelectorAll("[data-kt]").forEach((b) => b.classList.toggle("on", Number(b.dataset.kt) <= t));
+  };
+  let last = null;
+  const tick = (now) => {
+    if (!replay.playing) return;
+    if (last != null) replay.t = Math.min(duration, replay.t + ((now - last) / 1000) * replay.speed);
+    last = now;
+    draw();
+    if (replay.t >= duration) { replay.playing = false; playBtn.textContent = "▶"; return; }
+    replayRaf = requestAnimationFrame(tick);
+  };
+  const setPlaying = (on) => {
+    replay.playing = on;
+    playBtn.textContent = on ? "❚❚" : "▶";
+    last = null;
+    if (on) { if (replay.t >= duration) replay.t = 0; replayRaf = requestAnimationFrame(tick); } else cancelAnimationFrame(replayRaf);
+  };
+  playBtn.onclick = () => setPlaying(!replay.playing);
+  body.querySelectorAll("[data-rspeed]").forEach((b) => (b.onclick = () => { replay.speed = Number(b.dataset.rspeed); body.querySelectorAll("[data-rspeed]").forEach((x) => x.classList.toggle("on", x === b)); }));
+  scrub.oninput = () => { replay.t = Number(scrub.value); draw(); };
+  body.querySelector("#rp-names").onchange = (e) => { replay.names = e.target.checked; draw(); };
+  body.querySelectorAll("[data-kt]").forEach((b) => (b.onclick = () => { replay.t = Math.max(0, Number(b.dataset.kt) - 2); draw(); }));
+  body.querySelectorAll("[data-round]").forEach((b) => (b.onclick = () => { replay.round = Number(b.dataset.round); replay.t = 0; replay.playing = false; renderReplayTab(body, m, id); }));
+  draw();
+  if (replay.playing) setPlaying(true);
+}
+
 // ---- highlights ---------------------------------------------------------------------------------
 
 async function renderHighlights(body, ids) {
@@ -1592,6 +2272,14 @@ async function renderHighlights(body, ids) {
   }));
 }
 
+function setPlayerSpeed(s) {
+  const v = document.getElementById("player-video");
+  v.playbackRate = s;
+  v.defaultPlaybackRate = s;
+  document.querySelectorAll("#player-speeds [data-pspeed]").forEach((b) => b.classList.toggle("on", Number(b.dataset.pspeed) === s));
+}
+document.querySelectorAll("#player-speeds [data-pspeed]").forEach((b) => (b.onclick = () => setPlayerSpeed(Number(b.dataset.pspeed))));
+
 function play(i) {
   const h = state.playlist[i];
   if (!h) return;
@@ -1601,6 +2289,8 @@ function play(i) {
   document.getElementById("player-sub").textContent = `${h.name} · ${mapName(h.match.map)} · round ${h.round}`;
   const v = document.getElementById("player-video");
   v.src = assetUrl(h.clip);
+  // Lowlights open in slow motion (the speed you last chose in the whiff analyzer); highlights at 1x.
+  setPlayerSpeed(h.kind && h.reason != null ? waSpeed : 1);
   v.play().catch(() => {});
 }
 
@@ -1767,7 +2457,7 @@ function renderProfile(view) {
 
   view.innerHTML = `
     <div class="profile-head">
-      <div><div class="h2">Profile</div><div class="h1" style="display:flex;align-items:center;gap:10px">${esc(state.faceit?.nickname || state.index.me_name || "You")}${state.faceit?.level ? levelBadge(state.faceit.level, 30) : ""}</div></div>
+      <div class="profile-id">${avatarHtml(state.index.me, 64)}<div><div class="h2">Profile</div><div class="h1" style="display:flex;align-items:center;gap:10px">${esc(state.faceit?.nickname || state.index.me_name || "You")}${state.faceit?.level ? `<span class="rank-chip faceit" title="FACEIT level ${state.faceit.level} · ${(state.faceit.elo || 0).toLocaleString("en-US")} ELO">${levelBadge(state.faceit.level, 24)}<b>${(state.faceit.elo || 0).toLocaleString("en-US")}</b></span>` : ""}${premier ? premierChip(premier[0]) : ""}</div></div></div>
       <div class="profile-controls">${seg("last", [[10, "Last 10"], [30, "Last 30"], [50, "Last 50"], [0, "All time"]])}
         ${seg("source", [["all", "All"], ["faceit", "FACEIT"], ["valve", "Premier"]])}</div>
     </div>
@@ -2118,7 +2808,7 @@ async function renderSession(view, date, idx) {
   };
   const card = (p) => `
     <div class="sc-card ${p.is_me ? "me" : ""}">
-      <div class="sc-name"><b>${esc(p.name)}</b>${p.is_me ? `<span class="sc-you">You</span>` : ""}<span class="grow"></span>
+      <div class="sc-name">${avatarHtml(p.steamid, 32)}<b>${esc(p.name)}</b>${p.is_me ? `<span class="sc-you">You</span>` : ""}<span class="grow"></span>
         <span class="sc-wl"><span class="up">${p.wins}</span>:<span class="down">${p.maps - p.wins}</span></span></div>
       ${bar("HLTV Rating 3.0", p.rating3, "var(--accent)")}
       ${bar("T side", p.t_rating, "var(--t)")}
@@ -2283,7 +2973,7 @@ function renderLowlightsTab(view) {
 
 // One lowlight: where every bullet went (his view), your speed at each shot, and the verdict.
 async function renderLowlight(view, matchId, id) {
-  const m = await loadMatch(matchId, true);
+  const [m] = await Promise.all([loadMatch(matchId, true), loadRecoil()]);
   const l = (m.lowlights || []).find((x) => x.id === id);
   if (!l) { view.innerHTML = `<div class="empty">That lowlight isn't in this match any more.</div>`; return; }
   const [reasonText, group] = LL_REASONS[l.reason] || LL_REASONS.unknown;
@@ -2336,6 +3026,7 @@ async function renderLowlight(view, matchId, id) {
       </div>
       <div class="ll-verdict big">${esc(l.verdict)}</div>
       ${LL_TIPS[l.reason] ? `<div class="why-tip"><b>Work on:</b> ${esc(LL_TIPS[l.reason])} <a class="link" href="#/practice">Practice this</a></div>` : ""}
+      ${whiffAnalyzer(l, m, VCOL)}
       <div class="ll-panels">
         <div class="ll-panel">
           <div class="h2">Where your bullets went · his view${l.distance_m ? `, ${Math.round(l.distance_m)} m` : ""}</div>
@@ -2367,6 +3058,7 @@ async function renderLowlight(view, matchId, id) {
       </table>
       <div class="note">Speeds and angles come from the demo at 64 ticks a second; CS2 fires between ticks, so treat degrees and milliseconds as close, not exact.</div>
     </section>`;
+  wireWhiffAnalyzer(view, l, VCOL);
   const watch = view.querySelector("#ll-watch");
   if (watch) watch.onclick = () => { state.playlist = [{ ...l, name: "You", match: { map: m.map } }]; play(0); };
   const rend = view.querySelector("#ll-render");
@@ -2744,7 +3436,7 @@ function wireAppearance(view) {
 
 let settingsData = null;
 const PREVIEW_SETTINGS = {
-  settings: { watch_dirs: ["C:\\Users\\you\\Downloads"], auto_render: true, faceit_enabled: true, faceit_nickname: "", selectivity: "solid-plays", max_per_match: 6, start_with_windows: false, steamid64: null },
+  settings: { watch_dirs: ["C:\\Users\\you\\Downloads"], auto_render: true, auto_lowlights: true, faceit_enabled: true, faceit_nickname: "", selectivity: "solid-plays", max_per_match: 6, start_with_windows: false, steamid64: null },
   detected_steamid: null, steam_name: null, version: "preview", clips: 0, clip_bytes: 0,
   render: { height: 1080, fps: 60, transition: "cut", killfeed_only: true, own_crosshair: false, xray: false, audio: true },
 };
@@ -2786,6 +3478,7 @@ async function renderSettings(view) {
       <section class="panel">
         <div class="panel-head"><div class="h3">Highlights</div></div>
         ${row("Make highlights automatically", "After you close CS2, new demos are read and your best moments rendered in the background.", sw("auto_render", s.auto_render))}
+        ${row("Capture lowlights too", "After the highlights, your 3 worst deaths from each match of the latest session are rendered too, for the whiff analyzer. Others render when you press Watch.", sw("auto_lowlights", s.auto_lowlights ?? true))}
         ${row("Which moments", "Best only: 3K+, aces, clutches and other always-moments. Solid plays adds 2Ks that mattered and reaction flicks. Everything adds plain 2Ks.",
           seg("selectivity", s.selectivity, [["highlights-only", "Best only"], ["solid-plays", "Solid plays"], ["everything", "Everything"]]))}
         ${row("Clips per match", "The most clips kept from one match; the best ones win.", `<input type="number" data-key="max_per_match" min="1" max="20" value="${s.max_per_match}" ${tauri ? "" : "disabled"}>`)}
@@ -2879,7 +3572,7 @@ function wireFaceitRefresh() {
 async function saveSettings() {
   const s = settingsData.settings;
   const update = {
-    watch_dirs: s.watch_dirs, auto_render: s.auto_render, faceit_enabled: s.faceit_enabled, faceit_nickname: s.faceit_nickname,
+    watch_dirs: s.watch_dirs, auto_render: s.auto_render, auto_lowlights: s.auto_lowlights ?? true, faceit_enabled: s.faceit_enabled, faceit_nickname: s.faceit_nickname,
     selectivity: s.selectivity, max_per_match: Number(s.max_per_match) || 6, start_with_windows: s.start_with_windows,
     max_clips_gb: Number(s.max_clips_gb) || 0, max_demos_gb: Number(s.max_demos_gb) || 0, render: settingsData.render,
   };
@@ -3048,7 +3741,7 @@ if (tauri) {
   new MutationObserver(() => {
     if (paintQueued) return;
     paintQueued = true;
-    requestAnimationFrame(() => { paintQueued = false; paintDemoRows(); });
+    requestAnimationFrame(() => { paintQueued = false; paintDemoRows(); fillAvatars(document.getElementById("view")); });
   }).observe(document.getElementById("view"), { childList: true, subtree: true });
   const setStatus = (st) => { live.status = st; showStatus(st); renderBanner(); };
   tauri.core.invoke("demo_queue_state").then(setQueue);

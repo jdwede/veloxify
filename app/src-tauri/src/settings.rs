@@ -33,6 +33,9 @@ pub struct Settings {
     pub steamid64: Option<u64>,
     /// Render new sessions automatically once CS2 closes.
     pub auto_render: bool,
+    /// Also render the worst deaths (lowlights) of the latest session, after the highlights.
+    #[serde(default = "d_true")]
+    pub auto_lowlights: bool,
     pub profile: PathBuf,
     /// Look up the FACEIT account linked to the Steam account (level, ELO, match list).
     #[serde(default = "d_true")]
@@ -83,6 +86,7 @@ impl Settings {
                     watch_dirs: watch,
                     steamid64: None,
                     auto_render: true,
+                    auto_lowlights: true,
                     profile: profile.clone(),
                     faceit_enabled: true,
                     faceit_nickname: String::new(),

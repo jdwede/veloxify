@@ -34,5 +34,14 @@ fn main() -> anyhow::Result<()> {
     }
     println!("clutches: {:?}", d.clutches.iter().map(|c| format!("r{} 1v{} {} k{}", c.round, c.vs, c.result, c.kills)).collect::<Vec<_>>());
     println!("openings: {}", d.kills.iter().filter(|k| k.opening).count());
+    for p in &d.players {
+        let t = &p.trades;
+        let name = m.players.iter().find(|x| x.steamid.to_string() == p.steamid).map(|x| x.name.clone()).unwrap_or_default();
+        println!("trades {:<16} kill {}/{}/{}  death {}/{}/{}", name, t.kill_opps, t.kill_attempts, t.kill_success, t.death_opps, t.death_attempts, t.death_success);
+    }
+    for (w, row) in &d.recoil {
+        let pts: Vec<String> = row.iter().take(12).filter(|b| b[2] > 0.0).map(|b| format!("{:.2},{:.2}", b[0] / b[2], b[1] / b[2])).collect();
+        println!("recoil {w} (n0={}): {}", row[0][2], pts.join(" "));
+    }
     Ok(())
 }

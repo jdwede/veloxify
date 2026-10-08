@@ -221,6 +221,18 @@ pub fn players_values(demo: &[u8], props: &[&str], ticks: &[i32]) -> Result<Hash
         let mut vals = HashMap::new();
         for (id, name) in &ids {
             let Some(data) = out.df.get(id).and_then(|c| c.data.as_ref()) else { continue };
+            // Vector props (e.g. `aim_punch_angle`) come back as `<name>_0`, `<name>_1`, `<name>_2`.
+            let parts: Option<Vec<f32>> = match data {
+                VarVec::XYZVec(x) => x.get(row).and_then(|v| v.map(|v| v.to_vec())),
+                VarVec::XYVec(x) => x.get(row).and_then(|v| v.map(|v| v.to_vec())),
+                _ => None,
+            };
+            if let Some(parts) = parts {
+                for (i, c) in parts.iter().enumerate() {
+                    vals.insert(format!("{name}_{i}"), Val::Num(*c as f64));
+                }
+                continue;
+            }
             let v = match data {
                 VarVec::U64Vec(x) => x.get(row).map(|v| Val::Ids(v.clone())),
                 VarVec::StringVec(x) => x.get(row).map(|v| Val::Strs(v.clone())),

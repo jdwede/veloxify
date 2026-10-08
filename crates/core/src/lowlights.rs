@@ -29,7 +29,9 @@ const CM_PER_UNIT: f64 = 2.54;
 /// Per-tick props for the diagnosis. Speed comes from position changes between consecutive ticks
 /// (every tick of each window is read), not the parser's velocity, which spans the previous rows
 /// returned rather than the previous tick.
-const TICK_PROPS: &[&str] = &["X", "Y", "Z", "pitch", "yaw", "is_airborne", "duck_amount", "aim_punch_angle", "is_scoped"];
+const TICK_PROPS: &[&str] = &["X", "Y", "Z", "pitch", "yaw", "is_airborne", "duck_amount", "aim_punch_angle", "is_scoped", "buttons"];
+/// The whiff trace starts this long before the first shot.
+const TRACE_LEAD_TICKS: i32 = 64;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -90,10 +92,38 @@ pub struct Lowlight {
     pub segments: Vec<(i32, i32)>,
     pub duration_s: f64,
     pub shot_details: Vec<ShotInfo>,
+    /// Tick by tick from a second before the first shot to the death, for the whiff analyzer.
+    pub trace: Option<Trace>,
     /// Rendered on demand.
     pub clip: Option<String>,
     pub thumb: Option<String>,
     pub render_error: Option<String>,
+}
+
+/// Your aim and movement every tick of a whiff (64 per second), against the player who killed you.
+/// Positions are relative to his head at his distance, in cm (x right, y up), like `ShotInfo`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Trace {
+    pub start_tick: i32,
+    /// Where your crosshair was (where you looked).
+    pub look: Vec<[f32; 2]>,
+    /// Where bullets would go (crosshair plus recoil).
+    pub aim: Vec<[f32; 2]>,
+    /// Horizontal speed, units/s.
+    pub speed: Vec<f32>,
+    /// Keys held: 1 W, 2 S, 4 A, 8 D, 16 jump, 32 crouch, 64 fire, 128 walk.
+    pub keys: Vec<u8>,
+    /// In the air.
+    pub air: Vec<u8>,
+    /// Your view angles (yaw, pitch) and the recoil punch (yaw, pitch), degrees: your mouse
+    /// movement against the gun's recoil, independent of where he moved.
+    pub view: Vec<[f32; 2]>,
+    pub punch: Vec<[f32; 2]>,
+    /// The gun's accurate speed (34% of its max), units/s.
+    pub accurate_speed: f32,
+    /// His head and body size at his distance, cm: half-width and how far below the head his feet are.
+    pub body_bottom_cm: f32,
 }
 
 /// Running speed of each gun (units/s); a gun is accurate below 34% of it.
@@ -209,8 +239,8 @@ pub fn detect(m: &Match, me: u64, demo: Option<&[u8]>) -> Vec<Lowlight> {
     let data = demo.and_then(|d| {
         let mut ticks: Vec<i32> = vec![];
         for x in &deaths {
-            let (first, last) = (x.burst[0].0, x.burst.last().unwrap().0);
-            ticks.extend(first - 40..=last);
+            let first = x.burst[0].0;
+            ticks.extend(first - TRACE_LEAD_TICKS..=x.tick);
             ticks.extend(x.burst.iter().map(|(t, _)| *t));
         }
         ticks.sort();
@@ -376,6 +406,48 @@ pub fn detect(m: &Match, me: u64, demo: Option<&[u8]>) -> Vec<Lowlight> {
         }
         let start = (first - (2.5 * TICKRATE) as i32).max(round.live_tick);
         let end = d.tick + (1.5 * TICKRATE) as i32;
+        // The whiff trace: every tick against the killer, from just before the first shot.
+        let trace = (|| {
+            let t0 = first - TRACE_LEAD_TICKS;
+            let mut tr = Trace { start_tick: t0, accurate_speed: accurate as f32, ..Default::default() };
+            let round1 = |v: f64| ((v * 10.0).round() / 10.0) as f32;
+            for tick in t0..=d.tick {
+                let (Some(mp), Some(kp)) = (at(me, tick), at(d.killer, tick)) else {
+                    // Keep the timeline even: repeat the last values when a tick is missing.
+                    let last = (tr.look.last().copied(), tr.aim.last().copied(), tr.speed.last().copied(), tr.keys.last().copied(), tr.air.last().copied());
+                    if let (Some(l), Some(a), Some(s), Some(k), Some(r)) = last {
+                        tr.look.push(l);
+                        tr.aim.push(a);
+                        tr.speed.push(s);
+                        tr.keys.push(k);
+                        tr.air.push(r);
+                        let (v, p) = (*tr.view.last().unwrap_or(&[0.0, 0.0]), *tr.punch.last().unwrap_or(&[0.0, 0.0]));
+                        tr.view.push(v);
+                        tr.punch.push(p);
+                        continue;
+                    }
+                    return None;
+                };
+                let (ax, ay, _, _, body_bottom) = aim_at(mp, kp);
+                // Where you looked = the aim without twice the recoil punch.
+                let mut look_p = mp.clone();
+                look_p.insert("aim_punch_angle_0".into(), 0.0);
+                look_p.insert("aim_punch_angle_1".into(), 0.0);
+                let (lx, ly, _, _, _) = aim_at(&look_p, kp);
+                tr.look.push([round1(lx * CM_PER_UNIT), round1(ly * CM_PER_UNIT)]);
+                tr.aim.push([round1(ax * CM_PER_UNIT), round1(ay * CM_PER_UNIT)]);
+                tr.speed.push(round1(speed(me, tick).unwrap_or(0.0)));
+                let b = g(mp, "buttons") as u64;
+                let key = |bit: u64, out: u8| if b & bit != 0 { out } else { 0 };
+                tr.keys.push(key(1 << 3, 1) | key(1 << 4, 2) | key(1 << 9, 4) | key(1 << 10, 8) | key(1 << 1, 16) | key(1 << 2, 32) | key(1 << 0, 64) | key(1 << 16, 128));
+                tr.air.push((g(mp, "is_airborne") > 0.5) as u8);
+                let r2 = |v: f64| ((v * 100.0).round() / 100.0) as f32;
+                tr.view.push([r2(g(mp, "yaw")), r2(g(mp, "pitch"))]);
+                tr.punch.push([r2(g(mp, "aim_punch_angle_1")), r2(g(mp, "aim_punch_angle_0"))]);
+                tr.body_bottom_cm = round1(body_bottom * CM_PER_UNIT);
+            }
+            Some(tr)
+        })();
         out.push(Lowlight {
             round: round.number,
             round_index: d.round,
@@ -400,6 +472,7 @@ pub fn detect(m: &Match, me: u64, demo: Option<&[u8]>) -> Vec<Lowlight> {
             segments: vec![(start, end)],
             duration_s: (end - start) as f64 / TICKRATE,
             shot_details: shots,
+            trace,
             ..Default::default()
         });
     }

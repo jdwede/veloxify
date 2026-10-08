@@ -212,6 +212,13 @@ impl Worker {
                 let scope =
                     if pending_render.is_empty() { Scope::LatestSession } else { Scope::Matches(std::mem::take(&mut pending_render)) };
                 self.render(&settings, me, scope);
+                // Then the latest session's worst deaths, for the whiff analyzer.
+                if settings.auto_render && settings.auto_lowlights && !system::cs2_running() {
+                    let items = latest_lowlights(&settings.library_dir, LOWLIGHTS_PER_MATCH);
+                    if !items.is_empty() {
+                        self.render(&settings, me, Scope::Items(items));
+                    }
+                }
             } else if imported {
                 self.set("idle", "Up to date", 0, 0);
             }
@@ -519,4 +526,33 @@ pub fn library_file(lib: &Path, rel: &str) -> Option<PathBuf> {
     let p = lib.join(rel);
     let canon = p.canonicalize().ok()?;
     canon.starts_with(lib.canonicalize().ok()?).then_some(canon)
+}
+
+/// Lowlights rendered automatically per match (the worst ones; the rest render on Watch).
+const LOWLIGHTS_PER_MATCH: usize = 3;
+
+/// The latest session's worst lowlights still without a clip: (match id, lowlight id).
+fn latest_lowlights(lib: &Path, per_match: usize) -> Vec<(String, String)> {
+    let Some(index) = std::fs::read_to_string(lib.join("index.json")).ok().and_then(|t| serde_json::from_str::<Index>(&t).ok()) else {
+        return vec![];
+    };
+    let curation = cs2hl_core::curation::Curation::load(lib);
+    let ids = index.days.last().and_then(|d| d.sessions.last()).map(|s| s.match_ids.clone()).unwrap_or_default();
+    let mut out = vec![];
+    for id in ids {
+        let Some(m) = std::fs::read_to_string(lib.join("matches").join(format!("{id}.json"))).ok().and_then(|t| serde_json::from_str::<MatchEntry>(&t).ok())
+        else {
+            continue;
+        };
+        // Lowlights are stored worst first.
+        out.extend(
+            m.lowlights
+                .iter()
+                .filter(|l| !curation.deleted.contains(&l.id))
+                .take(per_match)
+                .filter(|l| l.clip.is_none() && l.render_error.is_none())
+                .map(|l| (id.clone(), l.id.clone())),
+        );
+    }
+    out
 }

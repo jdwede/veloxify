@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
 /// Bumped whenever what's in a details file changes, so older ones are rebuilt.
-pub const VERSION: u32 = 3;
+pub const VERSION: u32 = 6;
 
 /// Spotted state is sampled every this many ticks.
 const SPOT_STEP: i32 = 2;
@@ -44,6 +44,47 @@ pub struct MatchDetails {
     pub clutches: Vec<DClutch>,
     pub players: Vec<DPlayer>,
     pub grenades: Vec<DGrenade>,
+    /// Every smoke, molotov, flash and HE with where it was thrown from and how (lineups).
+    #[serde(default)]
+    pub throws: Vec<DThrow>,
+    /// Each automatic gun's recoil per bullet of a spray from a reset (aim punch pitch and yaw
+    /// summed, and the count), from demos that record it (Premier; FACEIT demos don't). Averaged
+    /// over the library into `recoil.json`: the reference spray pattern for the whiff analyzer.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub recoil: std::collections::BTreeMap<String, Vec<[f32; 3]>>,
+}
+
+/// Bullets of a spray kept for the reference recoil pattern.
+const RECOIL_BULLETS: usize = 30;
+
+/// A grenade throw: from where and how, where it went, and whether it looks like a set lineup
+/// (stood still, held the aim on a spot, a long throw) rather than one thrown on the fly.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DThrow {
+    pub round: u32,
+    /// Seconds into the round at the throw.
+    pub t: f32,
+    pub player: String,
+    pub side: String,
+    /// "smoke", "molotov", "flash", "he".
+    pub kind: String,
+    /// The thrower's feet and view at release (setpos / setang).
+    pub from: [f32; 3],
+    pub pitch: f32,
+    pub yaw: f32,
+    /// Where it went off.
+    pub to: [f32; 2],
+    /// "stand", "jump", "crouch", "walk" or "run".
+    pub technique: String,
+    /// "left", "right" or "both" (mouse buttons).
+    pub click: String,
+    /// How long the thrower had been standing still (s) and how steady the aim was (deg moved
+    /// in the last quarter second).
+    pub still_s: f32,
+    pub aim_moved_deg: f32,
+    /// A set lineup, and how sure (0-1).
+    pub set: bool,
+    pub set_score: f32,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -142,6 +183,8 @@ pub struct DPlayer {
     pub aim: Aim,
     pub utility: Utility,
     pub activity: Activity,
+    #[serde(default)]
+    pub trades: Trades,
     /// The stats as the match page shows them (see [`STATS`]); missing when there's no sample.
     #[serde(default)]
     pub stats: std::collections::BTreeMap<String, f64>,
@@ -178,6 +221,12 @@ pub const STATS: &[(&str, bool)] = &[
     ("shots", false),
     ("wasted_magazine", true),
     ("rounds_survived_pct", false),
+    ("trade_kill_opps", false),
+    ("trade_kill_attempt_pct", false),
+    ("trade_kill_success_pct", false),
+    ("traded_death_opps", false),
+    ("traded_death_attempt_pct", false),
+    ("traded_death_success_pct", false),
 ];
 
 /// Minimum sample before a rate is shown (shots, engagements, grenades).
@@ -185,7 +234,7 @@ const MIN_SAMPLE: u32 = 5;
 
 impl DPlayer {
     fn compute_stats(&mut self) {
-        let (a, u, ac) = (&self.aim, &self.utility, &self.activity);
+        let (a, u, ac, tr) = (&self.aim, &self.utility, &self.activity, &self.trades);
         let mut s = std::collections::BTreeMap::new();
         let mut rate = |k: &str, num: u32, den: u32, min: u32| {
             if den >= min && den > 0 {
@@ -205,6 +254,10 @@ impl DPlayer {
         rate("flash_assist_pct", u.flash_assists, u.flashes, 1);
         rate("wasted_magazine", ac.wasted_bullets, ac.magazine_bullets, 1);
         rate("rounds_survived_pct", ac.rounds_survived, ac.rounds, 1);
+        rate("trade_kill_attempt_pct", tr.kill_attempts, tr.kill_opps, 1);
+        rate("trade_kill_success_pct", tr.kill_success, tr.kill_attempts, 1);
+        rate("traded_death_attempt_pct", tr.death_attempts, tr.death_opps, 1);
+        rate("traded_death_success_pct", tr.death_success, tr.death_attempts, 1);
         for (k, v, n) in [("ttd_ms", a.ttd_ms, a.ttd_n), ("ttk_ms", a.ttk_ms, a.ttk_n), ("crosshair_deg", a.crosshair_deg, a.crosshair_n)] {
             if let (Some(v), true) = (v, n >= 3) {
                 s.insert(k.into(), v);
@@ -229,6 +282,8 @@ impl DPlayer {
         put("molotov_damage", Some(ac.molotov_damage as f64));
         put("enemies_flashed", Some(ac.enemies_flashed as f64));
         put("shots", Some(ac.shots as f64));
+        put("trade_kill_opps", Some(tr.kill_opps as f64));
+        put("traded_death_opps", Some(tr.death_opps as f64));
         self.stats = s;
     }
 }
@@ -319,12 +374,21 @@ pub fn write_benchmarks(root: &std::path::Path, me: Option<u64>) -> Result<()> {
     let mut values: HashMap<&str, Vec<f64>> = HashMap::new();
     let mut mine: HashMap<String, std::collections::BTreeMap<String, f64>> = HashMap::new();
     let me_s = me.map(|m| m.to_string()).unwrap_or_default();
+    let mut recoil: std::collections::BTreeMap<String, Vec<[f64; 3]>> = std::collections::BTreeMap::new();
     for f in std::fs::read_dir(root.join("matches"))?.flatten() {
         let p = f.path();
         if !p.to_string_lossy().ends_with(".details.json") {
             continue;
         }
         let Ok(d) = serde_json::from_str::<MatchDetails>(&std::fs::read_to_string(&p)?) else { continue };
+        for (w, row) in &d.recoil {
+            let sum = recoil.entry(w.clone()).or_insert_with(|| vec![[0.0; 3]; RECOIL_BULLETS]);
+            for (s, b) in sum.iter_mut().zip(row) {
+                s[0] += b[0] as f64;
+                s[1] += b[1] as f64;
+                s[2] += b[2] as f64;
+            }
+        }
         for pl in &d.players {
             for (k, _) in STATS {
                 if let Some(v) = pl.stats.get(*k) {
@@ -373,6 +437,17 @@ pub fn write_benchmarks(root: &std::path::Path, me: Option<u64>) -> Result<()> {
         out.insert(k.to_string(), Benchmark { n, mean, sd, quantiles, lower_is_better: *lower });
     }
     std::fs::write(root.join("benchmarks.json"), serde_json::to_string(&out)?)?;
+    // Reference spray patterns: average aim punch (pitch, yaw) per bullet, while 5+ sprays reach it.
+    let patterns: std::collections::BTreeMap<String, Vec<[f64; 2]>> = recoil
+        .into_iter()
+        .map(|(w, row)| {
+            let pts: Vec<[f64; 2]> =
+                row.iter().take_while(|b| b[2] >= 5.0).map(|b| [((b[0] / b[2]) * 1000.0).round() / 1000.0, ((b[1] / b[2]) * 1000.0).round() / 1000.0]).collect();
+            (w, pts)
+        })
+        .filter(|(_, pts)| pts.len() >= 3)
+        .collect();
+    std::fs::write(root.join("recoil.json"), serde_json::to_string(&patterns)?)?;
     Ok(())
 }
 
@@ -440,6 +515,22 @@ pub struct Utility {
     pub deaths: u32,
     pub rounds: u32,
 }
+
+/// Trading, like Leetify's Trades tab. When a teammate died: were you close enough to trade the
+/// killer (an opportunity), did you hit them within 5 s (an attempt), did you kill them (a
+/// success). The same for your own deaths, from your teammates' side.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Trades {
+    pub kill_opps: u32,
+    pub kill_attempts: u32,
+    pub kill_success: u32,
+    pub death_opps: u32,
+    pub death_attempts: u32,
+    pub death_success: u32,
+}
+
+/// A teammate this close (units, on the map) to the killer when a player died could trade them.
+const TRADE_RANGE: f64 = 1000.0;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Activity {
@@ -786,18 +877,109 @@ pub fn build(demo: &[u8], m: &Match, a: &Analysis, me: u64) -> Result<MatchDetai
     for k in &m.kills {
         state_ticks.insert(k.tick - 2);
     }
+    // Recoil before each spray bullet (the punch it fired with).
+    for list in shots.values() {
+        for s in list.iter().filter(|s| s.spray) {
+            state_ticks.insert(s.tick - 1);
+        }
+    }
     for r in &m.reloads {
         state_ticks.insert(r.tick);
+    }
+    // Grenade throws: the release, the second before it (standing still?) and the aim settling.
+    let kind_of = |w: &str| match w.trim_start_matches("weapon_") {
+        "smokegrenade" => Some(GrenadeKind::Smoke),
+        "molotov" | "incgrenade" => Some(GrenadeKind::Molotov),
+        "flashbang" => Some(GrenadeKind::Flash),
+        "hegrenade" => Some(GrenadeKind::He),
+        _ => None,
+    };
+    let throw_events: Vec<(&crate::model::Shot, GrenadeKind)> = m.shots.iter().filter_map(|s| kind_of(&s.weapon).map(|k| (s, k))).collect();
+    for (s, _) in &throw_events {
+        for d in (0..=64).step_by(4) {
+            state_ticks.insert(s.tick - d);
+        }
+        state_ticks.insert(s.tick - 1);
+        state_ticks.insert(s.tick - 2);
     }
     let mut state_ticks: Vec<i32> = state_ticks.into_iter().filter(|t| *t > 0).collect();
     state_ticks.sort_unstable();
     let state =
-        raw::players_values(demo, &["X", "Y", "pitch", "yaw", "duck_amount", "is_airborne", "inventory", "active_weapon_ammo"], &state_ticks)?;
+        raw::players_values(demo, &["X", "Y", "Z", "pitch", "yaw", "duck_amount", "is_airborne", "buttons", "inventory", "active_weapon_ammo", "aim_punch_angle"], &state_ticks)?;
     let num = |s: u64, t: i32, k: &str| match state.get(&(s, t)).and_then(|v| v.get(k)) {
         Some(Val::Num(x)) => Some(*x),
         _ => None,
     };
     let angles = |s: u64, t: i32| Some((num(s, t, "pitch")?, num(s, t, "yaw")?));
+
+    // ---- Recoil pattern (sprays from a reset, where the demo records the aim punch) -------------------
+    let mut recoil: std::collections::BTreeMap<String, Vec<[f32; 3]>> = std::collections::BTreeMap::new();
+    for (p, list) in &shots {
+        let mut i = 0;
+        while i < list.len() {
+            if !(list[i].spray && list[i].first) {
+                i += 1;
+                continue;
+            }
+            let start = i;
+            while i + 1 < list.len() && list[i + 1].spray && !list[i + 1].first && list[i + 1].weapon == list[start].weapon && list[i + 1].tick - list[i].tick <= SPRAY_GAP_TICKS {
+                i += 1;
+            }
+            for (k, s) in list[start..=i].iter().take(RECOIL_BULLETS).enumerate() {
+                // The first bullet of a fresh spray has no recoil (the demo still shows the last
+                // spray's punch until the next shot updates it).
+                let punch = if k == 0 { Some((0.0, 0.0)) } else { num(*p, s.tick - 1, "aim_punch_angle_0").zip(num(*p, s.tick - 1, "aim_punch_angle_1")) };
+                let Some((pp, py)) = punch else { continue };
+                let row = recoil.entry(s.weapon.clone()).or_insert_with(|| vec![[0.0; 3]; RECOIL_BULLETS]);
+                row[k][0] += pp as f32;
+                row[k][1] += py as f32;
+                row[k][2] += 1.0;
+            }
+            i += 1;
+        }
+    }
+    // Demos without the aim punch read it as 0 throughout: no pattern from those.
+    recoil.retain(|_, row| row.iter().any(|b| b[0] != 0.0 || b[1] != 0.0));
+
+    // ---- Trades ----------------------------------------------------------------------------------------
+    let window = crate::analysis::TRADE_WINDOW_TICKS;
+    let mut trades: HashMap<u64, Trades> = HashMap::new();
+    let mut died_at: HashMap<(usize, u64), i32> = HashMap::new();
+    for k in &m.kills {
+        died_at.entry((k.round, k.victim)).or_insert(k.tick);
+    }
+    for k in &m.kills {
+        let Some(e) = k.attacker else { continue };
+        if !is_enemy_kill(m, k.attacker, k.victim) {
+            continue;
+        }
+        let (v, t0) = (k.victim, k.tick - 2);
+        let Some(epos) = num(e, t0, "X").zip(num(e, t0, "Y")) else { continue };
+        let in_window = |tick: i32| tick > k.tick && tick - k.tick <= window;
+        let (mut opp, mut attempt, mut success) = (false, false, false);
+        for p in &m.players {
+            let t = p.steamid;
+            if t == v || m.team_of(t) != m.team_of(v) || died_at.get(&(k.round, t)).is_some_and(|&d| d <= k.tick) {
+                continue;
+            }
+            let killed = m.kills.iter().any(|x| x.attacker == Some(t) && x.victim == e && in_window(x.tick));
+            let hit = killed || m.damages.iter().any(|d| d.attacker == Some(t) && d.victim == e && d.health_removed > 0 && in_window(d.tick));
+            // Close enough, or they got to the killer anyway.
+            let near = num(t, t0, "X").zip(num(t, t0, "Y")).is_some_and(|q| (q.0 - epos.0).hypot(q.1 - epos.1) <= TRADE_RANGE);
+            if !(near || hit) {
+                continue;
+            }
+            let tr = trades.entry(t).or_default();
+            tr.kill_opps += 1;
+            tr.kill_attempts += hit as u32;
+            tr.kill_success += killed as u32;
+            (opp, attempt, success) = (true, attempt || hit, success || killed);
+        }
+        let tr = trades.entry(v).or_default();
+        tr.death_opps += opp as u32;
+        tr.death_attempts += attempt as u32;
+        tr.death_success += success as u32;
+    }
 
     // ---- Per player ----------------------------------------------------------------------------------
     let pistols_or_snipers = |w: &str| matches!(weapon_class(w), "shotgun" | "awp" | "scout" | "auto");
@@ -940,12 +1122,120 @@ pub fn build(demo: &[u8], m: &Match, a: &Analysis, me: u64) -> Result<MatchDetai
         }
         act.rounds_survived = (0..m.rounds.len()).filter(|r| !a.rounds[*r].died.contains(&s)).count() as u32;
 
-        let mut dp = DPlayer { steamid: sid(s), aim, utility: util, activity: act, stats: Default::default() };
+        let mut dp = DPlayer { steamid: sid(s), aim, utility: util, activity: act, trades: trades.remove(&s).unwrap_or_default(), stats: Default::default() };
         dp.compute_stats();
         players.push(dp);
     }
 
-    Ok(MatchDetails { version: VERSION, rounds, kills, clutches, players, grenades })
+    // ---- Lineups -------------------------------------------------------------------------------------
+    let mut throws = vec![];
+    let mut used: HashSet<usize> = HashSet::new();
+    for (s, kind) in &throw_events {
+        // The detonation this throw caused: the same player's next one of that kind within 12 s.
+        let Some((gi, g)) = m
+            .grenades
+            .iter()
+            .enumerate()
+            .filter(|(i, g)| !used.contains(i) && g.player == s.player && g.kind == *kind && g.tick >= s.tick && g.tick - s.tick <= (12.0 * TICKRATE) as i32)
+            .min_by_key(|(_, g)| g.tick)
+        else {
+            continue;
+        };
+        used.insert(gi);
+        let p = s.player;
+        let (Some(x), Some(y), Some(z)) = (num(p, s.tick, "X"), num(p, s.tick, "Y"), num(p, s.tick, "Z")) else { continue };
+        let (pitch, yaw) = angles(p, s.tick).unwrap_or((0.0, 0.0));
+        let speed_at = |t: i32| -> Option<f64> {
+            let (a, b) = ((num(p, t, "X")?, num(p, t, "Y")?), (num(p, t - 1, "X")?, num(p, t - 1, "Y")?));
+            Some((a.0 - b.0).hypot(a.1 - b.1) * TICKRATE)
+        };
+        let pos = |t: i32| Some((num(p, t, "X")?, num(p, t, "Y")?));
+        // Standing still: how far back (in 4-tick steps, up to a second) the position barely moved.
+        let mut still = 0;
+        for k in 1..=16 {
+            match (pos(s.tick - 4 * (k - 1)).or(pos(s.tick - 2)), pos(s.tick - 4 * k)) {
+                (Some(a), Some(b)) if (a.0 - b.0).hypot(a.1 - b.1) < 3.0 => still = k,
+                _ => break,
+            }
+        }
+        // A jump-throw from a standstill: in the air at release, but stood still before jumping.
+        let airborne = num(p, s.tick, "is_airborne").unwrap_or(0.0) > 0.5;
+        if airborne && still == 0 {
+            let mut k0 = 0;
+            for k in 1..=16 {
+                if pos(s.tick - 4 * k).zip(pos(s.tick - 4 * (k + 1))).is_some_and(|(a, b)| (a.0 - b.0).hypot(a.1 - b.1) < 3.0) {
+                    k0 = k;
+                    break;
+                }
+            }
+            if k0 > 0 && k0 <= 6 {
+                still = (1..=16).take_while(|k| pos(s.tick - 4 * (k0 + k - 1)).zip(pos(s.tick - 4 * (k0 + k))).is_some_and(|(a, b)| (a.0 - b.0).hypot(a.1 - b.1) < 3.0)).count() as i32;
+            }
+        }
+        let still_s = still as f32 * 4.0 / TICKRATE as f32;
+        let aim_moved = match (angles(p, s.tick - 16), angles(p, s.tick - 2)) {
+            (Some(a), Some(b)) => view_angle(a, b),
+            _ => 99.0,
+        };
+        let speed = speed_at(s.tick).or_else(|| speed_at(s.tick - 1)).unwrap_or(0.0);
+        let duck = num(p, s.tick, "duck_amount").unwrap_or(0.0);
+        let buttons = num(p, s.tick - 2, "buttons").or_else(|| num(p, s.tick - 1, "buttons")).unwrap_or(0.0) as u64;
+        let technique = if airborne {
+            "jump"
+        } else if duck > 0.9 {
+            "crouch"
+        } else if speed < 10.0 {
+            "stand"
+        } else if speed < 135.0 {
+            "walk"
+        } else {
+            "run"
+        };
+        let click = match (buttons & 1 != 0, buttons & (1 << 11) != 0) {
+            (true, true) => "both",
+            (false, true) => "right",
+            _ => "left",
+        };
+        let dist = ((g.xy[0] as f64) - x).hypot((g.xy[1] as f64) - y);
+        let t = secs(s.round, s.tick);
+        // Set lineup: lined up (stood still, aim held on a spot) and thrown a fair way. Early in the
+        // round or with teammates' grenades (an execute) makes it likelier.
+        let teammates_nades = throw_events
+            .iter()
+            .filter(|(o, _)| o.player != p && m.team_of(o.player) == m.team_of(p) && (o.tick - s.tick).abs() <= (3.0 * TICKRATE) as i32)
+            .count();
+        let mut score = 0.0f32;
+        score += (still_s / 0.5).min(1.0) * 0.4;
+        score += if aim_moved < 1.0 { 0.3 } else if aim_moved < 2.5 { 0.15 } else { 0.0 };
+        score += if dist > 900.0 { 0.2 } else if dist > 450.0 { 0.12 } else { 0.0 };
+        score += if t < 40.0 { 0.05 } else { 0.0 } + if teammates_nades >= 1 { 0.05 } else { 0.0 };
+        let set = score >= 0.6 && still_s >= 0.25 && aim_moved < 2.5 && technique != "run" && technique != "walk";
+        throws.push(DThrow {
+            round: m.rounds[s.round].number,
+            t,
+            player: sid(p),
+            side: m.side_in_round(p, s.round).map(side_str).unwrap_or_default(),
+            kind: match kind {
+                GrenadeKind::He => "he",
+                GrenadeKind::Flash => "flash",
+                GrenadeKind::Smoke => "smoke",
+                GrenadeKind::Molotov => "molotov",
+            }
+            .into(),
+            from: [x as f32, y as f32, z as f32],
+            pitch: pitch as f32,
+            yaw: yaw as f32,
+            to: g.xy,
+            technique: technique.into(),
+            click: click.into(),
+            still_s,
+            aim_moved_deg: (aim_moved * 10.0).round() as f32 / 10.0,
+            set,
+            set_score: (score * 100.0).round() / 100.0,
+        });
+    }
+
+    Ok(MatchDetails { version: VERSION, rounds, kills, clutches, players, grenades, throws, recoil })
 }
 
 /// Where a match's details live.
@@ -966,9 +1256,85 @@ pub fn stale(root: &std::path::Path, id: &str) -> bool {
         .is_none_or(|v| v.version < VERSION)
 }
 
-/// Builds and saves a match's details.
+/// Builds and saves a match's details and its 2D replay.
 pub fn write(root: &std::path::Path, id: &str, demo: &[u8], m: &Match, a: &Analysis, me: u64) -> Result<()> {
     let d = build(demo, m, a, me)?;
+    if let Err(e) = write_replay(root, id, demo, m) {
+        eprintln!("replay {id}: {e:#}");
+    }
     std::fs::write(path(root, id), serde_json::to_string(&d)?)?;
+    Ok(())
+}
+
+/// Positions are sampled every this many ticks for the 2D replay (8 a second).
+pub const REPLAY_STEP: i32 = 8;
+
+/// Everyone's position, view direction and health through each round, for the 2D replay
+/// (`matches/<id>.replay.json.gz`). Frames hold `[x, y, yaw, hp]` for each player in `players`
+/// order, every `step` ticks from `start`; hp 0 = dead.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Replay {
+    pub step: i32,
+    pub players: Vec<String>,
+    pub rounds: Vec<ReplayRound>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ReplayRound {
+    pub number: u32,
+    pub start: i32,
+    pub frames: Vec<Vec<i32>>,
+}
+
+pub fn build_replay(demo: &[u8], m: &Match) -> Result<Replay> {
+    let mut ticks = vec![];
+    let spans: Vec<(i32, i32)> = m
+        .rounds
+        .iter()
+        .map(|r| {
+            let start = r.live_tick - r.live_tick.rem_euclid(REPLAY_STEP);
+            (start, r.end_tick + (3.0 * TICKRATE) as i32)
+        })
+        .collect();
+    for &(a, b) in &spans {
+        ticks.extend((a..=b).step_by(REPLAY_STEP as usize));
+    }
+    let vals = raw::players_values(demo, &["X", "Y", "yaw", "health"], &ticks)?;
+    let num = |s: u64, t: i32, k: &str| match vals.get(&(s, t)).and_then(|v| v.get(k)) {
+        Some(Val::Num(x)) => Some(*x),
+        _ => None,
+    };
+    let rounds = m
+        .rounds
+        .iter()
+        .zip(&spans)
+        .map(|(r, &(a, b))| ReplayRound {
+            number: r.number,
+            start: a,
+            frames: (a..=b)
+                .step_by(REPLAY_STEP as usize)
+                .map(|t| {
+                    m.players
+                        .iter()
+                        .flat_map(|p| {
+                            let s = p.steamid;
+                            let hp = num(s, t, "health").unwrap_or(0.0).max(0.0);
+                            [num(s, t, "X").unwrap_or(0.0).round() as i32, num(s, t, "Y").unwrap_or(0.0).round() as i32, num(s, t, "yaw").unwrap_or(0.0).round() as i32, hp as i32]
+                        })
+                        .collect()
+                })
+                .collect(),
+        })
+        .collect();
+    Ok(Replay { step: REPLAY_STEP, players: m.players.iter().map(|p| sid(p.steamid)).collect(), rounds })
+}
+
+pub fn write_replay(root: &std::path::Path, id: &str, demo: &[u8], m: &Match) -> Result<()> {
+    use std::io::Write as _;
+    let r = build_replay(demo, m)?;
+    let file = std::fs::File::create(root.join("matches").join(format!("{id}.replay.json.gz")))?;
+    let mut gz = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+    gz.write_all(serde_json::to_string(&r)?.as_bytes())?;
+    gz.finish()?;
     Ok(())
 }

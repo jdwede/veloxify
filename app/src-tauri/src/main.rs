@@ -6,6 +6,7 @@ mod clips;
 mod demos;
 mod faceit;
 mod mapicons;
+mod players;
 mod practice;
 mod settings;
 mod system;
@@ -119,6 +120,8 @@ fn get_settings(state: State<AppState>) -> SettingsView {
 struct SettingsUpdate {
     watch_dirs: Vec<PathBuf>,
     auto_render: bool,
+    #[serde(default)]
+    auto_lowlights: bool,
     faceit_enabled: bool,
     faceit_nickname: String,
     selectivity: String,
@@ -140,6 +143,7 @@ fn save_settings(state: State<AppState>, update: SettingsUpdate) -> Result<(), S
     let faceit_changed = s.faceit_enabled != update.faceit_enabled || s.faceit_nickname.trim() != update.faceit_nickname.trim();
     s.watch_dirs = update.watch_dirs;
     s.auto_render = update.auto_render;
+    s.auto_lowlights = update.auto_lowlights;
     s.faceit_enabled = update.faceit_enabled;
     s.faceit_nickname = update.faceit_nickname.trim().to_string();
     s.selectivity = update.selectivity;
@@ -369,11 +373,29 @@ async fn launch_practice(app: tauri::AppHandle, launch: practice::Launch) -> Res
 #[tauri::command]
 fn open_link(url: String) -> Result<(), String> {
     const ALLOWED: &[&str] = &["https://warmupserver.net/"];
-    if !ALLOWED.iter().any(|a| url == *a) {
-        return Err("not a Veloxify practice link".into());
+    // Steam profiles: https://steamcommunity.com/profiles/<steamid64>
+    let steam_profile = url
+        .strip_prefix("https://steamcommunity.com/profiles/")
+        .is_some_and(|id| !id.is_empty() && id.len() <= 20 && id.chars().all(|c| c.is_ascii_digit()));
+    if !ALLOWED.iter().any(|a| url == *a) && !steam_profile {
+        return Err("not a link Veloxify opens".into());
     }
     std::process::Command::new("rundll32").args(["url.dll,FileProtocolHandler", &url]).spawn().map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// Steam avatar URLs for these players (cached; fetched off the UI thread).
+#[tauri::command]
+async fn player_avatars(state: State<'_, AppState>, ids: Vec<String>) -> Result<std::collections::HashMap<String, String>, String> {
+    let lib = state.settings.lock().unwrap().library_dir.clone();
+    tauri::async_runtime::spawn_blocking(move || players::avatars(&lib, &ids)).await.map_err(|e| e.to_string())
+}
+
+/// Everyone's FACEIT ELO and level in a FACEIT match (cached).
+#[tauri::command]
+async fn faceit_roster(state: State<'_, AppState>, match_id: String) -> Result<std::collections::HashMap<String, players::FaceitPlayer>, String> {
+    let lib = state.settings.lock().unwrap().library_dir.clone();
+    tauri::async_runtime::spawn_blocking(move || players::faceit_roster(&lib, &match_id)).await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -453,6 +475,8 @@ fn main() {
             storage_usage,
             clean_up_storage,
             launch_practice,
+            player_avatars,
+            faceit_roster,
             save_practice,
             open_link
         ])
