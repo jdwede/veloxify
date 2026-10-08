@@ -20,6 +20,8 @@ tauri = { version = "2", features = ["tray-icon", "protocol-asset", "image-png"]
 tauri-plugin-notification = "2"
 tauri-plugin-dialog = "2"
 ureq = { version = "2", features = ["json"] }
+png = "0.17"
+tauri-plugin-single-instance = "2"
 cs2hl-core = { path = "../../crates/core" }
 cs2hl-render = { path = "../../crates/render" }
 

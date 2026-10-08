@@ -482,12 +482,8 @@ fn gun(weapon: &str) -> bool {
 /// Computes stats for every player. With `use_scoreboard`, the K/A/D, damage and other counters
 /// CS2 shows on its own scoreboard override the event-derived match totals, so they always match
 /// what the player saw in game (Valve's rules for edge cases like bomb deaths aren't public).
-pub fn player_stats(m: &Match, a: &Analysis, use_scoreboard: bool) -> Vec<PlayerStats> {
-    let mut pr: HashMap<(u64, usize), Counts> = HashMap::new();
-    let match_end_tick = m.rounds.last().map(|r| r.end_tick).unwrap_or(i32::MAX);
-    let pistols = crate::analysis::pistol_rounds(m);
-
-    // Each player's equipment value per round, as CS2 reports it on kills they were part of.
+/// Each player's equipment value per round, as CS2 reports it on kills they were part of.
+fn equip_map(m: &Match) -> HashMap<(u64, usize), u32> {
     let mut equip: HashMap<(u64, usize), u32> = HashMap::new();
     for k in &m.kills {
         if let (Some(att), Some(v)) = (k.attacker, k.attacker_equip_value) {
@@ -499,6 +495,21 @@ pub fn player_stats(m: &Match, a: &Analysis, use_scoreboard: bool) -> Vec<Player
             *e = (*e).max(v);
         }
     }
+    equip
+}
+
+/// Round Swing per (player, round index): the change in the team's chance to win that round
+/// the player is credited with (0.25 = +25%).
+pub fn round_swings(m: &Match, a: &Analysis) -> HashMap<(u64, usize), f64> {
+    round_swing(m, a, &equip_map(m))
+}
+
+pub fn player_stats(m: &Match, a: &Analysis, use_scoreboard: bool) -> Vec<PlayerStats> {
+    let mut pr: HashMap<(u64, usize), Counts> = HashMap::new();
+    let match_end_tick = m.rounds.last().map(|r| r.end_tick).unwrap_or(i32::MAX);
+    let pistols = crate::analysis::pistol_rounds(m);
+
+    let equip = equip_map(m);
 
     for (i, k) in m.kills.iter().enumerate() {
         // Matches CS2's scoreboard: nothing after the match has ended counts, and neither do

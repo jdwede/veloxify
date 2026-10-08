@@ -508,7 +508,7 @@ async function renderMatchPage(view, id, tab) {
   if (!s) { view.innerHTML = `<a class="day-back" href="#/matches">◀ Match history</a><div class="empty">Match not found.</div>`; return; }
   const m = s.stats_only ? null : await loadMatch(id);
   const tabs = [["overview", "Overview"]];
-  if (m) tabs.push(["aim", "Aim"], ["utility", "Utility"], ["activity", "Activity"], ["opening", "Opening Duels"], ["clutches", "Clutches"], ["ratings", "Ratings"],
+  if (m) tabs.push(["timeline", "Timeline"], ["aim", "Aim"], ["utility", "Utility"], ["activity", "Activity"], ["opening", "Opening Duels"], ["clutches", "Clutches"], ["ratings", "Ratings"],
     ["highlights", `Highlights${m.highlights.length ? ` (${m.highlights.length})` : ""}`], ["lowlights", `Lowlights${(m.lowlights || []).length ? ` (${m.lowlights.length})` : ""}`]);
   if (!tabs.some(([k]) => k === tab)) tab = "overview";
   const fm = s.faceit;
@@ -544,6 +544,7 @@ async function renderMatchPage(view, id, tab) {
   if (tab === "opening") return renderOpeningTab(body, m, id);
   if (tab === "clutches") return renderClutchTab(body, m, id);
   if (tab === "ratings") return renderRatingsTab(body, m, id);
+  if (tab === "timeline") return renderTimelineTab(body, m, id);
   body.innerHTML = `<div id="mp-summary"></div><div id="mp-board"></div>`;
   renderMatchScoreboard(body.querySelector("#mp-board"), m);
   await renderMatchSummary(body.querySelector("#mp-summary"), m, id);
@@ -1164,23 +1165,22 @@ function changeBars(points, { height = 120 }) {
     const yTop = up ? zero - h : zero;
     return `<g><title>${esc(p.long)}: ${p.value > 0 ? "+" : ""}${p.value} ELO</title>
       <rect x="${cx - bw / 2}" y="${yTop}" width="${bw}" height="${Math.max(1, h)}" rx="3" fill="${up ? WIN : LOSS}"/>
-      <text class="val" x="${cx}" y="${up ? yTop - 4 : yTop + h + 12}" text-anchor="middle">${p.value > 0 ? "+" : ""}${p.value}</text></g>`;
+      ${n <= 30 ? `<text class="val" x="${cx}" y="${up ? yTop - 4 : yTop + h + 12}" text-anchor="middle">${p.value > 0 ? "+" : ""}${p.value}</text>` : ""}</g>`;
   }).join("");
   return `<svg class="trend-svg" viewBox="0 0 ${W} ${H}" role="img" aria-label="ELO change"><line class="grid" x1="${L}" x2="${W - R}" y1="${zero}" y2="${zero}"/>${bars}</svg>`;
 }
 
-// FACEIT ELO per bucket: where you ended each one, and how much it moved.
-function eloPoints(buckets) {
-  const list = (state.faceit?.matches || []).filter((m) => m.elo).map((m) => ({ ts: m.finished_ts || m.started_ts, elo: m.elo })).sort((a, b) => a.ts - b.ts);
-  let prev = null;
-  for (const m of list) if (m.ts < buckets[0]?.from) prev = m.elo;
-  return buckets.map((b) => {
-    const inB = list.filter((m) => m.ts >= b.from && m.ts < b.to);
-    const end = inB.length ? inB[inB.length - 1].elo : null;
-    const change = end != null && prev != null ? end - prev : null;
-    if (end != null) prev = end;
-    return { ...b, value: end, change, n: inB.length, wins: 0 };
-  });
+// FACEIT ELO after every match in the period, oldest first (one dot per match).
+function eloMatches(from, to) {
+  return (state.faceit?.matches || [])
+    .filter((m) => m.elo && (m.finished_ts || m.started_ts) >= from && (m.finished_ts || m.started_ts) < to)
+    .sort((a, b) => (a.finished_ts || a.started_ts) - (b.finished_ts || b.started_ts))
+    .map((m) => {
+      const d = new Date((m.started_ts || m.finished_ts) * 1000);
+      const day = `${d.getDate()} ${MONTHS[d.getMonth()]}`;
+      const res = m.result === "win" ? "W" : m.result === "loss" ? "L" : "T";
+      return { label: day, long: `${mapName(m.map)} · ${day} ${fmtTime(d.toISOString())} · ${res} ${m.score_mine}-${m.score_theirs}`, value: m.elo, change: m.elo_delta ?? null, n: 1, wins: res === "W" ? 1 : 0 };
+    });
 }
 
 function metricOptions(selected) {
@@ -1199,8 +1199,8 @@ async function renderTrends(el) {
   const withData = pts.filter((p) => p.value != null);
   const per = { day: "day", week: "week", month: "month" }[unit];
   const change = withData.length >= 2 ? withData[withData.length - 1].value - withData[0].value : null;
-  const elo = eloPoints(buckets);
-  const hasElo = elo.some((p) => p.value != null);
+  const elo = buckets.length ? eloMatches(buckets[0].from, buckets[buckets.length - 1].to) : [];
+  const hasElo = elo.length > 0;
   el.innerHTML = `
     <section class="panel trends">
       <div class="panel-head"><div><div class="h3">Progress</div><div class="sub">${esc(metricLabel(trend.metric))} per ${per}${prof.source !== "all" ? ` · ${prof.source === "faceit" ? "FACEIT" : "Premier"} only` : ""}</div></div><span class="grow"></span>
@@ -1213,8 +1213,8 @@ async function renderTrends(el) {
       ${change != null ? `<div class="note">From ${esc(withData[0].long)} to ${esc(withData[withData.length - 1].long)}: <b class="${(lowerBetter ? change < 0 : change > 0) ? "up" : change === 0 ? "" : "down"}">${change > 0 ? "+" : ""}${fmt(change)}</b>. Each ${per} averages its matches, weighted by rounds. Dashed line: ${trend.metric === "rating3" ? "1.00 (average)" : trend.metric.startsWith("rating:") ? "50 (the average player in your library)" : "the average player in your library"}.</div>` : ""}
     </section>
     ${hasElo ? `<section class="panel trends">
-      <div class="panel-head"><div><div class="h3">FACEIT ELO</div><div class="sub">Where you ended each ${per}, and how much it moved</div></div></div>
-      <div class="trend-body">${lineChart(elo, { fmt: n0, baseline: null, tip: (p) => `${p.long}: ${p.value} ELO after ${p.n} match${p.n === 1 ? "" : "es"}${p.change != null ? ` (${p.change > 0 ? "+" : ""}${p.change})` : ""}` })}</div>
+      <div class="panel-head"><div><div class="h3">FACEIT ELO</div><div class="sub">Every match in this period: ${elo.length} game${elo.length === 1 ? "" : "s"}, ${(() => { const net = elo.reduce((a, p) => a + (p.change || 0), 0); return `${net > 0 ? "+" : ""}${net} ELO`; })()}</div></div></div>
+      <div class="trend-body">${lineChart(elo, { fmt: n0, baseline: null, tip: (p) => `${p.long} · ${p.value.toLocaleString("en-US")} ELO${p.change != null ? ` (${p.change > 0 ? "+" : ""}${p.change})` : ""}` })}</div>
       <div class="trend-body">${changeBars(elo.map((p) => ({ ...p, value: p.change })), {})}</div>
     </section>` : ""}`;
   el.querySelector("#trend-metric").onchange = (e) => { trend.metric = e.target.value; saveTrend(); renderTrends(el); };
@@ -1365,6 +1365,187 @@ function coreStatsOf(p) {
   if (openings) s.entry_success = (c.opening_kills * 100) / openings;
   if (c.deaths) s.traded_deaths_pct = (c.traded_deaths * 100) / c.deaths;
   return s;
+}
+
+// ---- match page: timeline events (FACEIT-style) ------------------------------------------------
+
+// CS2's own radar for a map and where game coordinates land on it (extracted by the app).
+async function loadRadar(map) {
+  state.radars = state.radars || new Map();
+  if (!state.radars.has(map)) {
+    let meta = null;
+    try {
+      const r = await fetch(assetUrl(`radars/${map}.json`), { cache: "no-store" });
+      if (r.ok) meta = await r.json();
+    } catch (e) { /* no radar */ }
+    state.radars.set(map, meta);
+  }
+  return state.radars.get(map);
+}
+
+const TEAM_COLOR = { mine: "var(--accent)", enemy: "#f0a030" };
+const ROUND_ICONS = {
+  kill: '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 2C7 2 3.5 5.6 3.5 10.2c0 2.6 1.2 4.6 3 5.9V19c0 .6.4 1 1 1h1.5v-2h2v2h2v-2h2v2H16.5c.6 0 1-.4 1-1v-2.9c1.8-1.3 3-3.3 3-5.9C20.5 5.6 17 2 12 2zm-3.2 11.3a2 2 0 110-4 2 2 0 010 4zm6.4 0a2 2 0 110-4 2 2 0 010 4z"/></svg>',
+  defuse: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 20l7-7M9 4l3 3-2 2 3 3 2-2 3 3"/><path d="M14 10l6-6"/></svg>',
+  bomb: '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M11 6a7 7 0 107 7 7 7 0 00-7-7zm7.6-2.6l-1.9 1.9 1.4 1.4 1.9-1.9zM14 3h2v2h-2z"/></svg>',
+  time: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l3 2M9 2h6"/></svg>',
+};
+// How a round ended, from CS2's round-end reason.
+function roundEnd(r) {
+  const why = (r.reason || "").toLowerCase();
+  if (why.includes("defused") || r.defused) return ["defuse", "Bomb defused"];
+  if (why.includes("bomb") || why.includes("target_bombed") || r.exploded) return ["bomb", "Bomb exploded"];
+  if (why.includes("saved") || why.includes("time")) return ["time", "Time ran out"];
+  return ["kill", "All enemies eliminated"];
+}
+const mmss = (t) => `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, "0")}s`;
+
+const timeline = { round: 1, tab: "kills", event: null, hidden: new Set(), zoom: 1, pan: [0, 0] };
+
+async function renderTimelineTab(body, m, id) {
+  const [d, radar] = await Promise.all([loadDetails(id), loadRadar(m.map)]);
+  if (!d) return noDetails(body);
+  if (timeline.matchId !== id) Object.assign(timeline, { matchId: id, round: 1, event: null, hidden: new Set(), zoom: 1, pan: [0, 0] });
+  const names = new Map(m.players.map((p) => [p.steamid, p.name]));
+  const team = new Map(m.players.map((p) => [p.steamid, p.side]));
+  const rounds = d.rounds;
+  const round = rounds.find((r) => r.number === timeline.round) || rounds[0];
+  const nr = round.number;
+
+  // Round strip: regulation halves of 12, then overtime halves of 3.
+  const halves = [];
+  for (const r of rounds) {
+    const h = r.number <= 12 ? "First half" : r.number <= 24 ? "Second half" : `Overtime ${Math.floor((r.number - 25) / 6) + 1} · half ${Math.floor(((r.number - 25) % 6) / 3) + 1}`;
+    if (!halves.length || halves[halves.length - 1].name !== h) halves.push({ name: h, rounds: [] });
+    halves[halves.length - 1].rounds.push(r);
+  }
+  const strip = halves.map((h) => {
+    const last = h.rounds[h.rounds.length - 1];
+    return `<div class="tl-half" style="flex:${h.rounds.length} 1 0"><div class="tl-half-head"><span>${esc(h.name.toUpperCase())}</span><b><i class="mine">${last.score_mine}</i>:<i class="enemy">${last.score_theirs}</i></b></div>
+      <div class="tl-tiles" style="grid-template-columns:repeat(${h.rounds.length},minmax(30px,1fr))">${h.rounds.map((r) => {
+        const [icon, why] = roundEnd(r);
+        return `<button class="tl-tile ${r.winner} ${r.number === nr ? "on" : ""}" data-round="${r.number}" title="Round ${r.number}: ${r.winner === "mine" ? "your team" : "enemy"} won (${why}) · ${r.score_mine}-${r.score_theirs}">
+          <b>${r.number}</b><span>${ROUND_ICONS[icon]}</span></button>`;
+      }).join("")}</div></div>`;
+  }).join(`<div class="tl-sep"></div>`);
+
+  // Teams with each player's round.
+  const rp = new Map((round.players || []).map((p) => [p.steamid, p]));
+  const sideOf = (side) => (side === "mine" ? round.mine_side : round.mine_side === "T" ? "CT" : "T");
+  const teamPanel = (side) => {
+    const won = round.winner === side;
+    const score = side === "mine" ? m.score_mine : m.score_theirs;
+    const players = m.players.filter((p) => p.side === side).sort((a, b) => (rp.get(b.steamid)?.swing || 0) - (rp.get(a.steamid)?.swing || 0));
+    return `<section class="tl-team ${side}">
+      <div class="tl-team-head"><span class="mp-badge ${won ? "win" : "loss"}">${won ? "W" : "L"}</span><b>${side === "mine" ? "My Team" : "Enemy Team"}</b>
+        <span class="tl-side ${sideOf(side) === "T" ? "t" : "ct"}">${sideOf(side)}</span><span class="grow"></span><em>${String(score).padStart(2, "0")}</em></div>
+      <table><thead><tr><th></th><th class="left">Players</th><th>Swing</th><th>DMG</th><th>K/D/A</th></tr></thead><tbody>
+      ${players.map((p) => {
+        const s = rp.get(p.steamid);
+        const sw = s ? s.swing : null;
+        return `<tr class="${p.steamid === state.index.me ? "me" : ""}"><td><input type="checkbox" data-player="${p.steamid}" ${timeline.hidden.has(p.steamid) ? "" : "checked"} aria-label="Show ${esc(p.name)} on the map"></td>
+          <td class="left">${esc(p.name)}</td>
+          <td class="${sw == null ? "" : sw > 0.05 ? "up" : sw < -0.05 ? "down" : ""}">${sw == null ? "–" : `${sw > 0 ? "+" : ""}${sw.toFixed(2)}%`}</td>
+          <td>${s ? s.damage : "–"}</td><td>${s ? `${s.kills}/${s.deaths}/${s.assists}` : "–"}</td></tr>`;
+      }).join("")}</tbody></table></section>`;
+  };
+
+  // Events this round (players unticked are left out).
+  const visible = (sid) => !timeline.hidden.has(sid);
+  const kills = d.kills.filter((k) => k.round === nr && !k.team_kill && (visible(k.attacker) || visible(k.victim)));
+  const nades = (d.grenades || []).filter((g) => g.round === nr && visible(g.player)).sort((a, b) => a.t - b.t);
+  const events = timeline.tab === "kills" ? kills : nades;
+  const sel = timeline.event != null && timeline.event < events.length ? timeline.event : null;
+
+  // Map overlay in radar pixels.
+  const size = radar?.size || 1024;
+  const at = (xy) => (radar && xy ? [(xy[0] - radar.pos_x) / radar.scale, (radar.pos_y - xy[1]) / radar.scale] : null);
+  const label = (x, y, text, color, dx) => {
+    const w = Math.max(40, text.length * 8.2 + 16), lx = dx > 0 ? x + 14 : x - 14 - w;
+    return `<g class="tl-label"><rect x="${lx}" y="${y - 13}" width="${w}" height="26" rx="5"/><text x="${lx + w / 2}" y="${y + 5}" text-anchor="middle" fill="${color}">${esc(text)}</text></g>`;
+  };
+  let overlay = "";
+  if (timeline.tab === "kills") {
+    kills.forEach((k, i) => {
+      if (sel != null && sel !== i) return;
+      const a = at(k.attacker_xy), v = at(k.victim_xy);
+      const ac = TEAM_COLOR[team.get(k.attacker)] || "#ccc", vc = TEAM_COLOR[team.get(k.victim)] || "#ccc";
+      if (a && v) overlay += `<line class="tl-shot" x1="${a[0]}" y1="${a[1]}" x2="${v[0]}" y2="${v[1]}"/>`;
+      if (a) overlay += `<circle class="tl-killer" cx="${a[0]}" cy="${a[1]}" r="9" fill="${ac}"/>`;
+      if (v) overlay += `<g class="tl-victim" stroke="${vc}"><path d="M${v[0] - 7},${v[1] - 7}L${v[0] + 7},${v[1] + 7}M${v[0] + 7},${v[1] - 7}L${v[0] - 7},${v[1] + 7}"/></g>`;
+      if (sel === i) {
+        const dir = a && v ? Math.sign(a[0] - v[0]) || 1 : 1;
+        if (a) overlay += label(a[0], a[1], names.get(k.attacker) || "", ac, dir);
+        if (v) overlay += label(v[0], v[1], names.get(k.victim) || "", vc, -dir);
+      }
+    });
+  } else {
+    const R = { smoke: 144, molotov: 120, flash: 28, he: 60 };
+    nades.forEach((g, i) => {
+      if (sel != null && sel !== i) return;
+      const p = at(g.xy);
+      if (!p) return;
+      const r = R[g.kind] / (radar?.scale || 5);
+      overlay += `<circle class="tl-nade ${g.kind}" cx="${p[0]}" cy="${p[1]}" r="${r}"/>`;
+      if (sel === i) overlay += label(p[0], p[1], names.get(g.player) || "", TEAM_COLOR[team.get(g.player)] || "#ccc", 1);
+    });
+  }
+  const NADE = { smoke: ["smokegrenade", "Smoke"], molotov: ["molotov", "Molotov"], flash: ["flashbang", "Flashbang"], he: ["hegrenade", "HE grenade"] };
+  const who = (sid) => `<b style="color:${TEAM_COLOR[team.get(sid)] || "var(--text)"}">${esc(names.get(sid) || "World")}</b>`;
+  const list = timeline.tab === "kills"
+    ? kills.map((k, i) => `<button class="tl-ev ${sel === i ? "on" : ""}" data-ev="${i}"><div>${who(k.attacker)}${weaponIcon(k.weapon)}${k.headshot ? `<span class="hs" title="Headshot">◎</span>` : ""}${who(k.victim)}</div><span>${mmss(k.t)}</span></button>`).join("")
+    : nades.map((g, i) => `<button class="tl-ev ${sel === i ? "on" : ""}" data-ev="${i}"><div>${who(g.player)}${weaponIcon(NADE[g.kind][0])}<span class="sub">${NADE[g.kind][1]}</span></div><span>${mmss(g.t)}</span></button>`).join("");
+  const clip = m.highlights.find((h) => h.round === nr && h.clip);
+  const [endIcon, endWhy] = roundEnd(round);
+
+  body.innerHTML = `
+    <section class="tl-strip">${strip}</section>
+    <div class="tl-bar"><b>Round ${nr}</b><span class="sub">${round.winner === "mine" ? "Your team" : "Enemy team"} won · ${endWhy}${round.plant ? ` · bomb planted at ${esc(round.plant[1].replace("Bombsite", "site "))} (${mmss(round.plant[0])})` : ""}</span><span class="grow"></span>
+      ${clip ? `<button class="btn primary" id="tl-clip">▶ Watch ${esc(clip.title)}</button>` : ""}</div>
+    <div class="tl-main">
+      <div class="tl-teams">${teamPanel(round.winner === "mine" ? "mine" : "enemy")}${teamPanel(round.winner === "mine" ? "enemy" : "mine")}</div>
+      <section class="tl-map">
+        <input class="tl-zoom" type="range" min="1" max="3" step="0.1" value="${timeline.zoom}" aria-label="Zoom" orient="vertical">
+        <div class="tl-viewport">
+          <div class="tl-canvas" style="transform:translate(${timeline.pan[0]}px,${timeline.pan[1]}px) scale(${timeline.zoom})">
+            ${radar ? `<img src="${assetUrl(`radars/${m.map}.png`)}" alt="${esc(mapName(m.map))} radar" draggable="false">` : `<div class="tl-noradar">Radar not available for ${esc(mapName(m.map))} yet</div>`}
+            <svg viewBox="0 0 ${size} ${size}" aria-hidden="true">${overlay}</svg>
+          </div>
+        </div>
+      </section>
+      <section class="tl-events">
+        <div class="tl-tabs"><button data-tltab="kills" class="${timeline.tab === "kills" ? "on" : ""}">Kills</button><button data-tltab="utility" class="${timeline.tab === "utility" ? "on" : ""}">Utility</button></div>
+        <button class="tl-ev all ${sel == null ? "on" : ""}" data-ev="all"><b>Entire Round</b><span>${events.length} event${events.length === 1 ? "" : "s"}</span></button>
+        <div class="tl-list">${list || `<div class="empty small">Nothing this round.</div>`}</div>
+      </section>
+    </div>`;
+
+  const rerender = () => renderTimelineTab(body, m, id);
+  body.querySelectorAll("[data-round]").forEach((b) => (b.onclick = () => { timeline.round = Number(b.dataset.round); timeline.event = null; rerender(); }));
+  body.querySelectorAll("[data-tltab]").forEach((b) => (b.onclick = () => { timeline.tab = b.dataset.tltab; timeline.event = null; rerender(); }));
+  body.querySelectorAll("[data-ev]").forEach((b) => (b.onclick = () => { timeline.event = b.dataset.ev === "all" ? null : Number(b.dataset.ev); rerender(); }));
+  body.querySelectorAll("[data-player]").forEach((c) => (c.onchange = () => {
+    if (c.checked) timeline.hidden.delete(c.dataset.player); else timeline.hidden.add(c.dataset.player);
+    timeline.event = null;
+    rerender();
+  }));
+  body.querySelector("#tl-clip")?.addEventListener("click", () => {
+    const list = m.highlights.filter((h) => h.clip).map((h) => ({ ...h, name: names.get(h.player), match: m }));
+    state.playlist = list;
+    play(list.findIndex((h) => h.id === clip.id));
+  });
+  // Zoom with the slider or the wheel; drag to move around.
+  const canvas = body.querySelector(".tl-canvas"), zoom = body.querySelector(".tl-zoom"), vp = body.querySelector(".tl-viewport");
+  const apply = () => { canvas.style.transform = `translate(${timeline.pan[0]}px,${timeline.pan[1]}px) scale(${timeline.zoom})`; zoom.value = timeline.zoom; };
+  zoom.oninput = () => { timeline.zoom = Number(zoom.value); if (timeline.zoom === 1) timeline.pan = [0, 0]; apply(); };
+  vp.onwheel = (e) => { e.preventDefault(); timeline.zoom = Math.max(1, Math.min(3, timeline.zoom - Math.sign(e.deltaY) * 0.2)); if (timeline.zoom === 1) timeline.pan = [0, 0]; apply(); };
+  vp.onpointerdown = (e) => {
+    if (timeline.zoom === 1) return;
+    const start = [e.clientX - timeline.pan[0], e.clientY - timeline.pan[1]];
+    vp.setPointerCapture(e.pointerId);
+    vp.onpointermove = (ev) => { timeline.pan = [ev.clientX - start[0], ev.clientY - start[1]]; apply(); };
+    vp.onpointerup = () => { vp.onpointermove = null; };
+  };
 }
 
 // ---- highlights ---------------------------------------------------------------------------------

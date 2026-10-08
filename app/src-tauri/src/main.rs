@@ -399,6 +399,17 @@ fn show_main(app: &tauri::AppHandle) {
 }
 
 fn main() {
+    // `veloxify --extract-radars de_mirage de_dust2 ...`: write the radars into the library and
+    // report what happened (for troubleshooting), without starting the app.
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(i) = args.iter().position(|a| a == "--extract-radars") {
+        let lib = Settings::load().library_dir;
+        let maps: Vec<String> = args[i + 1..].to_vec();
+        let result = mapicons::extract_radars(&lib, &maps);
+        let _ = std::fs::write(lib.join("radars").join("extract.log"), format!("{result:?}
+"));
+        return;
+    }
     let settings = Arc::new(Mutex::new(Settings::load()));
     let status = Arc::new(Mutex::new(Status { state: "idle".into(), message: "Starting".into(), ..Default::default() }));
     let (tx, rx) = std::sync::mpsc::channel();
@@ -408,6 +419,9 @@ fn main() {
     let abort_worker = abort.clone();
 
     tauri::Builder::default()
+        // One Veloxify at a time (two would process the same library): opening it again just
+        // brings up the running one.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| show_main(app)))
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(std::sync::Arc::new(std::sync::Mutex::new(demos::Queue::default())))

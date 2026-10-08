@@ -838,6 +838,75 @@ input[type=color] { width: 44px; height: 30px; padding: 2px; background: var(--r
 .rb-add { padding: 8px 14px 16px; }
 @media (max-width: 900px) { .rb-grid { grid-template-columns: 1fr; } }
 
+/* ---- timeline events (FACEIT-style) ------------------------------------------------------- */
+.tl-strip { display: flex; align-items: stretch; gap: 14px; padding: 14px 16px; background: var(--card); border: 1px solid var(--line);
+  border-radius: var(--radius); overflow-x: auto; margin-bottom: 14px; }
+.tl-half-head { display: flex; justify-content: space-between; font-size: 11px; font-weight: 700; color: var(--muted); letter-spacing: 0.04em; margin-bottom: 8px; }
+.tl-half-head i { font-style: normal; }
+.tl-half-head .mine, .tl-tile.mine b { color: var(--accent); }
+.tl-half-head .enemy, .tl-tile.enemy b { color: #f0a030; }
+.tl-half { min-width: 0; }
+.tl-tiles { display: grid; gap: 4px; }
+.tl-tile { min-width: 0; display: flex; flex-direction: column; align-items: center; border: 1px solid transparent; border-radius: 4px;
+  background: var(--row); cursor: pointer; padding: 0; overflow: hidden; }
+.tl-tile b { display: block; width: 100%; padding: 5px 0; font-size: 14px; background: var(--row-hi); }
+.tl-tile span { padding: 6px 0 7px; color: var(--muted); }
+.tl-tile span svg { width: 18px; height: 18px; display: block; }
+.tl-tile:hover { border-color: var(--line-2); }
+.tl-tile.on { border-color: var(--text); }
+.tl-tile.on span { color: var(--text); }
+.tl-sep { width: 1px; background: var(--line-2); flex: none; }
+.tl-bar { display: flex; align-items: center; gap: 14px; padding: 12px 18px; background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); margin-bottom: 14px; }
+.tl-bar b { font-size: 16px; }
+.tl-main { display: grid; grid-template-columns: minmax(320px, 360px) 1fr minmax(220px, 250px); gap: 14px; align-items: start; }
+.tl-teams { display: grid; gap: 14px; }
+.tl-team { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
+.tl-team-head { display: flex; align-items: center; gap: 10px; padding: 12px 14px; box-shadow: inset -4px 0 0 var(--accent); }
+.tl-team.enemy .tl-team-head { box-shadow: inset -4px 0 0 #f0a030; }
+.tl-team-head .mp-badge { margin: 0; }
+.tl-team-head em { font-style: normal; font-size: 18px; font-weight: 800; color: var(--accent); }
+.tl-team.enemy .tl-team-head em { color: #f0a030; }
+.tl-side { font-size: 11px; font-weight: 800; padding: 2px 7px; border-radius: 10px; }
+.tl-side.t { background: color-mix(in srgb, var(--t) 25%, transparent); color: var(--t); }
+.tl-side.ct { background: color-mix(in srgb, var(--ct) 25%, transparent); color: var(--ct); }
+.tl-team table { width: 100%; border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; }
+.tl-team th { font-size: 12px; color: var(--muted); font-weight: 700; padding: 8px 6px; background: var(--head); text-align: center; }
+.tl-team td { padding: 8px 6px; border-top: 1px solid var(--line); text-align: center; font-weight: 600; }
+.tl-team .left { text-align: left; }
+.tl-team tr.me td { background: var(--row-hi); }
+.tl-team input[type=checkbox] { accent-color: var(--accent); }
+.tl-map { position: relative; background: #0b0b0b; border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
+.tl-viewport { aspect-ratio: 1; overflow: hidden; cursor: grab; touch-action: none; }
+.tl-canvas { position: relative; width: 100%; height: 100%; transform-origin: center; }
+.tl-canvas img, .tl-canvas svg { position: absolute; inset: 0; width: 100%; height: 100%; user-select: none; }
+.tl-noradar { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--faint); }
+.tl-zoom { position: absolute; z-index: 2; right: 12px; top: 14px; height: 90px; writing-mode: vertical-lr; direction: rtl; accent-color: var(--text); }
+.tl-shot { stroke: rgba(255, 255, 255, 0.55); stroke-width: 1.5; stroke-dasharray: 3 4; }
+.tl-killer { stroke: #0b0b0b; stroke-width: 2; }
+.tl-victim path { stroke-width: 3; stroke-linecap: round; }
+.tl-label rect { fill: rgba(20, 20, 20, 0.92); stroke: var(--line-2); }
+.tl-label text { font: 700 14px var(--font); }
+.tl-nade { stroke-width: 2; }
+.tl-nade.smoke { fill: rgba(200, 200, 200, 0.28); stroke: rgba(230, 230, 230, 0.7); }
+.tl-nade.molotov { fill: rgba(240, 110, 40, 0.3); stroke: #f06e28; }
+.tl-nade.flash { fill: rgba(255, 255, 255, 0.6); stroke: #fff; }
+.tl-nade.he { fill: rgba(226, 68, 95, 0.3); stroke: #e2445f; }
+.tl-events { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 10px; display: flex; flex-direction: column; gap: 6px; max-height: 740px; }
+.tl-tabs { display: flex; gap: 6px; justify-content: space-around; padding: 4px 0 8px; border-bottom: 1px solid var(--line); margin-bottom: 4px; }
+.tl-tabs button { background: none; border: 1px solid transparent; color: var(--muted); font-weight: 700; padding: 7px 14px; border-radius: var(--radius-sm); cursor: pointer; }
+.tl-tabs button.on { border-color: var(--text); color: var(--text); }
+.tl-list { display: flex; flex-direction: column; gap: 6px; overflow-y: auto; }
+.tl-ev { display: flex; flex-direction: column; align-items: flex-start; gap: 3px; width: 100%; padding: 9px 10px; background: var(--row); border: 1px solid var(--line);
+  border-radius: var(--radius-sm); cursor: pointer; text-align: left; font-size: 13px; }
+.tl-ev div { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.tl-ev .wicon { height: 15px; }
+.tl-ev > span { color: var(--muted); font-size: 12.5px; }
+.tl-ev .hs { color: var(--gold); font-weight: 800; }
+.tl-ev.all { flex-direction: row; justify-content: space-between; align-items: center; }
+.tl-ev:hover { background: var(--row-hi); }
+.tl-ev.on { border-color: var(--text); background: var(--row-hi); }
+@media (max-width: 1250px) { .tl-main { grid-template-columns: 1fr; } .tl-viewport { max-width: 720px; margin: 0 auto; } }
+
 /* ---- player modal ------------------------------------------------------------------------ */
 .player-modal { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.88); display: flex; align-items: center; justify-content: center; z-index: 50; }
 .player-modal[hidden] { display: none; }

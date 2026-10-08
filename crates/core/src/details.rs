@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
 /// Bumped whenever what's in a details file changes, so older ones are rebuilt.
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
 
 /// Spotted state is sampled every this many ticks.
 const SPOT_STEP: i32 = 2;
@@ -68,6 +68,21 @@ pub struct DRound {
     /// Average equipment value per team when the first kill happened (or round start), $.
     pub equip_mine: u32,
     pub equip_theirs: u32,
+    /// Every player's round: kills, deaths, assists, damage, Round Swing.
+    #[serde(default)]
+    pub players: Vec<DRoundPlayer>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DRoundPlayer {
+    pub steamid: String,
+    pub side: String,
+    pub kills: u32,
+    pub deaths: u32,
+    pub assists: u32,
+    pub damage: u32,
+    /// Change in the team's chance to win this round credited to the player, in % (+25.0).
+    pub swing: f64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -527,6 +542,7 @@ pub fn build(demo: &[u8], m: &Match, a: &Analysis, me: u64) -> Result<MatchDetai
     let secs = |r: usize, tick: i32| ((tick - m.rounds[r].live_tick) as f64 / TICKRATE).max(0.0) as f32;
 
     // ---- Rounds -------------------------------------------------------------------------------
+    let swings = crate::stats::round_swings(m, a);
     let mut rounds = vec![];
     let (mut sm, mut st) = (0, 0);
     for (r, round) in m.rounds.iter().enumerate() {
@@ -566,6 +582,23 @@ pub fn build(demo: &[u8], m: &Match, a: &Analysis, me: u64) -> Result<MatchDetai
             exploded,
             equip_mine: avg(my_team),
             equip_theirs: avg(other),
+            players: m
+                .players
+                .iter()
+                .map(|p| {
+                    let s = p.steamid;
+                    let in_round = |k: &&crate::model::Kill| k.round == r && k.tick <= round.end_tick;
+                    DRoundPlayer {
+                        steamid: sid(s),
+                        side: side_str(round.side_of(p.team)),
+                        kills: m.kills.iter().filter(in_round).filter(|k| k.attacker == Some(s) && is_enemy_kill(m, Some(s), k.victim)).count() as u32,
+                        deaths: m.kills.iter().filter(in_round).filter(|k| k.victim == s).count() as u32,
+                        assists: m.kills.iter().filter(in_round).filter(|k| k.assister == Some(s) && is_enemy_kill(m, k.attacker, k.victim)).count() as u32,
+                        damage: m.damages.iter().filter(|d| d.round == r && d.attacker == Some(s) && enemies(s, d.victim)).map(|d| d.health_removed.max(0) as u32).sum(),
+                        swing: swings.get(&(s, r)).copied().unwrap_or(0.0) * 100.0,
+                    }
+                })
+                .collect(),
         });
     }
 
