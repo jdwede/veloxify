@@ -85,9 +85,11 @@ impl<'a> SecondPassParser<'a> {
             return Ok(None);
         }
 
+        // Veloxify: skip an event that doesn't decode instead of failing the whole demo. League
+        // servers that restored a match from a backup (demos with DEM_Recovery frames) write some.
         let event = match CsvcMsgGameEvent::decode(bytes) {
             Ok(event) => event,
-            Err(_) => return Err(DemoParserError::MalformedMessage),
+            Err(_) => return Ok(None),
         };
         // Check if this events id is found in our game event list
         let event_desc = match self.ge_list.get(&event.eventid()) {
@@ -112,7 +114,7 @@ impl<'a> SecondPassParser<'a> {
         for i in 0..event.keys.len() {
             let ge = &event.keys[i];
             let Some(desc) = event_desc.keys.get(i) else {
-                return Err(DemoParserError::MalformedMessage);
+                return Ok(None); // Veloxify: more keys than the event's description: skip it
             };
             let val = parse_key(ge);
             event_fields.push(EventField {

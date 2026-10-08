@@ -19,8 +19,19 @@ pub struct Part {
     pub audio_offset_s: f64,
 }
 
+static FFMPEG: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+/// Uses this ffmpeg (the copy installed with Veloxify) instead of one on PATH.
+pub fn use_ffmpeg(path: std::path::PathBuf) {
+    let _ = FFMPEG.set(path);
+}
+
+fn ffmpeg_exe() -> std::ffi::OsString {
+    FFMPEG.get().map(|p| p.as_os_str().to_owned()).unwrap_or_else(|| "ffmpeg".into())
+}
+
 fn ffmpeg() -> Command {
-    let mut c = Command::new("ffmpeg");
+    let mut c = Command::new(ffmpeg_exe());
     c.args(["-hide_banner", "-loglevel", "error", "-y"]);
     hide_console(&mut c);
     c
@@ -78,20 +89,20 @@ fn fps_mask(corner: &str, width: u32, height: u32) -> String {
 
 pub fn assemble(parts: &[Part], out: &Path, o: &Output, audio: Option<&Audio>) -> Result<()> {
     let with_audio = audio.is_some() && parts.iter().all(|p| p.audio.is_some());
-    let mut c = ffmpeg();
+    let mut inputs: Vec<String> = vec![];
     let mut chains = vec![];
     let mut input = 0;
     let lengths: Vec<f64> = parts.iter().map(|p| p.seconds - SETTLE_S).collect();
     for (i, p) in parts.iter().enumerate() {
         let len = lengths[i];
-        c.args(["-i", &p.video]);
+        inputs.extend(["-i".to_string(), p.video.clone()]);
         chains.push(format!(
             "[{input}:v]trim=start={SETTLE_S}:duration={len:.3},setpts=PTS-STARTPTS,fps={},format=yuv420p[v{i}]",
             o.fps
         ));
         input += 1;
         if with_audio {
-            c.args(["-i", p.audio.as_deref().unwrap()]);
+            inputs.extend(["-i".to_string(), p.audio.clone().unwrap()]);
             let start = SETTLE_S + p.audio_offset_s;
             chains.push(format!(
                 "[{input}:a]atrim=start={start:.4}:duration={len:.3},asetpts=PTS-STARTPTS,apad=whole_dur={len:.3}[a{i}]"
@@ -128,36 +139,52 @@ pub fn assemble(parts: &[Part], out: &Path, o: &Output, audio: Option<&Audio>) -
         }
     }
     let mut maps = vec!["-map".to_string(), vlast];
-    let mut codec: Vec<String> = if o.final_encoder == "nvenc" {
-        // GPU encode: seconds per clip instead of ~20 s of CPU, quality-targeted and capped.
-        ["-c:v", "h264_nvenc", "-preset", "p6", "-tune", "hq", "-rc", "vbr", "-cq"].map(String::from).to_vec()
-    } else {
-        ["-c:v", "libx264", "-preset", "slow", "-crf"].map(String::from).to_vec()
-    };
-    codec.push(o.final_crf.to_string());
-    if o.final_encoder == "nvenc" {
-        codec.extend(["-b:v".into(), "0".into(), "-maxrate".into(), format!("{}M", o.max_bitrate_mbps)]);
-        codec.extend(["-bufsize".into(), format!("{}M", 2 * o.max_bitrate_mbps), "-spatial-aq".into(), "1".into()]);
-    }
-    codec.extend(["-profile:v".into(), "high".into()]);
+    let mut audio_codec: Vec<String> = vec![];
     if let (true, Some(a)) = (with_audio, audio) {
         graph += &format!(";{alast}loudnorm=I={}:TP=-1.5:LRA=11,aresample=48000[aout]", a.loudness_lufs);
         maps.extend(["-map".into(), "[aout]".into()]);
-        codec.extend(["-c:a".into(), "aac".into(), "-b:a".into(), format!("{}k", a.bitrate_kbps)]);
+        audio_codec.extend(["-c:a".into(), "aac".into(), "-b:a".into(), format!("{}k", a.bitrate_kbps)]);
     } else {
-        codec.push("-an".into());
+        audio_codec.push("-an".into());
     }
-    c.args(["-filter_complex", &graph]).args(&maps).args(&codec).args(["-movflags", "+faststart"]).arg(out);
-    run(c)?;
-    Ok(())
+    let encode = |nvenc: bool| -> Result<()> {
+        let mut codec: Vec<String> = if nvenc {
+            // GPU encode: seconds per clip instead of ~20 s of CPU, quality-targeted and capped.
+            ["-c:v", "h264_nvenc", "-preset", "p6", "-tune", "hq", "-rc", "vbr", "-cq"].map(String::from).to_vec()
+        } else {
+            ["-c:v", "libx264", "-preset", "slow", "-crf"].map(String::from).to_vec()
+        };
+        codec.push(o.final_crf.to_string());
+        if nvenc {
+            codec.extend(["-b:v".into(), "0".into(), "-maxrate".into(), format!("{}M", o.max_bitrate_mbps)]);
+            codec.extend(["-bufsize".into(), format!("{}M", 2 * o.max_bitrate_mbps), "-spatial-aq".into(), "1".into()]);
+        }
+        codec.extend(["-profile:v".into(), "high".into()]);
+        codec.extend(audio_codec.iter().cloned());
+        let mut c = ffmpeg();
+        c.args(&inputs).args(["-filter_complex", &graph]).args(&maps).args(&codec).args(["-movflags", "+faststart"]).arg(out);
+        run(c).map(|_| ())
+    };
+    // NVENC needs an NVIDIA GPU: anything else gets the CPU encoder.
+    match encode(o.final_encoder == "nvenc") {
+        Err(e) if o.final_encoder == "nvenc" => encode(false).map_err(|e2| anyhow::anyhow!("{e2} (GPU encoder: {e})")),
+        r => r,
+    }
 }
 
 /// Preview frame for a clip: by default just before the first kill (clips have 4 s pre-roll).
 pub fn make_thumb(clip: &Path, thumb: &Path) -> Result<()> {
-    let mut probe = Command::new("ffprobe");
-    probe.args(["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0"]).arg(clip);
+    // The clip's length from ffmpeg's own "Duration: 00:00:21.00" line (no ffprobe needed).
+    let mut probe = Command::new(ffmpeg_exe());
+    probe.args(["-hide_banner", "-i"]).arg(clip);
     hide_console(&mut probe);
-    let dur: f64 = String::from_utf8_lossy(&probe.output()?.stdout).trim().parse().unwrap_or(0.0);
+    let info = String::from_utf8_lossy(&probe.output()?.stderr).into_owned();
+    let dur: f64 = info
+        .split("Duration: ")
+        .nth(1)
+        .and_then(|d| d.split(',').next())
+        .map(|hms| hms.trim().split(':').filter_map(|x| x.parse::<f64>().ok()).fold(0.0, |acc, x| acc * 60.0 + x))
+        .unwrap_or(0.0);
     let t = (3.7f64).min(dur - 0.5).max(0.0);
     let mut c = ffmpeg();
     c.args(["-ss", &format!("{t:.2}"), "-i"]).arg(clip);

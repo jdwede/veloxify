@@ -453,11 +453,7 @@ fn highlight_entry(match_id: &str, h: &Highlight, m: &Match, a: &Analysis) -> Hi
         pistol_round,
         entry: a.rounds[h.round].opening_kill.is_some_and(|ki| h.kills.contains(&ki)),
         clutch_vs: a.rounds[h.round].clutches.iter().find(|c| c.player == h.player && c.won).map(|c| c.vs).unwrap_or(0),
-        eco_kills: if pistol_round {
-            0
-        } else {
-            kills.iter().filter(|k| k.victim_equip_value.is_some_and(|v| v < highlights::ECO_EQUIP_VALUE)).count() as u32
-        },
+        eco_kills: kills.iter().filter(|k| highlights::eco_kill(k, pistol_round)).count() as u32,
     };
     HighlightEntry {
         details,

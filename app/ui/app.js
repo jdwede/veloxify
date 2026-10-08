@@ -501,7 +501,7 @@ const MATCH_SORTS = {
   k2: (p) => p.counts.multikill_rounds[2], k3: (p) => p.counts.multikill_rounds[3], k4: (p) => p.counts.multikill_rounds[4], k5: (p) => p.counts.multikill_rounds[5],
   rws: (p) => p.derived.rws, swing: (p) => p.derived.swing || 0, rating: (p) => r3(p.derived),
 };
-const matchSort = { key: "kills", desc: true };
+const matchSort = { key: "rating", desc: true };
 
 async function renderMatchPage(view, id, tab) {
   const s = summaryOf(id);
@@ -552,8 +552,8 @@ async function renderMatchPage(view, id, tab) {
 // Both teams, Leetify's match-details columns (no Leetify rating), sortable by any column.
 function renderMatchScoreboard(body, m) {
   const me = state.index.me;
-  const COLS = [["kills", "Kills"], ["assists", "Assists"], ["deaths", "Deaths"], ["kd", "K/D"], ["adr", "ADR"], ["kast", "KAST"],
-    ["k2", "2K"], ["k3", "3K"], ["k4", "4K"], ["k5", "5K"], ["rws", "RWS"], ["swing", "Swing"], ["rating", "HLTV 3.0"]];
+  const COLS = [["rating", "HLTV 3.0"], ["swing", "Swing"], ["kills", "Kills"], ["assists", "Assists"], ["deaths", "Deaths"], ["kd", "K/D"],
+    ["adr", "ADR"], ["kast", "KAST"], ["k2", "2K"], ["k3", "3K"], ["k4", "4K"], ["k5", "5K"], ["rws", "RWS"]];
   const by = MATCH_SORTS[matchSort.key];
   const sorted = (side) => m.players.filter((p) => p.side === side).sort((a, b) => {
     const x = by(a), y = by(b);
@@ -1906,7 +1906,7 @@ function sumPlayers(entries, me) {
   return out.sort((x, y) => y.rating3 - x.rating3);
 }
 
-let sessionView = { who: "teammates", sort: "rating3", desc: true };
+let sessionView = { sort: "rating3", desc: true };
 
 async function renderSession(view, date, idx) {
   const day = dayOf(date);
@@ -1962,7 +1962,8 @@ async function renderSession(view, date, idx) {
     k2: (p.c.multikill_rounds || [])[2] || 0, k3: (p.c.multikill_rounds || [])[3] || 0, k4: (p.c.multikill_rounds || [])[4] || 0, k5: (p.c.multikill_rounds || [])[5] || 0,
     mvps: p.c.mvps || 0, entries: p.c.opening_kills || 0, pistol: p.c.pistol_kills || 0, eco: p.c.eco_kills || 0, clutch: sum(p.c.clutches_won || []),
   }[k] ?? p[k] ?? 0);
-  const rows = players.filter((p) => sessionView.who === "everyone" || (sessionView.who === "teammates" ? p.mine > 0 : p.enemy > 0))
+  // Only the players who were in the session with you: you and your party.
+  const rows = players.filter((p) => p.is_me || (p.party && p.mine > 0))
     .sort((a, b) => {
       const x = val(a, sessionView.sort), y = val(b, sessionView.sort);
       return (typeof x === "string" ? x.localeCompare(y) : x - y) * (sessionView.desc ? -1 : 1);
@@ -2000,15 +2001,13 @@ async function renderSession(view, date, idx) {
       ${historyRows().filter((r) => sess.match_ids.includes(r.id)).sort((a, b) => a.when - b.when).map(historyRow).join("")}
     </section>
     <section class="panel">
-      <div class="panel-head"><div class="h3">Session scoreboard</div><span class="sub">all ${withDemo.length} match${withDemo.length === 1 ? "" : "es"} added up</span><span class="grow"></span>
-        <div class="seg" id="who">${[["teammates", "Teammates"], ["opponents", "Opponents"], ["everyone", "Everyone"]].map(([v, t]) => `<button data-v="${v}" class="${sessionView.who === v ? "on" : ""}">${t}</button>`).join("")}</div></div>
+      <div class="panel-head"><div class="h3">Session scoreboard</div><span class="sub">you${rows.length > 1 ? " and your party" : ""}, all ${withDemo.length} match${withDemo.length === 1 ? "" : "es"} added up</span></div>
       <div class="sc-table"><table class="sb">
         <thead><tr>${COLS.map(([k, t]) => `<th data-sort="${k}" class="sortable ${sessionView.sort === k ? "on" : ""}">${t}${sessionView.sort === k ? (sessionView.desc ? " ▾" : " ▴") : ""}</th>`).join("")}</tr></thead>
         <tbody>${rows.map((p) => `<tr class="${p.is_me ? "me" : p.party ? "party" : ""}">${COLS.map(([k]) => cell(p, k)).join("")}</tr>`).join("")}</tbody>
       </table></div>
-      <div class="note">HLTV 3.0, RWS, ADR, KAST and Swing are per round, so session values weight each match by its rounds. Eco kills: on players with under $2,000 of equipment (not pistol rounds).</div>
+      <div class="note">Your party: players who were on your team for at least two of the session's matches. HLTV 3.0, RWS, ADR, KAST and Swing are per round, so session values weight each match by its rounds. Eco kills: on players with under $2,000 of equipment (not pistol rounds).</div>
     </section>`;
-  view.querySelectorAll("#who button").forEach((b) => (b.onclick = () => { sessionView.who = b.dataset.v; renderSession(view, date, idx); }));
   view.querySelectorAll("th[data-sort]").forEach((th) => (th.onclick = () => {
     const k = th.dataset.sort;
     sessionView.desc = sessionView.sort === k ? !sessionView.desc : k !== "name";

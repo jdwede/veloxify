@@ -446,6 +446,17 @@ fn main() {
             // Clips, thumbnails and match data are served from the library folder only.
             let lib = settings.lock().unwrap().library_dir.clone();
             app.asset_protocol_scope().allow_directory(&lib, true)?;
+            // The ffmpeg installed with Veloxify (clips are assembled with it); else one on PATH.
+            if let Ok(dir) = app.path().resource_dir() {
+                let ff = dir.join("ffmpeg").join("ffmpeg.exe");
+                if ff.exists() {
+                    cs2hl_render::assemble::use_ffmpeg(ff);
+                }
+            }
+            // "Start with Windows" points at this copy (e.g. after installing over a dev build).
+            if settings.lock().unwrap().start_with_windows {
+                let _ = system::set_start_with_windows(true);
+            }
             // Started with Windows: stay in the tray until opened.
             if !std::env::args().any(|a| a == "--hidden") {
                 show_main(app.handle());

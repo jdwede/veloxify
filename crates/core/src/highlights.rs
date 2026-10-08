@@ -27,6 +27,14 @@ const POST_ROLL_S: f64 = 3.0;
 const SEGMENT_GAP_S: f64 = 12.0;
 /// Victims with less equipment than this (outside pistol rounds) are on an eco or light buy.
 pub const ECO_EQUIP_VALUE: u32 = 2000;
+
+/// A kill on a player who'd saved (under $2,000 of equipment) while you had better gear. Pistol
+/// rounds and kills from a lesser (or equal) buy don't count: those were fair fights.
+pub fn eco_kill(k: &Kill, pistol_round: bool) -> bool {
+    let saved = k.victim_equip_value.is_some_and(|v| v < ECO_EQUIP_VALUE);
+    let outgunned = matches!((k.attacker_equip_value, k.victim_equip_value), (Some(a), Some(v)) if a <= v);
+    !pistol_round && saved && !outgunned
+}
 /// Your equipment value at which a round counts as a gun round.
 const GUN_ROUND_EQUIP_VALUE: u32 = 3500;
 /// Reaction flick: the fastest view swing over any ~200 ms span...
@@ -213,7 +221,7 @@ pub fn detect(m: &Match, a: &Analysis, player: u64, flicks: &HashMap<usize, f64>
         let ctx = round_context(m, r, my_team);
         let ks: Vec<&Kill> = kills.iter().map(|&i| &m.kills[i]).collect();
         let n = ks.len();
-        let is_eco_kill = |k: &Kill| !ctx.pistol && k.victim_equip_value.is_some_and(|v| v < ECO_EQUIP_VALUE);
+        let is_eco_kill = |k: &Kill| eco_kill(k, ctx.pistol);
         let real_kills = ks.iter().filter(|k| !is_eco_kill(k)).count();
         let gun_round = ks.iter().any(|k| k.attacker_equip_value.is_some_and(|v| v >= GUN_ROUND_EQUIP_VALUE));
         let opening = a.rounds[r].opening_kill.is_some_and(|ki| kills.contains(&ki));
@@ -327,9 +335,9 @@ pub fn detect(m: &Match, a: &Analysis, player: u64, flicks: &HashMap<usize, f64>
             }
         }
 
-        // 2Ks that mattered.
+        // 2Ks in a fair fight (gun round, pistol round, or from a lesser buy) are solid plays.
         if n == 2 && real_kills >= 2 {
-            tier = tier.max(1);
+            tier = tier.max(2);
             if opening && ctx.won {
                 tier = tier.max(2);
                 score += 2.0;

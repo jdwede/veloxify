@@ -6,3 +6,6 @@
 /out
 /library
 /app/src-tauri/gen
+
+# ffmpeg bundled with the installer (copied from a local install; see app/src-tauri/resources/ffmpeg/README.txt)
+app/src-tauri/resources/ffmpeg/*.exe
