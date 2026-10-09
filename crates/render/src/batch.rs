@@ -158,7 +158,7 @@ pub fn render(
     let started = Renderer::start(steamid64, profile, work_dir, abort, Box::new(move |s| {
         let _ = log_tx.send(s.to_string());
     }));
-    let renderer = match started {
+    let mut renderer = match started {
         Ok(r) => r,
         Err(e) if e.downcast_ref::<Aborted>().is_some() => {
             let wants_cs2 = e.downcast_ref::<Aborted>().unwrap().wants_cs2;
@@ -180,12 +180,30 @@ pub fn render(
     let mut broken: Vec<String> = vec![];
     let mut rendered = 0;
     let mut stopped = false;
+    // CS2 can't play demos from before its last update that changed how demos are recorded (it
+    // says so, or stops with an error box): a match as old as one known not to play is skipped.
+    let mut unplayable = load_unplayable(lib);
+    let played = |mid: &str| load(&lib.join("matches").join(format!("{mid}.json"))).map(|m| m.played_ts).unwrap_or(i64::MIN);
+    let mut cutoff = unplayable.iter().map(|m| played(m)).max().unwrap_or(i64::MIN);
+    const TOO_OLD: &str = "Recorded on an older CS2 version; CS2 can no longer play this demo.";
     for (mid, hid) in order {
         if broken.contains(&mid) {
             continue;
         }
         let path = lib.join("matches").join(format!("{mid}.json"));
         let mut m = load(&path)?;
+        if unplayable.contains(&mid) || m.played_ts <= cutoff {
+            for h in m.highlights.iter_mut().filter(|h| h.clip.is_none()) {
+                h.render_error = Some(TOO_OLD.into());
+            }
+            for l in m.lowlights.iter_mut().filter(|l| l.clip.is_none()) {
+                l.render_error = Some(TOO_OLD.into());
+            }
+            save(&path, &m)?;
+            broken.push(mid.clone());
+            on(Event::Log(format!("skipping {}: demo from an older CS2 version", m.map)));
+            continue;
+        }
         // A highlight, or a lowlight rendered on request.
         let hi = m.highlights.iter().position(|h| h.id == hid);
         let li = m.lowlights.iter().position(|l| l.id == hid);
@@ -211,16 +229,22 @@ pub fn render(
                     break;
                 }
                 Err(e) if e.downcast_ref::<DemoIncompatible>().is_some() => {
-                    let why = "Recorded on an older CS2 version; CS2 can no longer play this demo.";
                     for h in m.highlights.iter_mut().filter(|h| h.clip.is_none()) {
-                        h.render_error = Some(why.into());
+                        h.render_error = Some(TOO_OLD.into());
                     }
                     for l in m.lowlights.iter_mut().filter(|l| l.clip.is_none()) {
-                        l.render_error = Some(why.into());
+                        l.render_error = Some(TOO_OLD.into());
                     }
                     save(&path, &m)?;
                     broken.push(mid.clone());
+                    unplayable.insert(mid.clone());
+                    save_unplayable(lib, &unplayable);
+                    cutoff = cutoff.max(m.played_ts);
+                    loaded = None;
                     on(Event::Log(format!("skipping {}: demo from an older CS2 version", m.map)));
+                    // CS2 may have stopped on it: start it again for the next match.
+                    renderer.relaunch_if_closed()?;
+                    drain(on);
                     continue;
                 }
                 Err(e) => return Err(e),
@@ -276,6 +300,10 @@ pub fn render(
                     _ => {}
                 }
                 on(Event::Failed { match_id: mid.clone(), title, error: e.to_string() });
+                if e.downcast_ref::<crate::session::Cs2Crashed>().is_some() {
+                    loaded = None;
+                    renderer.relaunch_if_closed()?;
+                }
             }
         }
         save(&path, &m)?;
@@ -324,9 +352,15 @@ pub fn migrate_lineup_clips(lib: &Path) -> Result<usize> {
     if ids.is_empty() {
         return Ok(0);
     }
+    // Notes on why a lineup couldn't be filmed are checked again once its throws change.
+    let counts: HashMap<&str, usize> = all.maps.values().flat_map(|m| m.lineups.iter().map(|l| (l.id.as_str(), l.count))).collect();
+    let recheck: Vec<String> = clips.iter().filter(|(k, c)| c.clip.is_none() && counts.get(k.as_str()).is_some_and(|n| *n != c.count)).map(|(k, _)| k.clone()).collect();
     let stale: Vec<String> = clips.keys().filter(|k| !ids.contains(k.as_str())).cloned().collect();
-    if stale.is_empty() {
+    if stale.is_empty() && recheck.is_empty() {
         return Ok(0);
+    }
+    for k in recheck {
+        clips.remove(&k);
     }
     let mut moved = 0;
     for old in stale {

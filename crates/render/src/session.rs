@@ -116,6 +116,17 @@ impl std::fmt::Display for DemoIncompatible {
 }
 impl std::error::Error for DemoIncompatible {}
 
+/// CS2 stopped with an error box (its message); Veloxify closed it.
+#[derive(Debug)]
+pub struct Cs2Crashed(pub String);
+
+impl std::fmt::Display for Cs2Crashed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "CS2 stopped with an error: {}", self.0)
+    }
+}
+impl std::error::Error for Cs2Crashed {}
+
 /// The session was stopped: by the user ("Stop rendering"), or because something brought CS2
 /// forward (`wants_cs2`: the user is trying to play).
 #[derive(Debug)]
@@ -139,6 +150,8 @@ pub struct Renderer {
     /// Originals of the console settings currently applied (only while a demo is loaded).
     applied: Mutex<Option<Vec<(String, String)>>>,
     pid: Option<u32>,
+    /// CS2's process, watched for an error box.
+    game: Option<u32>,
     audio: Option<Audio>,
     /// The player's name in the loaded demo (FACEIT nickname or Steam name): the camera follows
     /// them by name.
@@ -226,6 +239,7 @@ impl Renderer {
             vc: None,
             applied: Mutex::new(None),
             pid: None,
+            game: None,
             audio,
             pov_name: Mutex::new(String::new()),
             abort,
@@ -257,16 +271,48 @@ impl Renderer {
         self.check()
     }
 
-    /// Waits for a console line, checking for a stop every 200 ms.
+    /// Waits for a console line, checking for a stop every 200 ms and for CS2 having stopped
+    /// with an error box every second.
     fn wait_any(&self, needles: &[&str], timeout: Duration, since: usize) -> Result<Option<String>> {
         let end = Instant::now() + timeout;
+        let mut n = 0u32;
         while Instant::now() < end {
             self.check()?;
             if let Some(l) = self.vc().wait_for_any(needles, Duration::from_millis(200), since) {
                 return Ok(Some(l));
             }
+            n += 1;
+            if n % 5 == 0 {
+                self.check_crashed()?;
+            }
         }
         Ok(None)
+    }
+
+    /// If CS2 is showing an error box (it's stopped, waiting for someone to click OK), closes it
+    /// and says what the error was.
+    fn check_crashed(&self) -> Result<()> {
+        let Some(pid) = self.game else { return Ok(()) };
+        let Some(text) = window::error_box(pid) else { return Ok(()) };
+        (self.log)(&format!("CS2 stopped with an error ({text}); closing it"));
+        let mut c = Command::new("taskkill");
+        c.args(["/F", "/PID", &pid.to_string()]);
+        let _ = c.output();
+        let wait = Instant::now() + Duration::from_secs(10);
+        while cs2_running() && Instant::now() < wait {
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        Err(Cs2Crashed(text).into())
+    }
+
+    /// Starts CS2 again after it stopped (an error box closed by `check_crashed`).
+    pub fn relaunch_if_closed(&mut self) -> Result<()> {
+        if self.vc.as_ref().is_some_and(|vc| vc.alive()) && cs2_running() {
+            return Ok(());
+        }
+        self.vc = None;
+        *self.applied.lock().unwrap() = None;
+        self.launch()
     }
 
     fn launch(&mut self) -> Result<()> {
@@ -306,7 +352,8 @@ impl Renderer {
         if window::cs2_window() == Some(window::foreground()) {
             window::set_foreground(prev);
         }
-        self.pid = if self.audio.is_some() { cs2_pid() } else { None };
+        self.game = cs2_pid();
+        self.pid = if self.audio.is_some() { self.game } else { None };
         self.watch_for_user();
         (self.log)(&format!("CS2 ready in {:.0}s", t0.elapsed().as_secs_f64()));
         Ok(())
@@ -396,8 +443,21 @@ impl Renderer {
         self.check()?;
         // CS2 saves the config when a demo loads: make sure it saves the user's own values.
         self.revert_settings();
-        let vc = self.vc();
         let t0 = Instant::now();
+        let loaded = self.play_demo(path);
+        match loaded {
+            Err(e) if e.downcast_ref::<Cs2Crashed>().is_some_and(|c| c.0.contains("CopyNewEntity") || c.0.contains("class index")) => {
+                return Err(DemoIncompatible(path.to_path_buf()).into())
+            }
+            other => other?,
+        }
+        (self.log)(&format!("demo loaded in {:.0}s", t0.elapsed().as_secs_f64()));
+        Ok(())
+    }
+
+    /// Plays a demo up to its first full update (paused, settings applied, camera on you).
+    fn play_demo(&self, path: &Path) -> Result<()> {
+        let vc = self.vc();
         let since = vc.mark();
         vc.send(&format!("playdemo \"{}\"", path.display()));
         self.wait_any(&["Requesting playback"], Duration::from_secs(60), since)?.ok_or_else(|| anyhow!("CS2 didn't start demo playback"))?;
@@ -414,7 +474,6 @@ impl Renderer {
         self.pause(Duration::from_secs(1))?;
         *self.applied.lock().unwrap() = Some(self.protector.apply_console(vc, &self.console)?);
         self.lock_pov();
-        (self.log)(&format!("demo loaded in {:.0}s", t0.elapsed().as_secs_f64()));
         Ok(())
     }
 
