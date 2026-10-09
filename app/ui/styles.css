@@ -1030,6 +1030,21 @@ input[type=color] { width: 44px; height: 30px; padding: 2px; background: var(--r
 /* The play controls stay on screen while any of the map is. */
 .rp-controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; position: sticky; bottom: 0; z-index: 2; padding: 8px 0; background: var(--bg); }
 .rp-controls input[type=range] { flex: 1; min-width: 140px; accent-color: var(--accent); }
+/* Timeline: kill ticks in the killer's team color, the plant, and the time after it hatched. */
+.rp-track { position: relative; flex: 1; min-width: 160px; display: flex; align-items: center; }
+.rp-track input[type=range] { width: 100%; position: relative; z-index: 2; background: transparent; }
+.rp-mark { position: absolute; top: -7px; width: 3px; height: 8px; border-radius: 1px; transform: translateX(-50%); z-index: 1; }
+.rp-mark.plant { background: #e2445f; width: 4px; height: 12px; top: -9px; }
+.rp-postplant { position: absolute; top: 50%; right: 0; height: 8px; transform: translateY(-50%); border-radius: 3px;
+  background: repeating-linear-gradient(135deg, rgba(226, 68, 95, 0.35) 0 4px, transparent 4px 8px); }
+/* Round clock over the map. */
+.tl-map { position: relative; }
+.rp-clock { position: absolute; left: 14px; top: 12px; z-index: 3; display: flex; flex-direction: column; pointer-events: none; text-shadow: 0 2px 6px rgba(0, 0, 0, 0.8); }
+.rp-clock span { font-size: 12px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+.rp-clock b { font-size: 34px; font-weight: 800; font-variant-numeric: tabular-nums; color: #fff; line-height: 1.1; }
+.rp-clock b.bomb { color: #ff5a6e; }
+.rp-killline { stroke-width: 3; stroke-linecap: round; }
+.rp-skull { opacity: 0.9; }
 .rp-time { font-variant-numeric: tabular-nums; font-size: 13px; color: var(--muted); min-width: 92px; }
 .rp-teams { display: grid; gap: 12px; }
 .rp-team { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; }

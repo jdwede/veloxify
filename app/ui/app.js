@@ -2307,6 +2307,10 @@ function roundStripHtml(rounds, nr) {
 const replay = { round: 1, t: 0, speed: 1, playing: false, names: true };
 let replayRaf = null;
 
+const ROUND_S = 115, BOMB_S = 40, KILL_LINE_S = 1.2;
+const SKULL = `<path d="M0 -8a7 7 0 0 0 -7 7c0 2.6 1.3 4.2 3 5v3h8v-3c1.7 -0.8 3 -2.4 3 -5a7 7 0 0 0 -7 -7z" fill="currentColor" stroke="#0b0b0b" stroke-width="1.5"/>
+  <circle cx="-2.6" cy="-1" r="1.7" fill="#0b0b0b"/><circle cx="2.6" cy="-1" r="1.7" fill="#0b0b0b"/>`;
+
 async function renderReplayTab(body, m, id) {
   cancelAnimationFrame(replayRaf);
   const [d, radar, rp] = await Promise.all([loadDetails(id), loadRadar(m.map), loadReplay(id)]);
@@ -2334,13 +2338,17 @@ async function renderReplayTab(body, m, id) {
     <div class="rp-main">
       <section class="rp-teams" id="rp-teams"></section>
       <section class="rp-stage">
-        <div class="tl-map"><div class="tl-viewport rp-viewport"><div class="tl-canvas">
+        <div class="tl-map"><div class="rp-clock" id="rp-clock"><span>Round ${round.number}</span><b></b></div><div class="tl-viewport rp-viewport"><div class="tl-canvas">
           ${radar ? `<img src="${assetUrl(`radars/${m.map}.png`)}" alt="${esc(mapName(m.map))} radar" draggable="false">` : `<div class="tl-noradar">Radar not available</div>`}
           <svg viewBox="0 0 ${size} ${size}" id="rp-svg"></svg></div></div></div>
         <div class="rp-controls">
           <button class="btn primary" id="rp-play">${replay.playing ? "❚❚" : "▶"}</button>
           <div class="seg" id="rp-speeds">${[0.5, 1, 2, 4].map((s) => `<button data-rspeed="${s}" class="${replay.speed === s ? "on" : ""}">${s}x</button>`).join("")}</div>
-          <input type="range" id="rp-scrub" min="0" max="${duration.toFixed(2)}" step="0.05" value="${replay.t}" aria-label="Round time">
+          <div class="rp-track">
+            ${plant ? `<i class="rp-postplant" style="left:${(plant.t / duration) * 100}%"></i><i class="rp-mark plant" style="left:${(plant.t / duration) * 100}%" title="Bomb planted ${mmss(plant.t)}"></i>` : ""}
+            ${kills.map((k) => `<i class="rp-mark kill" style="left:${(k.t / duration) * 100}%;background:${TEAM_COLOR[team.get(k.attacker)] || "#ccc"}" title="${esc(names.get(k.attacker) || "World")} killed ${esc(names.get(k.victim) || "")} · ${mmss(k.t)}"></i>`).join("")}
+            <input type="range" id="rp-scrub" min="0" max="${duration.toFixed(2)}" step="0.05" value="${replay.t}" aria-label="Round time">
+          </div>
           <span class="rp-time" id="rp-time"></span>
           <label class="check"><input type="checkbox" id="rp-names" ${replay.names ? "checked" : ""}> Names</label>
         </div>
@@ -2390,10 +2398,14 @@ async function renderReplayTab(body, m, id) {
       const pl = stateAt(plant.t).find((p) => p.sid === plant.who);
       if (pl) { const [x, y] = at(pl.x, pl.y); out += `<g class="rp-bomb"><rect x="${x - 8}" y="${y - 8}" width="16" height="16" rx="3"/><text x="${x}" y="${y + 5}" text-anchor="middle">C4</text></g>`; }
     }
-    // Deaths so far: ✕ where they fell.
+    // Kills: a line from the killer to the victim for a moment; then a skull where they fell.
+    for (const k of kills.filter((k) => k.t <= t && t < k.t + KILL_LINE_S && k.attacker_xy && k.victim_xy)) {
+      const [ax, ay] = at(k.attacker_xy[0], k.attacker_xy[1]), [vx, vy] = at(k.victim_xy[0], k.victim_xy[1]);
+      out += `<line x1="${ax}" y1="${ay}" x2="${vx}" y2="${vy}" class="rp-killline" stroke="${TEAM_COLOR[team.get(k.attacker)] || "#ccc"}" style="opacity:${1 - (t - k.t) / KILL_LINE_S}"/>`;
+    }
     for (const k of kills.filter((k) => k.t <= t && k.victim_xy)) {
       const [x, y] = at(k.victim_xy[0], k.victim_xy[1]);
-      out += `<path d="M${x - 7},${y - 7}L${x + 7},${y + 7}M${x + 7},${y - 7}L${x - 7},${y + 7}" class="rp-dead" stroke="${TEAM_COLOR[team.get(k.victim)] || "#888"}"/>`;
+      out += `<g class="rp-skull" transform="translate(${x} ${y})" style="color:${TEAM_COLOR[team.get(k.victim)] || "#888"}">${SKULL}</g>`;
     }
     // Live players: dot, view direction, name.
     for (const p of ps) {
@@ -2411,6 +2423,16 @@ async function renderReplayTab(body, m, id) {
       ${ps.filter((p) => team.get(p.sid) === side).sort((a, b) => b.hp - a.hp).map((p) => `<div class="rp-pl ${p.hp <= 0 ? "dead" : ""}"><span>${esc(names.get(p.sid) || "")}</span><i style="width:${p.hp}%;background:${TEAM_COLOR[side]}"></i><b>${p.hp > 0 ? p.hp : "✕"}</b></div>`).join("")}</div>`).join("");
     scrub.value = t;
     timeEl.textContent = `${mmss(Math.max(0, t)).replace("s", "")} / ${mmss(duration).replace("s", "")}`;
+    // The round clock (1:55 down), or the bomb timer once it's planted.
+    const clock = body.querySelector("#rp-clock b");
+    if (plant && t >= plant.t) {
+      clock.textContent = `${Math.max(0, BOMB_S - (t - plant.t)).toFixed(1)}`;
+      clock.className = "bomb";
+    } else {
+      const left = Math.max(0, ROUND_S - Math.max(0, t));
+      clock.textContent = `${Math.floor(left / 60)}:${String(Math.floor(left % 60)).padStart(2, "0")}`;
+      clock.className = "";
+    }
     body.querySelectorAll("[data-kt]").forEach((b) => b.classList.toggle("on", Number(b.dataset.kt) <= t));
   };
   let last = null;
