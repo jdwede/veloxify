@@ -36,7 +36,8 @@ const POV_TOLERANCE: f64 = 64.0;
 /// until it goes off, holding on it for a few seconds (the smoke blooming, the molotov spreading).
 #[derive(Debug, Clone)]
 pub struct LineupShot {
-    /// The thrower's name in the demo (the camera locks on by name) and where they stand.
+    /// The thrower's name in the demo (the camera locks on by name) and where they stand when the
+    /// camera is checked (the clip's start minus the settle time).
     pub thrower: String,
     pub eye: Option<(f64, f64)>,
     pub throw_tick: i32,
@@ -47,11 +48,13 @@ pub struct LineupShot {
     pub hold_s: f64,
 }
 
-/// The free camera behind and above the grenade while it flies, and how it eases back after.
-const CHASE_BACK: f64 = 150.0;
-const CHASE_UP: f64 = 55.0;
-const HOLD_BACK: f64 = 140.0;
-const HOLD_UP: f64 = 70.0;
+/// The free camera rides the grenade's own path (open air: the grenade just flew through it), this
+/// far behind it while it flies, a little above; when it goes off, it settles further back along
+/// the path, which by construction can see where it landed.
+const CHASE_DIST: f64 = 140.0;
+const CHASE_UP: f64 = 18.0;
+const HOLD_DIST: f64 = 260.0;
+const HOLD_UP: f64 = 30.0;
 /// Ticks after the release before the camera leaves the thrower (the grenade clears the hand).
 const FOLLOW_DELAY_TICKS: f64 = 6.0;
 
@@ -65,17 +68,20 @@ impl LineupShot {
         let (a, b) = (self.path[i], self.path[j]);
         [a[0] + (b[0] - a[0]) * w, a[1] + (b[1] - a[1]) * w, a[2] + (b[2] - a[2]) * w]
     }
-    /// The direction the grenade travels on the map at `tick` (unit vector).
-    fn heading_at(&self, tick: f64) -> [f64; 2] {
-        let (a, b) = (self.grenade_at(tick - 12.0), self.grenade_at(tick));
-        let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
-        let n = dx.hypot(dy);
-        if n < 1.0 {
-            let (a, b) = (self.path[0], self.path[self.path.len().min(4) - 1]);
-            let n = (b[0] - a[0]).hypot(b[1] - a[1]).max(1.0);
-            return [(b[0] - a[0]) / n, (b[1] - a[1]) / n];
+    /// The point on the grenade's path at least `dist` units (straight line) behind where it is at
+    /// `tick`, walking back along the path (the throw itself if it hasn't gone that far yet).
+    fn point_back(&self, tick: f64, dist: f64) -> [f64; 3] {
+        let g = self.grenade_at(tick);
+        let mut t = tick;
+        let start = self.throw_tick as f64;
+        while t > start {
+            t -= 1.0;
+            let p = self.grenade_at(t);
+            if ((p[0] - g[0]).powi(2) + (p[1] - g[1]).powi(2) + (p[2] - g[2]).powi(2)).sqrt() >= dist {
+                return p;
+            }
         }
-        [dx / n, dy / n]
+        self.grenade_at(start)
     }
 }
 
@@ -436,6 +442,21 @@ impl Renderer {
                         (Some(_), None) => (self.log)("CS2 didn't say where its camera is; locking it again"),
                     }
                 }
+                // A name CS2 can't take (all digits reads as a player number; some symbols): step
+                // through the players until the camera is where you stand.
+                if !on_you {
+                    if let Some(want) = eyes(at) {
+                        vc.send("spec_mode 2");
+                        for _ in 0..12 {
+                            vc.send("spec_next");
+                            self.pause(Duration::from_millis(300))?;
+                            if self.camera().is_some_and(|got| (want.0 - got.0).hypot(want.1 - got.1) <= POV_TOLERANCE) {
+                                on_you = true;
+                                break;
+                            }
+                        }
+                    }
+                }
                 if !on_you {
                     return Err(WrongPov.into());
                 }
@@ -492,6 +513,8 @@ impl Renderer {
             vc.send("demo_pause");
             vc.send(&format!("demo_gototick {at}"));
             self.pause(Duration::from_millis(1500))?;
+            // Back in a player's eyes (the last lineup left the free camera on).
+            vc.send("spec_mode 2");
             let mut on_them = false;
             for attempt in 0..3u64 {
                 self.lock_pov();
@@ -506,6 +529,21 @@ impl Renderer {
                         break;
                     }
                     _ => (self.log)(&format!("camera isn't on {} yet; locking it again", shot.thrower)),
+                }
+            }
+            // A name CS2 can't take (all digits reads as a player number; some symbols): step
+            // through the players until the camera is where the thrower stands.
+            if !on_them {
+                if let Some(want) = shot.eye {
+                    vc.send("spec_mode 2");
+                    for _ in 0..12 {
+                        vc.send("spec_next");
+                        self.pause(Duration::from_millis(300))?;
+                        if self.camera().is_some_and(|got| (want.0 - got.0).hypot(want.1 - got.1) <= POV_TOLERANCE) {
+                            on_them = true;
+                            break;
+                        }
+                    }
                 }
             }
             if !on_them {
@@ -538,7 +576,7 @@ impl Renderer {
             // went off.
             let pop = shot.pop_tick as f64;
             let mut free = false;
-            let mut chase_at_pop: Option<([f64; 3], [f64; 2])> = None;
+            let mut chase_at_pop: Option<[f64; 3]> = None;
             while t0.elapsed().as_secs_f64() < seconds - 0.05 {
                 if self.abort.load(Ordering::SeqCst) {
                     break;
@@ -551,19 +589,21 @@ impl Renderer {
                     }
                     let cmd = if tick < pop {
                         let g = shot.grenade_at(tick);
-                        let d = shot.heading_at(tick);
-                        let cam = [g[0] - d[0] * CHASE_BACK, g[1] - d[1] * CHASE_BACK, g[2] + CHASE_UP];
-                        chase_at_pop = Some((cam, d));
+                        let b = shot.point_back(tick, CHASE_DIST);
+                        let cam = [b[0], b[1], b[2] + CHASE_UP];
+                        chase_at_pop = Some(cam);
                         look(cam, g)
                     } else {
-                        // Ease back and up over a second, looking at where it went off (a bit
-                        // above it, where a smoke fills).
+                        // Ease back along the path over a second, looking at where it went off
+                        // (a little above it, where a smoke fills).
                         let land = shot.grenade_at(pop);
-                        let (cam0, d) = chase_at_pop.unwrap_or(([land[0], land[1], land[2] + 200.0], shot.heading_at(pop)));
+                        let far = shot.point_back(pop, HOLD_DIST);
+                        let goal = [far[0], far[1], far[2] + HOLD_UP];
+                        let from = chase_at_pop.unwrap_or(goal);
                         let f = ((tick - pop) / TICKRATE).min(1.0);
                         let e = f * f * (3.0 - 2.0 * f);
-                        let cam = [cam0[0] - d[0] * HOLD_BACK * e, cam0[1] - d[1] * HOLD_BACK * e, cam0[2] + HOLD_UP * e];
-                        look(cam, [land[0], land[1], land[2] + 40.0])
+                        let cam = [from[0] + (goal[0] - from[0]) * e, from[1] + (goal[1] - from[1]) * e, from[2] + (goal[2] - from[2]) * e];
+                        look(cam, [land[0], land[1], land[2] + 30.0])
                     };
                     vc.send(&cmd);
                 }

@@ -3041,14 +3041,14 @@ async function loadLineups(force = false) {
 }
 const NADE_KINDS = [["smoke", "Smokes", "smokegrenade"], ["molotov", "Molotovs", "molotov"], ["flash", "Flashes", "flashbang"], ["he", "HEs", "hegrenade"]];
 const CATEGORY_NAMES = { instant: "Instant", set: "Set", fly: "On the move" };
-const grenades = { kinds: new Set(["smoke", "molotov", "flash", "he"]), category: "all", side: "all", min: 2, sel: null, zoom: 1, pan: [0, 0], map: null };
+const grenades = { kinds: new Set(["smoke", "molotov", "flash", "he"]), category: "all", side: "all", min: 2, videoOnly: false, sel: null, zoom: 1, pan: [0, 0], map: null };
 const placeName2 = (s) => (s || "").replace(/([a-z])([A-Z])/g, "$1 $2").replace("Bombsite", "Site ");
 const lineupClip = (id) => state.lineupClips?.[id];
 // A lineup's thumbnail: its video's frame (plays on hover) or a placeholder.
 function lineupThumb(l, cls = "") {
   const c = lineupClip(l.id);
   if (c?.clip) return `<div class="hl-card gn-thumb ${cls}" data-clip="${esc(c.clip)}" data-lineup="${esc(l.id)}"><div class="hl-thumb" style="${c.thumb ? `background-image:url('${assetUrl(c.thumb)}')` : ""}"><span class="play">▶</span></div></div>`;
-  return `<div class="gn-thumb none ${cls}" title="${c?.error ? esc(c.error) : "No video yet"}"><span>${c?.error ? "No demo" : "No video yet"}</span></div>`;
+  return `<div class="gn-thumb none ${cls}" title="${c?.error ? esc(c.error) : "No video yet"}"><span>${c?.too_old ? "Old demos only" : c?.error ? "No video" : "No video yet"}</span></div>`;
 }
 
 async function renderGrenades(view, map) {
@@ -3078,7 +3078,7 @@ async function renderGrenades(view, map) {
 function renderGrenadeMap(view, d, map) {
   if (grenades.map !== map) Object.assign(grenades, { map, sel: null, zoom: 1, pan: [0, 0] });
   const shown = d.lineups.filter((l) => grenades.kinds.has(l.kind) && (grenades.category === "all" ? l.category !== "fly" : l.category === grenades.category)
-    && (grenades.side === "all" || l.side === grenades.side) && l.count >= grenades.min);
+    && (grenades.side === "all" || l.side === grenades.side) && l.count >= grenades.min && (!grenades.videoOnly || lineupClip(l.id)?.clip));
   const sel = shown.find((l) => l.id === grenades.sel) || null;
   loadRadar(map).then((radar) => {
     const size = radar?.size || 1024;
@@ -3123,6 +3123,7 @@ function renderGrenadeMap(view, d, map) {
       <div class="seg" id="gn-cat">${[["all", "Instant + set"], ["instant", "Instant"], ["set", "Set"], ["fly", "On the move"]].map(([k, l]) => `<button data-cat="${k}" class="${grenades.category === k ? "on" : ""}">${l}</button>`).join("")}</div>
       <div class="seg" id="gn-side">${[["all", "Both"], ["T", "T"], ["CT", "CT"]].map(([k, l]) => `<button data-side="${k}" class="${grenades.side === k ? "on" : ""}">${l}</button>`).join("")}</div>
       <label class="gn-min">Thrown at least <select id="gn-min">${[1, 2, 3, 5, 10].map((n) => `<option value="${n}" ${grenades.min === n ? "selected" : ""}>${n}×</option>`).join("")}</select></label>
+      <label class="gn-min"><input type="checkbox" id="gn-vid" ${grenades.videoOnly ? "checked" : ""}> Only with video</label>
     </div>
     <div class="gn-main">
       <section class="tl-map"><div class="tl-viewport"><div class="tl-canvas" style="transform:translate(${grenades.pan[0]}px,${grenades.pan[1]}px) scale(${grenades.zoom})">
@@ -3131,6 +3132,7 @@ function renderGrenadeMap(view, d, map) {
       <section class="gn-side">
         ${sel ? `<div class="gn-detail">
           <div class="gn-video">${clip?.clip ? `<video id="gn-video" src="${assetUrl(clip.clip)}" controls autoplay muted loop playsinline></video>`
+            : clip?.too_old ? `<div class="gn-novideo"><b>No video</b><span>Every time this was thrown, it was in a demo from before a CS2 update, and CS2 can't play those demos any more. It gets a video the next time it's thrown in one of your matches.</span></div>`
             : `<div class="gn-novideo">${clip?.error ? `<b>No video</b><span>${esc(clip.error)}</span>` : `<b>No video yet</b><span>Veloxify films lineups in the background after your highlights, most thrown first.</span>`}${tauri ? `<button class="btn primary" id="gn-render">Film this lineup now</button>` : ""}</div>`}</div>
           <div class="gn-title">${kindIcon(sel.kind)}<b>${esc(sel.name)}</b>${sel.spawn ? `<span class="gn-spawnchip">Spawn #${sel.spawn}</span>` : ""}<span class="gn-x">×${sel.count}</span></div>
           <div class="sub">${sub(sel)} · ${sel.side} · thrown ${sel.count} time${sel.count === 1 ? "" : "s"} in ${sel.matches} match${sel.matches === 1 ? "" : "es"} by ${sel.throwers} player${sel.throwers === 1 ? "" : "s"} · around ${mmss(sel.t)} into the round</div>
@@ -3152,6 +3154,7 @@ function renderGrenadeMap(view, d, map) {
   view.querySelectorAll("[data-cat]").forEach((b) => (b.onclick = () => { grenades.category = b.dataset.cat; grenades.sel = null; rerender(); }));
   view.querySelectorAll("[data-side]").forEach((b) => (b.onclick = () => { grenades.side = b.dataset.side; grenades.sel = null; rerender(); }));
   view.querySelector("#gn-min").onchange = (e) => { grenades.min = Number(e.target.value); grenades.sel = null; rerender(); };
+  view.querySelector("#gn-vid").onchange = (e) => { grenades.videoOnly = e.target.checked; grenades.sel = null; rerender(); };
   view.querySelectorAll(".gn-item[data-gl]").forEach((b) => (b.onclick = (e) => { if (e.target.closest(".hl-card")) return; grenades.sel = b.dataset.gl; rerender(); }));
   view.querySelectorAll(".gn-item .hl-card").forEach((c) => (c.onclick = (e) => { e.stopPropagation(); grenades.sel = c.dataset.lineup; rerender(); }));
   view.querySelector("#gn-back")?.addEventListener("click", () => { grenades.sel = null; rerender(); });

@@ -143,6 +143,8 @@ struct EntryLite {
     id: String,
     map: String,
     #[serde(default)]
+    played_ts: i64,
+    #[serde(default)]
     players: Vec<PlayerLite>,
 }
 
@@ -297,21 +299,13 @@ pub fn write(root: &Path) -> Result<()> {
                 *clicks.entry(t.click.as_str()).or_default() += 1;
             }
             let click = clicks.iter().max_by_key(|(_, c)| **c).map(|(k, _)| k.to_string()).unwrap_or_default();
-            // The video: the throw closest to the group's average (spot and aim) with a flight
-            // and a tick to render from; newest matches first on ties (their demos are still around).
+            // The video and the examples: newest matches first (their demos are still on disk and
+            // CS2 can still play them; old demos stop playing after CS2 updates).
             let mean = |f: &dyn Fn(&DThrow) -> f32| g.members.iter().map(|(_, t)| f(t)).sum::<f32>() / n as f32;
-            let (mx, my, mp) = (mean(&|t| t.from[0]), mean(&|t| t.from[1]), mean(&|t| t.pitch));
-            let rep = g
-                .members
-                .iter()
-                .filter(|(_, t)| t.tick > 0)
-                .min_by(|a, b| {
-                    let d = |t: &DThrow| (t.from[0] - mx).hypot(t.from[1] - my) / SAME_SPOT + (t.pitch - mp).abs() / SAME_AIM;
-                    d(a.1).total_cmp(&d(b.1)).then(b.0.cmp(a.0))
-                })
-                .or(g.members.first())
-                .copied()
-                .unwrap();
+            let played = |mid: &str| entries.get(mid).map_or(0, |e| e.played_ts);
+            let mut newest: Vec<(&str, &DThrow)> = g.members.clone();
+            newest.sort_by_key(|(mid, t)| (std::cmp::Reverse(played(mid)), t.round, t.tick));
+            let rep = newest.iter().find(|(_, t)| t.tick > 0 && t.path.len() > 1).or(newest.first()).copied().unwrap();
             let occ = |(mid, t): (&str, &DThrow)| Occurrence {
                 match_id: mid.to_string(),
                 round: t.round,
@@ -372,7 +366,7 @@ pub fn write(root: &Path) -> Result<()> {
                 click,
                 t: mean(&|t| t.t),
                 video: occ(rep),
-                examples: g.members.iter().rev().take(EXAMPLES).map(|m| occ(*m)).collect(),
+                examples: newest.iter().take(EXAMPLES).map(|m| occ(*m)).collect(),
             });
         }
         // Names: the most thrown first within each category and kind.

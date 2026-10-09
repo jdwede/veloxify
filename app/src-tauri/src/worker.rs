@@ -55,7 +55,7 @@ enum Batch {
 }
 
 /// Lineup videos filmed per automatic run (about 15 s each).
-const LINEUPS_PER_RUN: usize = 20;
+const LINEUPS_PER_RUN: usize = 30;
 
 /// An import that fails with an error (not a skip) is tried again on later passes, up to this
 /// many times, before the demo is left alone.

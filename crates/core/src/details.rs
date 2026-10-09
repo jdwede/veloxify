@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
 /// Bumped whenever what's in a details file changes, so older ones are rebuilt.
-pub const VERSION: u32 = 10;
+pub const VERSION: u32 = 11;
 
 /// Spotted state is sampled every this many ticks.
 const SPOT_STEP: i32 = 2;
@@ -702,7 +702,8 @@ fn median(mut v: Vec<f64>) -> Option<f64> {
 
 /// Angle between two view directions given as (pitch, yaw) in degrees.
 /// A grenade's flight from the projectile positions: the thrower's projectile of that kind that
-/// appears right after the throw, followed until it went off.
+/// appears right after the throw, followed until it went off. `path[i]` is where it was at
+/// `from + 4i` (other throws' 4-tick grids put extra ticks in between, which are left out).
 fn flight_path(points: &[raw::ProjectilePoint], thrower: u64, kind: GrenadeKind, from: i32, to: i32) -> Vec<[i32; 3]> {
     let class_ok = |c: &str| match kind {
         GrenadeKind::Smoke => c.contains("Smoke"),
@@ -718,10 +719,25 @@ fn flight_path(points: &[raw::ProjectilePoint], thrower: u64, kind: GrenadeKind,
     else {
         return vec![];
     };
-    let mut path: Vec<&raw::ProjectilePoint> = points.iter().filter(|p| p.entity == entity && p.tick >= from && p.tick <= to + 2).collect();
-    path.sort_by_key(|p| p.tick);
-    path.dedup_by_key(|p| p.tick);
-    path.iter().map(|p| [p.xyz[0].round() as i32, p.xyz[1].round() as i32, p.xyz[2].round() as i32]).collect()
+    let mut seen: Vec<&raw::ProjectilePoint> =
+        points.iter().filter(|p| p.entity == entity && p.tick >= from && p.tick <= to + 2 && (p.tick - from) % 4 == 0).collect();
+    seen.sort_by_key(|p| p.tick);
+    seen.dedup_by_key(|p| p.tick);
+    let (Some(first), Some(last)) = (seen.first(), seen.last()) else {
+        return vec![];
+    };
+    // One point per grid tick; a missing one repeats the point before it.
+    let mut at = first.xyz;
+    let mut next = seen.iter().peekable();
+    (from..=last.tick)
+        .step_by(4)
+        .map(|t| {
+            while let Some(p) = next.next_if(|p| p.tick <= t) {
+                at = p.xyz;
+            }
+            [at[0].round() as i32, at[1].round() as i32, at[2].round() as i32]
+        })
+        .collect()
 }
 
 fn view_angle(a: (f64, f64), b: (f64, f64)) -> f64 {
