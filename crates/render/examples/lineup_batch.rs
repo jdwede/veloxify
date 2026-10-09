@@ -21,7 +21,8 @@ fn main() -> Result<()> {
     let t0 = Instant::now();
     let stamp = || format!("{:>6.1}s", t0.elapsed().as_secs_f64());
     let done = render_lineups(&lib, me, profile, &work, ids, n, Arc::new(AtomicBool::new(false)), &mut |e| match e {
-        Event::Plan { total } => println!("{} plan: {total}", stamp()),
+        Event::Plan { total, more } => println!("{} plan: {total} ({more} more later)", stamp()),
+        Event::Filming { title } => println!("{} filming {title}", stamp()),
         Event::Rendered { match_id, title, took_s, .. } => println!("{} RENDERED {title} ({match_id}) in {took_s:.0}s", stamp()),
         Event::Failed { title, error, .. } => println!("{} FAILED {title}: {error}", stamp()),
         Event::Done { rendered, .. } => println!("{} done: {rendered}", stamp()),

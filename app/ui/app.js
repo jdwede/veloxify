@@ -4421,12 +4421,14 @@ document.getElementById("player-copy").onclick = async (e) => {
 
 // ---- live status and library updates from the background worker --------------------------------
 
+const CAPTURE_WHAT = { highlights: "Highlight", lowlights: "Lowlight", clips: "Clip", lineups: "Grenade lineup" };
+
 function showStatus(st) {
   const el = document.getElementById("status");
   if (!st) return;
   const busy = st.state === "importing" || st.state === "rendering";
   el.classList.toggle("busy", busy);
-  el.textContent = st.state === "rendering" && st.total ? `Rendering ${Math.min(st.done + 1, st.total)} of ${st.total}`
+  el.textContent = st.state === "rendering" && st.total ? `${CAPTURE_WHAT[st.kind] || "Clip"}s ${Math.min(st.done + 1, st.total)} of ${st.total}`
     : st.state === "importing" && st.total ? `Reading matches ${st.done + 1}/${st.total}`
     : st.state === "waiting" ? "Playing · clips after CS2 closes"
     : st.state === "error" ? "Needs attention" : "Up to date";
@@ -4434,7 +4436,7 @@ function showStatus(st) {
   // While CS2 is busy rendering, the status doubles as a stop button.
   el.classList.toggle("stoppable", st.state === "rendering");
   el.onclick = st.state === "rendering" ? () => tauri?.core.invoke("stop_rendering") : null;
-  if (st.state === "rendering") el.title = "CS2 is rendering your highlights in the background. Click to stop and hand CS2 back.";
+  if (st.state === "rendering") el.title = `CS2 is filming ${(CAPTURE_WHAT[st.kind] || "clip").toLowerCase()}s in the background. Click to stop and hand CS2 back.`;
 }
 
 const demoRunActive = () => !!(live.queue?.items?.length && !live.queue.finished && !live.queue.cancelled);
@@ -4509,11 +4511,15 @@ function renderBanner() {
   } else if (st?.state === "importing" && st.total) {
     b = { kind: "busy", title: "Analyzing matches", count: `${Math.min(st.done + 1, st.total)}/${st.total}`, frac: st.done / st.total, actions: [] };
   } else if (st?.state === "rendering") {
+    const what = CAPTURE_WHAT[st.kind] || "Clip";
+    // "Filming Set Smoke #4": what's being recorded right now.
+    const now = /^Filming \D/.test(st.message || "") ? st.message.slice("Filming ".length) : "";
     b = {
       kind: "rec",
-      title: st.total ? "Clip capture in progress" : "Starting clip capture",
+      title: st.total ? `${what} capture in progress` : `Starting ${what.toLowerCase()} capture`,
       count: st.total ? `${Math.min(st.done + 1, st.total)}/${st.total}` : "",
       frac: st.total ? st.done / st.total : 0,
+      note: [now && `Now filming: ${now}`, st.kind === "lineups" && st.more ? `Most thrown first, ${st.total} at a time · ${st.more} more after this batch` : ""].filter(Boolean).join(" · "),
       actions: [["Stop", () => tauri.core.invoke("stop_rendering")]],
     };
   } else if (st?.state === "error") {

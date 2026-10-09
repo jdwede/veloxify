@@ -58,7 +58,10 @@ pub enum Scope {
 }
 
 pub enum Event {
-    Plan { total: usize },
+    /// This run makes `total`; `more` are waiting for later runs (lineup videos go in batches).
+    Plan { total: usize, more: usize },
+    /// Recording this one now.
+    Filming { title: String },
     Rendered { match_id: String, title: String, clip_s: f64, took_s: f64 },
     Failed { match_id: String, title: String, error: String },
     Done { rendered: usize, minutes: f64 },
@@ -149,7 +152,7 @@ pub fn render(
     if let Some(n) = limit {
         order.truncate(n);
     }
-    on(Event::Plan { total: order.len() });
+    on(Event::Plan { total: order.len(), more: 0 });
     if order.is_empty() {
         return Ok(0);
     }
@@ -261,6 +264,7 @@ pub fn render(
         // Only while you're alive: after you die, CS2's camera follows someone else.
         let segments = if me_at.is_empty() { segments } else { trim_to_life(&segments, &me_at) };
         let eyes = |t: i32| me_at.get(&t).map(|p| (p.0, p.1));
+        on(Event::Filming { title: title.clone() });
         let recorded = if segments.is_empty() {
             Err(anyhow::anyhow!("you weren't alive for this moment"))
         } else {
@@ -493,35 +497,10 @@ pub fn render_lineups(
         jobs.push(Job { id: l.id.clone(), title: l.name.clone(), kind: l.kind.clone(), count: l.count, tries });
     }
     save_lineup_clips(lib, &clips)?;
-    // Loading a demo takes about a minute, filming a lineup about half that: go match by match,
-    // each time the playable match with the most lineups still to film (newest on ties), filming
-    // all of them from it. Only among the most thrown lineups, so those get their videos first,
-    // whatever the map.
-    let mut remaining: Vec<Job> = jobs.into_iter().take(limit * 3).collect();
-    let mut jobs: Vec<Job> = vec![];
-    while jobs.len() < limit && !remaining.is_empty() {
-        let mut serves: HashMap<String, usize> = HashMap::new();
-        for j in &remaining {
-            let mut seen: Vec<&str> = j.tries.iter().map(|t| t.match_id.as_str()).collect();
-            seen.sort_unstable();
-            seen.dedup();
-            for m in seen {
-                *serves.entry(m.to_string()).or_default() += 1;
-            }
-        }
-        let Some(best) = serves.iter().max_by_key(|(m, n)| (**n, when(m).unwrap_or(0))).map(|(m, _)| m.clone()) else { break };
-        let (take, rest): (Vec<Job>, Vec<Job>) = remaining.into_iter().partition(|j| j.tries.iter().any(|t| t.match_id == best));
-        remaining = rest;
-        for mut j in take {
-            if jobs.len() >= limit {
-                break;
-            }
-            // That match first, then the others (newest first) if it doesn't work out.
-            j.tries.sort_by_key(|t| (t.match_id != best, std::cmp::Reverse(when(&t.match_id).unwrap_or(0))));
-            jobs.push(j);
-        }
-    }
-    on(Event::Plan { total: jobs.len() });
+    // Straight down the list, most thrown first (each from its newest throw CS2 can play).
+    let waiting = jobs.len();
+    let jobs: Vec<Job> = jobs.into_iter().take(limit).collect();
+    on(Event::Plan { total: jobs.len(), more: waiting - jobs.len() });
     if jobs.is_empty() {
         return Ok(0);
     }
@@ -565,20 +544,19 @@ pub fn render_lineups(
     let (mut rendered, mut stopped) = (0, false);
     // Every throw this run may film: (match, player, tick).
     let all_tries: Vec<(String, String, i32)> = jobs.iter().flat_map(|j| j.tries.iter()).map(|t| (t.match_id.clone(), t.player.clone(), t.tick)).collect();
-    // Pass by pass: each lineup's next throw to try, the loaded demo's first. A lineup that fails
-    // is tried from its next throw in a later pass, so a failure doesn't make CS2 swap demos back
-    // and forth.
+    // Pass by pass, in list order: each lineup's next throw to try. A lineup that fails is tried
+    // from its next throw in a later pass, so none is left out because one throw didn't work.
     let mut queue: Vec<(Job, usize, String)> = jobs.into_iter().map(|j| (j, 0, String::new())).collect();
     'passes: for _pass in 0..4 {
     if queue.is_empty() {
         break;
     }
-    queue.sort_by(|a, b| {
-        let (ma, mb) = (a.0.tries[a.1].match_id.as_str(), b.0.tries[b.1].match_id.as_str());
-        (Some(ma) != loaded.as_deref()).cmp(&(Some(mb) != loaded.as_deref())).then(ma.cmp(mb))
-    });
     let mut next: Vec<(Job, usize, String)> = vec![];
-    'jobs: for (job, idx, mut last_error) in std::mem::take(&mut queue) {
+    'jobs: for (mut job, idx, mut last_error) in std::mem::take(&mut queue) {
+        // Thrown in the demo CS2 already has loaded too: film it from that one (no reload).
+        if let Some(k) = job.tries.iter().skip(idx).position(|t| Some(t.match_id.as_str()) == loaded.as_deref()) {
+            job.tries.swap(idx, idx + k);
+        }
         for o in job.tries.iter().skip(idx).take(1) {
             if unplayable.contains(&o.match_id) || failed_loads.contains(&o.match_id) || when(&o.match_id).is_none_or(|ts| ts <= cutoff) {
                 continue;
@@ -698,6 +676,7 @@ pub fn render_lineups(
             };
             let rel = format!("lineups/{}.mp4", job.id);
             let ts = Instant::now();
+            on(Event::Filming { title: job.title.clone() });
             match r.record_lineup(&shot, &lib.join(&rel)) {
                 Ok(()) => {
                     // The thumbnail: the thrower lined up, just before the throw.

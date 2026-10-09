@@ -68,6 +68,20 @@ pub struct Status {
     pub message: String,
     pub done: usize,
     pub total: usize,
+    /// While rendering, what: "highlights", "lowlights", "clips" (both, on request) or "lineups".
+    pub kind: String,
+    /// Lineup videos waiting for later batches.
+    pub more: usize,
+}
+
+/// What a batch films, in words: "highlights", "lowlights", "clips", "lineup videos".
+fn kind_noun(kind: &str) -> &'static str {
+    match kind {
+        "lineups" => "lineup videos",
+        "lowlights" => "lowlights",
+        "clips" => "clips",
+        _ => "highlights",
+    }
 }
 
 pub struct Worker {
@@ -98,7 +112,12 @@ impl Worker {
     }
 
     fn set(&self, state: &str, message: impl Into<String>, done: usize, total: usize) {
-        let s = Status { state: state.into(), message: message.into(), done, total };
+        // What's rendering stays known through the batch.
+        let (kind, more) = {
+            let cur = self.status.lock().unwrap();
+            if state == "rendering" { (cur.kind.clone(), cur.more) } else { (String::new(), 0) }
+        };
+        let s = Status { state: state.into(), message: message.into(), done, total, kind, more };
         let changed_state = self.status.lock().unwrap().state != s.state;
         if changed_state || self.status.lock().unwrap().message != s.message {
             vlog!("[{}] {}", s.state, s.message);
@@ -108,8 +127,8 @@ impl Worker {
         if let Some(tray) = self.app.tray_by_id("tray") {
             let busy = s.state == "rendering";
             let tip = match s.state.as_str() {
-                "rendering" if s.total > 0 => format!("Veloxify: rendering highlights {}/{} (CS2 in use)", (s.done + 1).min(s.total), s.total),
-                "rendering" => "Veloxify: starting CS2 to render highlights".to_string(),
+                "rendering" if s.total > 0 => format!("Veloxify: filming {} {}/{} (CS2 in use)", kind_noun(&s.kind), (s.done + 1).min(s.total), s.total),
+                "rendering" => format!("Veloxify: starting CS2 to film {}", kind_noun(&s.kind)),
                 "importing" => format!("Veloxify: {}", s.message),
                 "waiting" => "Veloxify: waiting for CS2 to close".to_string(),
                 "error" => format!("Veloxify: {}", s.message),
@@ -510,8 +529,13 @@ impl Worker {
         if empty {
             return;
         }
-        let lineups = matches!(what, Batch::Lineups(_));
-        let noun = if lineups { "lineup videos" } else { "highlights" };
+        let kind = match &what {
+            Batch::Lineups(_) => "lineups",
+            Batch::Clips(Scope::Items(items)) if items.iter().all(|(_, id)| id.contains("-ll-")) => "lowlights",
+            Batch::Clips(Scope::Items(items)) if items.iter().any(|(_, id)| id.contains("-ll-")) => "clips",
+            Batch::Clips(_) => "highlights",
+        };
+        let noun = kind_noun(kind);
         let profile = match Profile::load(&settings.profile) {
             Ok(p) => p,
             Err(e) => {
@@ -553,12 +577,18 @@ impl Worker {
         let mut total = 0;
         let mut done = 0;
         let abort = self.abort.clone();
+        {
+            let mut s = self.status.lock().unwrap();
+            s.kind = kind.into();
+            s.more = 0;
+        }
         let mut on = |e: Event| match e {
-            Event::Plan { total: t } => {
+            Event::Plan { total: t, more } => {
                 total = t;
-                self.set("rendering", format!("Rendering {t} {noun}"), 0, t);
-                // Lineup videos run quietly after the highlights; highlights get a heads-up.
-                if !lineups {
+                self.status.lock().unwrap().more = more;
+                self.set("rendering", format!("Filming {t} {noun}"), 0, t);
+                // Your session's highlights get a heads-up; the rest run quietly or were asked for.
+                if kind == "highlights" {
                     self.notify(
                         "Rendering your highlights",
                         &format!(
@@ -568,6 +598,7 @@ impl Worker {
                     );
                 }
             }
+            Event::Filming { title } => self.set("rendering", format!("Filming {title}"), done, total),
             Event::Rendered { title, .. } => {
                 done += 1;
                 self.set("rendering", format!("Rendered {title}"), done, total);
@@ -580,7 +611,7 @@ impl Worker {
             }
             Event::Done { rendered, minutes } => {
                 vlog!("{noun}: done, {rendered} made in {minutes:.1} min");
-                if rendered > 0 && !lineups {
+                if rendered > 0 && kind == "highlights" {
                     self.notify("Your highlights are ready", &format!("{rendered} new highlight{} from your session", if rendered == 1 { "" } else { "s" }));
                 }
             }
