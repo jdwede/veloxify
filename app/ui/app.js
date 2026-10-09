@@ -2316,7 +2316,7 @@ async function renderLineupsTab(body, m, id) {
   const names = new Map(m.players.map((p) => [p.steamid, p.name]));
   const team = new Map(m.players.map((p) => [p.steamid, p.side]));
   const callout = calloutFinder(d);
-  const all = d.throws.filter((t) => (!lineups.setOnly || t.set));
+  const all = d.throws.filter((t) => !lineups.setOnly || (mapLineups?.by_throw ? lineupOf(t) : t.set));
   // The same lineup thrown again (same spot, same aim, same landing) counts once, with how often.
   const groups = [];
   for (const t of all.slice().sort((a, b) => a.round - b.round || a.t - b.t)) {
@@ -2349,7 +2349,7 @@ async function renderLineupsTab(body, m, id) {
   body.innerHTML = `
     <div class="ln-bar">
       <div class="chips">${Object.entries(NADE_INFO).map(([k, [label, w]]) => `<button class="chip ${lineups.kinds.has(k) ? "on" : ""}" data-kind="${k}">${weaponIcon(w)} ${label} <span class="sub">${counts[k]}</span></button>`).join("")}</div>
-      <label class="check"><input type="checkbox" id="ln-set" ${lineups.setOnly ? "checked" : ""}> Set lineups only</label>
+      <label class="check"><input type="checkbox" id="ln-set" ${lineups.setOnly ? "checked" : ""}> Lineups only (instant smokes and set lineups)</label>
       <div class="seg" id="ln-team">${[["all", "Both teams"], ["mine", "My team"], ["enemy", "Enemy"]].map(([k, l]) => `<button data-team="${k}" class="${lineups.team === k ? "on" : ""}">${l}</button>`).join("")}</div>
       <select id="ln-player"><option value="">Everyone</option>${players.map((p) => `<option value="${p.steamid}" ${lineups.player === p.steamid ? "selected" : ""}>${esc(p.name)}</option>`).join("")}</select>
     </div>
@@ -3040,8 +3040,7 @@ async function loadLineups(force = false) {
   return state.lineups;
 }
 const NADE_KINDS = [["smoke", "Smokes", "smokegrenade"], ["molotov", "Molotovs", "molotov"], ["flash", "Flashes", "flashbang"], ["he", "HEs", "hegrenade"]];
-const CATEGORY_NAMES = { instant: "Instant", set: "Set", fly: "On the move" };
-const grenades = { kinds: new Set(["smoke", "molotov", "flash", "he"]), category: "all", side: "all", min: 2, videoOnly: false, sel: null, zoom: 1, pan: [0, 0], map: null };
+const grenades = { kinds: new Set(["smoke", "molotov", "flash", "he"]), category: "instant", side: "all", min: 2, videoOnly: false, sel: null, zoom: 1, pan: [0, 0], map: null };
 const placeName2 = (s) => (s || "").replace(/([a-z])([A-Z])/g, "$1 $2").replace("Bombsite", "Site ");
 const lineupClip = (id) => state.lineupClips?.[id];
 // A lineup's thumbnail: its video's frame (plays on hover) or a placeholder.
@@ -3065,19 +3064,22 @@ async function renderGrenades(view, map) {
   const maps = Object.entries(L.maps).map(([m, d]) => ({ m, d, total: Object.values(d.counts).reduce((a, b) => a + b, 0) })).sort((a, b) => b.total - a.total);
   const videosOn = (m) => Object.entries(state.lineupClips || {}).filter(([id, c]) => id.startsWith(`${m}-`) && c.clip).length;
   view.innerHTML = `
-    <div class="gn-head"><div><div class="h1">Grenades</div><div class="sub">Every lineup thrown in your demos, grouped when it's the same one, most used first. Pick a map.</div></div></div>
+    <div class="gn-head"><div><div class="h1">Grenades</div><div class="sub">Instant smokes from spawn and set lineups thrown in your matches, each counted once however often it was thrown, most thrown first. Grenades thrown on the move aren't lineups and aren't listed. Pick a map.</div></div></div>
     <div class="gn-maps">${maps.map(({ m, d, total }) => {
       const videos = videosOn(m);
       return `<a class="gn-map" href="#/grenades/${esc(m)}">
         <div class="gn-map-pic" style="background-image:url('${assetUrl(`mapshots/${m}.png`)}')"><div class="gn-map-name">${mapIcon(m)}<b>${esc(mapName(m))}</b></div></div>
         <div class="gn-map-counts">${NADE_KINDS.map(([k, , icon]) => `<span title="${esc(k)} lineups">${weaponIcon(icon)}<b>${d.counts[k] || 0}</b></span>`).join("")}</div>
-        <div class="gn-map-foot"><span>${total} lineups</span><span>${d.throws} throws · ${d.matches} matches</span><span>${videos} videos</span></div></a>`;
+        <div class="gn-map-foot"><span>${d.instant || 0} instant smokes</span><span>${total - (d.instant || 0)} set lineups</span><span>${videos} videos</span></div></a>`;
     }).join("")}</div>`;
 }
 
 function renderGrenadeMap(view, d, map) {
   if (grenades.map !== map) Object.assign(grenades, { map, sel: null, zoom: 1, pan: [0, 0] });
-  const shown = d.lineups.filter((l) => grenades.kinds.has(l.kind) && (grenades.category === "all" ? l.category !== "fly" : l.category === grenades.category)
+  // A map without instant smokes opens on its set lineups.
+  if (grenades.category === "instant" && !d.lineups.some((l) => l.category === "instant")) grenades.category = "set";
+  const instantView = grenades.category === "instant";
+  const shown = d.lineups.filter((l) => l.category === grenades.category && (instantView || grenades.kinds.has(l.kind))
     && (grenades.side === "all" || l.side === grenades.side) && l.count >= grenades.min && (!grenades.videoOnly || lineupClip(l.id)?.clip));
   const sel = shown.find((l) => l.id === grenades.sel) || null;
   loadRadar(map).then((radar) => {
@@ -3111,18 +3113,19 @@ function renderGrenadeMap(view, d, map) {
   const tagList = (l) => Object.entries(l.tags || {}).sort((a, b) => b[1] - a[1]);
   const setpos = sel ? `setpos ${sel.from[0].toFixed(2)} ${sel.from[1].toFixed(2)} ${sel.from[2].toFixed(2)};setang ${sel.pitch.toFixed(2)} ${sel.yaw.toFixed(2)} 0` : "";
   const clip = sel ? lineupClip(sel.id) : null;
-  const counts = Object.fromEntries(NADE_KINDS.map(([k]) => [k, d.lineups.filter((l) => l.kind === k && (grenades.category === "all" ? l.category !== "fly" : l.category === grenades.category)).length]));
+  const counts = Object.fromEntries(NADE_KINDS.map(([k]) => [k, d.lineups.filter((l) => l.kind === k && l.category === "set").length]));
+  const nInstant = d.lineups.filter((l) => l.category === "instant").length;
   const kindIcon = (k) => weaponIcon(NADE_KINDS.find((x) => x[0] === k)?.[2] || "smokegrenade");
   const sub = (l) => `${esc(placeName2(l.from_place) || "?")} → ${esc(placeName2(l.to_place) || "?")}`;
   view.innerHTML = `
     <a class="day-back" href="#/grenades">◀ All maps</a>
     <div class="gn-maphead" style="--shot:url('${assetUrl(`mapshots/${map}.png`)}')">${mapIcon(map)}<div><div class="h1">${esc(mapName(map))} lineups</div>
-      <div class="sub">${d.lineups.length} lineups from ${d.throws} throws in ${d.matches} matches</div></div></div>
+      <div class="sub">${nInstant} instant smoke${nInstant === 1 ? "" : "s"} and ${d.lineups.length - nInstant} set lineup${d.lineups.length - nInstant === 1 ? "" : "s"} from ${d.matches} match${d.matches === 1 ? "" : "es"}</div></div></div>
     <div class="ln-bar">
-      <div class="chips">${NADE_KINDS.map(([k, label, icon]) => `<button class="chip ${grenades.kinds.has(k) ? "on" : ""}" data-kind="${k}">${weaponIcon(icon)} ${label} <span class="sub">${counts[k]}</span></button>`).join("")}</div>
-      <div class="seg" id="gn-cat">${[["all", "Instant + set"], ["instant", "Instant"], ["set", "Set"], ["fly", "On the move"]].map(([k, l]) => `<button data-cat="${k}" class="${grenades.category === k ? "on" : ""}">${l}</button>`).join("")}</div>
+      <div class="seg" id="gn-cat">${[["instant", `Instant smokes <span class="sub">${nInstant}</span>`], ["set", `Set lineups <span class="sub">${d.lineups.length - nInstant}</span>`]].map(([k, l]) => `<button data-cat="${k}" class="${grenades.category === k ? "on" : ""}">${l}</button>`).join("")}</div>
+      ${instantView ? "" : `<div class="chips">${NADE_KINDS.map(([k, label, icon]) => `<button class="chip ${grenades.kinds.has(k) ? "on" : ""}" data-kind="${k}">${weaponIcon(icon)} ${label} <span class="sub">${counts[k]}</span></button>`).join("")}</div>`}
       <div class="seg" id="gn-side">${[["all", "Both"], ["T", "T"], ["CT", "CT"]].map(([k, l]) => `<button data-side="${k}" class="${grenades.side === k ? "on" : ""}">${l}</button>`).join("")}</div>
-      <label class="gn-min">Thrown at least <select id="gn-min">${[1, 2, 3, 5, 10].map((n) => `<option value="${n}" ${grenades.min === n ? "selected" : ""}>${n}×</option>`).join("")}</select></label>
+      <label class="gn-min">Thrown at least <select id="gn-min">${[2, 3, 5, 10].map((n) => `<option value="${n}" ${grenades.min === n ? "selected" : ""}>${n}×</option>`).join("")}</select></label>
       <label class="gn-min"><input type="checkbox" id="gn-vid" ${grenades.videoOnly ? "checked" : ""}> Only with video</label>
     </div>
     <div class="gn-main">
@@ -3147,7 +3150,7 @@ function renderGrenadeMap(view, d, map) {
             <div class="sub">${sub(l)} · ${l.side}</div><div class="gn-item-tag">${esc(l.technique)}</div></div></button>`).join("") || `<div class="empty small">No lineups with these filters.</div>`}</div>
       </section>
     </div>
-    <div class="note">The same lineup is the same spot (within a few units), the same aim (within about a degree) and the same landing, whoever threw it. Instant: thrown in the first seconds of the round from a spawn spot. Set: lined up (standing still, aim held) before throwing. Spawn numbers are the spawn spots on that side of the map.</div>`;
+    <div class="note">Instant smokes: smokes thrown in the first two seconds of the round from where the thrower spawned; spawn numbers are the spawn spots on that side of the map. Set lineups: lined up first (standing still with the crosshair held, or a run from a standstill into a jump throw), then thrown. A lineup counts when it was thrown at least twice from the same spot to the same place, whoever threw it.</div>`;
 
   const rerender = () => renderGrenadeMap(view, d, map);
   view.querySelectorAll("[data-kind]").forEach((b) => (b.onclick = () => { const k = b.dataset.kind; if (grenades.kinds.has(k)) grenades.kinds.delete(k); else grenades.kinds.add(k); grenades.sel = null; rerender(); }));

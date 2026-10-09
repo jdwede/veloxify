@@ -182,9 +182,6 @@ impl Renderer {
         if cs2_running() {
             bail!("CS2 is running; renders only happen while it's closed");
         }
-        if !crate::steam::signed_in() {
-            bail!("Steam isn't signed in; renders wait until it is");
-        }
         crate::dpi_aware();
         // Order matters: send audio to the silent device before letting CS2 play while unfocused
         // (and undo in reverse), so nothing can reach the user's speakers in between.
@@ -277,11 +274,24 @@ impl Renderer {
         let prev = window::foreground();
         (self.log)("launching CS2 in the background");
         let t0 = Instant::now();
-        let mut c = Command::new(steam::steam_exe());
-        c.args(["-applaunch", "730", "-insecure", "-novid", "-windowed", "-noborder"]);
-        c.args(["-w", &o.width.to_string(), "-h", &o.height.to_string()]);
-        c.args(["+demo_ui_mode", "0"]); // must be off before any demo plays; not a saved setting
-        c.spawn().context("starting Steam")?;
+        let exe = steam::steam_exe();
+        let (w, h) = (o.width.to_string(), o.height.to_string());
+        // `+demo_ui_mode 0` must be off before any demo plays; it's not a saved setting.
+        let args = ["-insecure", "-novid", "-windowed", "-noborder", "-w", &w, "-h", &h, "+demo_ui_mode", "0"];
+        if let Err(e) = Command::new(&exe).args(["-applaunch", "730"]).args(args).spawn() {
+            if e.raw_os_error() == Some(740) {
+                bail!(
+                    "Steam is set to run as administrator, so Veloxify can't ask it to open CS2. Right-click Steam's shortcut → Properties → \
+                     Compatibility (and \"Change settings for all users\"), untick \"Run this program as an administrator\", then restart Steam"
+                );
+            }
+            // Steam's own link reaches the Steam that's running, wherever it's installed.
+            (self.log)(&format!("couldn't start {} ({e}); asking Steam through its steam:// link", exe.display()));
+            Command::new("explorer.exe")
+                .arg(format!("steam://run/730//{}/", args.join(" ")))
+                .spawn()
+                .with_context(|| format!("starting Steam ({}: {e})", exe.display()))?;
+        }
         self.vc = Some(VConsole::connect(Duration::from_secs(120))?);
         while window::cs2_window().is_none() && t0.elapsed() < Duration::from_secs(60) {
             self.pause(Duration::from_millis(100))?;

@@ -2,58 +2,78 @@
 
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
-use windows::core::w;
-use windows::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RRF_RT_REG_SZ};
+use windows::core::{w, PCWSTR};
+use windows::Win32::System::Registry::{RegGetValueW, HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ};
 
 pub const STEAMID64_BASE: u64 = 76561197960265728;
 
-/// Steam's install folder, from the registry (falls back to the default location).
-pub fn steam_dir() -> PathBuf {
+/// A text value from the registry.
+fn reg_sz(hive: HKEY, key: PCWSTR, value: PCWSTR) -> Option<String> {
     let mut buf = [0u16; 1024];
     let mut len = (buf.len() * 2) as u32;
-    let ok = unsafe {
-        RegGetValueW(
-            HKEY_CURRENT_USER,
-            w!("Software\\Valve\\Steam"),
-            w!("SteamPath"),
-            RRF_RT_REG_SZ,
-            None,
-            Some(buf.as_mut_ptr().cast()),
-            Some(&mut len),
-        )
-    };
-    if ok.is_ok() {
-        let n = (len as usize / 2).saturating_sub(1);
-        let s = String::from_utf16_lossy(&buf[..n]);
-        if !s.is_empty() {
-            return PathBuf::from(s.replace('/', "\\"));
+    let ok = unsafe { RegGetValueW(hive, key, value, RRF_RT_REG_SZ, None, Some(buf.as_mut_ptr().cast()), Some(&mut len)) };
+    let n = (len as usize / 2).saturating_sub(1);
+    let s = String::from_utf16_lossy(&buf[..n.min(buf.len())]);
+    (ok.is_ok() && !s.is_empty()).then(|| s.replace('/', "\\"))
+}
+
+/// Where Steam says it's installed: your account's Steam settings first, then the machine's.
+fn steam_dirs() -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = [
+        reg_sz(HKEY_CURRENT_USER, w!("Software\\Valve\\Steam"), w!("SteamPath")),
+        reg_sz(HKEY_LOCAL_MACHINE, w!("SOFTWARE\\WOW6432Node\\Valve\\Steam"), w!("InstallPath")),
+        reg_sz(HKEY_LOCAL_MACHINE, w!("SOFTWARE\\Valve\\Steam"), w!("InstallPath")),
+    ]
+    .into_iter()
+    .flatten()
+    .map(PathBuf::from)
+    .collect();
+    dirs.push(PathBuf::from(r"C:\Program Files (x86)\Steam"));
+    dirs
+}
+
+/// Steam's install folder: the first one Windows knows of that has Steam in it.
+pub fn steam_dir() -> PathBuf {
+    let dirs = steam_dirs();
+    dirs.iter().find(|d| d.join("steam.exe").is_file()).unwrap_or(&dirs[0]).clone()
+}
+
+/// Steam's program: where Steam last said it was, else in its install folder.
+pub fn steam_exe() -> PathBuf {
+    reg_sz(HKEY_CURRENT_USER, w!("Software\\Valve\\Steam"), w!("SteamExe"))
+        .map(PathBuf::from)
+        .filter(|p| p.is_file())
+        .unwrap_or_else(|| steam_dir().join("steam.exe"))
+}
+
+/// The account last signed in on this PC, from Steam's list of remembered accounts
+/// (`config/loginusers.vdf`: account ids and names, no passwords): the one marked most recent,
+/// else the newest. For when Steam doesn't say who's signed in right now.
+pub fn recent_login() -> Option<u64> {
+    let text = std::fs::read_to_string(steam_dir().join("config").join("loginusers.vdf")).ok()?;
+    let mut best: Option<(bool, u64, u64)> = None; // (most recent, timestamp, steamid)
+    let mut cur: Option<(bool, u64, u64)> = None;
+    for line in text.lines() {
+        let parts: Vec<&str> = line.split('"').filter(|p| !p.trim().is_empty()).collect();
+        match parts.as_slice() {
+            [id] if id.len() == 17 && id.starts_with("7656") => {
+                best = best.max(cur.take());
+                cur = id.parse().ok().map(|id| (false, 0, id));
+            }
+            ["MostRecent", v] => {
+                if let Some(c) = cur.as_mut() {
+                    c.0 = *v == "1";
+                }
+            }
+            ["Timestamp", v] => {
+                if let Some(c) = cur.as_mut() {
+                    c.1 = v.parse().unwrap_or(0);
+                }
+            }
+            _ => {}
         }
     }
-    PathBuf::from(r"C:\Program Files (x86)\Steam")
-}
-
-/// Whether Steam is running with an account signed in (Steam keeps the signed-in account id in
-/// the registry; 0 while it's at the sign-in window). A game launched before then waits for the
-/// sign-in and starts after it, when the user may want to play.
-pub fn signed_in() -> bool {
-    let mut user = 0u32;
-    let mut len = 4u32;
-    let ok = unsafe {
-        RegGetValueW(
-            HKEY_CURRENT_USER,
-            w!("Software\\Valve\\Steam\\ActiveProcess"),
-            w!("ActiveUser"),
-            RRF_RT_REG_DWORD,
-            None,
-            Some((&mut user as *mut u32).cast()),
-            Some(&mut len),
-        )
-    };
-    ok.is_ok() && user != 0
-}
-
-pub fn steam_exe() -> PathBuf {
-    steam_dir().join("steam.exe")
+    best.max(cur).map(|(_, _, id)| id)
 }
 
 /// `...\Counter-Strike Global Offensive\game\csgo`, searching every Steam library folder.

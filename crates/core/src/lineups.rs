@@ -1,7 +1,13 @@
-//! Grenade lineups across the whole library (`lineups.json`): every throw from every match's
-//! details, with the same lineup thrown again (same spot, same aim, same landing) grouped and
-//! counted. Each group gets a category (instant from spawn, set, on the fly), a name ("Instant
-//! Smoke #1"), the spawn spot it starts from, how it's thrown, and one throw to render as its video.
+//! Grenade lineups across the whole library (`lineups.json`): the lineups thrown in every match,
+//! the same one thrown again grouped and counted. Two kinds count:
+//! - instant smokes: a smoke thrown in the first moments of the round from where the thrower
+//!   spawned (usually a jump throw, often with a tap of W), one or two per spawn spot;
+//! - set lineups: any grenade thrown after lining up (standing still with the aim held, or running
+//!   from a standstill into a jump throw) and thrown again from the same spot to the same place.
+//!
+//! Grenades thrown on the move aren't lineups and are left out, as is anything thrown only once.
+//! Each lineup gets a name ("Instant Smoke #1", "Set Molotov #4"), the spawn spot it starts from
+//! (instant smokes), how it's thrown, and one throw to film as its video.
 
 use crate::details::DThrow;
 use anyhow::Result;
@@ -9,14 +15,24 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
-/// Same lineup: thrown from within this many units, aim within this many degrees, landing within
-/// this many units.
-const SAME_SPOT: f32 = 32.0;
+/// Instant smoke: thrown within this many seconds of the round going live, from within this many
+/// units of where the thrower spawned.
+const INSTANT_S: f32 = 2.5;
+const SPAWN_NEAR: f32 = 100.0;
+/// Same lineup: thrown from within this many units (the same spawn spot, for instant smokes) and
+/// landing within this many. A slightly different aim from the same spot to the same place is the
+/// same lineup.
+const SAME_SPOT: f32 = 48.0;
 const SAME_HEIGHT: f32 = 40.0;
-const SAME_AIM: f32 = 1.2;
-const SAME_LANDING: f32 = 220.0;
-/// Thrown this early in the round (seconds after it goes live): an instant from spawn.
-const INSTANT_S: f32 = 10.0;
+const SAME_LANDING: f32 = 200.0;
+/// Lined up: stood still this long (a jump throw from a standstill, this long) with the aim held
+/// within this many degrees, and thrown at least this far.
+const LINED_STILL_S: f32 = 0.5;
+const LINED_JUMP_STILL_S: f32 = 0.2;
+const LINED_AIM: f32 = 1.0;
+const MIN_FLIGHT: f32 = 250.0;
+/// Bumped when the rules above change: `lineups.json` from older rules is rebuilt.
+pub const VERSION: u32 = 2;
 /// Spawn spots closer than this are one spot.
 const SPAWN_RADIUS: f32 = 48.0;
 /// Example throws kept per lineup.
@@ -35,7 +51,17 @@ pub struct Lineups {
 /// `lineups/<map>.json` (a [`MapLineups`] each), loaded when a map is opened.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct LineupsIndex {
+    #[serde(default)]
+    pub version: u32,
     pub maps: BTreeMap<String, MapSummary>,
+}
+
+/// Whether `lineups.json` was built with today's rules.
+pub fn current(root: &Path) -> bool {
+    std::fs::read_to_string(root.join("lineups.json"))
+        .ok()
+        .and_then(|t| serde_json::from_str::<LineupsIndex>(&t).ok())
+        .is_some_and(|i| i.version >= VERSION)
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -44,6 +70,9 @@ pub struct MapSummary {
     pub throws: usize,
     pub matches: usize,
     pub lineups: usize,
+    /// How many of the lineups are instant smokes (the rest are set lineups).
+    #[serde(default)]
+    pub instant: usize,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -80,7 +109,7 @@ pub struct Lineup {
     pub name: String,
     /// "smoke", "molotov", "flash", "he".
     pub kind: String,
-    /// "instant", "set" or "fly".
+    /// "instant" (smokes from spawn) or "set".
     pub category: String,
     pub side: String,
     /// Times thrown, in how many matches, by how many players.
@@ -134,8 +163,27 @@ pub fn technique_tag(t: &DThrow) -> String {
     }
 }
 
-fn angle_diff(a: f32, b: f32) -> f32 {
-    ((a - b + 540.0).rem_euclid(360.0) - 180.0).abs()
+/// A smoke thrown in the first moments of the round from where the thrower spawned.
+fn instant(t: &DThrow) -> bool {
+    t.kind == "smoke" && t.t < INSTANT_S && t.spawn.is_some_and(|s| (t.from[0] - s[0]).hypot(t.from[1] - s[1]) < SPAWN_NEAR)
+}
+
+/// Lined up before throwing: stood still with the aim held, or ran from a standstill into a jump
+/// throw with the aim held. Not a grenade thrown on the move.
+fn lined(t: &DThrow) -> bool {
+    if t.aim_moved_deg >= LINED_AIM {
+        return false;
+    }
+    match t.technique.as_str() {
+        "run" | "walk" => false,
+        "jump" if t.speed > 200.0 => t.still_s > 0.0,
+        "jump" => t.still_s >= LINED_JUMP_STILL_S,
+        _ => t.still_s >= LINED_STILL_S,
+    }
+}
+
+fn flight(t: &DThrow) -> f32 {
+    (t.to[0] - t.from[0]).hypot(t.to[1] - t.from[1])
 }
 
 #[derive(Deserialize)]
@@ -177,7 +225,11 @@ struct KillLite {
 struct Group<'a> {
     kind: String,
     side: String,
-    jump: bool,
+    instant: bool,
+    /// Where it's thrown from (the spawn spot, for instant smokes) and where it lands, averaged
+    /// over the throws so far.
+    at: [f32; 3],
+    to: [f32; 2],
     members: Vec<(&'a str, &'a DThrow)>,
 }
 
@@ -228,21 +280,34 @@ pub fn write(root: &Path) -> Result<()> {
         let mut sorted = throws.clone();
         sorted.sort_by(|a, b| a.0.cmp(b.0).then(a.1.round.cmp(&b.1.round)).then(a.1.t.total_cmp(&b.1.t)));
         for (mid, t) in sorted {
-            let jump = t.technique == "jump";
+            let is_instant = instant(t);
+            if !is_instant && !(lined(t) && flight(t) > MIN_FLIGHT) {
+                continue;
+            }
+            let at = match (is_instant, t.spawn) {
+                (true, Some(s)) => [s[0], s[1], t.from[2]],
+                _ => t.from,
+            };
             let found = groups.iter_mut().find(|g| {
-                let r = g.members[0].1;
-                g.kind == t.kind
+                g.instant == is_instant
+                    && g.kind == t.kind
                     && g.side == t.side
-                    && g.jump == jump
-                    && (r.from[0] - t.from[0]).hypot(r.from[1] - t.from[1]) < SAME_SPOT
-                    && (r.from[2] - t.from[2]).abs() < SAME_HEIGHT
-                    && angle_diff(r.yaw, t.yaw) < SAME_AIM
-                    && (r.pitch - t.pitch).abs() < SAME_AIM
-                    && (r.to[0] - t.to[0]).hypot(r.to[1] - t.to[1]) < SAME_LANDING
+                    && (g.at[0] - at[0]).hypot(g.at[1] - at[1]) < SAME_SPOT
+                    && (g.at[2] - at[2]).abs() < SAME_HEIGHT
+                    && (g.to[0] - t.to[0]).hypot(g.to[1] - t.to[1]) < SAME_LANDING
             });
             match found {
-                Some(g) => g.members.push((mid, t)),
-                None => groups.push(Group { kind: t.kind.clone(), side: t.side.clone(), jump, members: vec![(mid, t)] }),
+                Some(g) => {
+                    let n = g.members.len() as f32;
+                    for i in 0..3 {
+                        g.at[i] = (g.at[i] * n + at[i]) / (n + 1.0);
+                    }
+                    for i in 0..2 {
+                        g.to[i] = (g.to[i] * n + t.to[i]) / (n + 1.0);
+                    }
+                    g.members.push((mid, t));
+                }
+                None => groups.push(Group { kind: t.kind.clone(), side: t.side.clone(), instant: is_instant, at, to: t.to, members: vec![(mid, t)] }),
             }
         }
         // Spawn spots per side, from where throwers stood when rounds went live.
@@ -279,16 +344,17 @@ pub fn write(root: &Path) -> Result<()> {
         };
 
         let mut lineups: Vec<Lineup> = vec![];
+        let mut used_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
         for g in &groups {
             let n = g.members.len();
-            let instant = g.members.iter().filter(|(_, t)| t.t < INSTANT_S).count() * 2 > n;
-            let set = g.members.iter().filter(|(_, t)| t.set).count() * 2 >= n;
-            let category = if instant { "instant" } else if set { "set" } else { "fly" };
-            // One-off throws on the move or in the first seconds aren't lineups (yet): a lineup is
-            // something thrown again, or lined up (stood still, aim held).
-            if n < 2 && (category == "fly" || (category == "instant" && !g.members[0].1.set)) {
+            // A lineup is thrown again: in at least two different rounds.
+            let mut rounds: Vec<(&str, u32)> = g.members.iter().map(|(m, t)| (*m, t.round)).collect();
+            rounds.sort_unstable();
+            rounds.dedup();
+            if rounds.len() < 2 {
                 continue;
             }
+            let category = if g.instant { "instant" } else { "set" };
             let mut tags: BTreeMap<String, usize> = BTreeMap::new();
             for (_, t) in &g.members {
                 *tags.entry(technique_tag(t)).or_default() += 1;
@@ -322,8 +388,9 @@ pub fn write(root: &Path) -> Result<()> {
             let mut throwers: Vec<&str> = g.members.iter().map(|(_, t)| t.player.as_str()).collect();
             throwers.sort_unstable();
             throwers.dedup();
-            let first = g.members[0].1;
-            let id = format!(
+            // Named after its first throw (the earliest played), so new matches don't rename it.
+            let first = g.members.iter().min_by_key(|(mid, t)| (played(mid), *mid, t.tick)).map(|(_, t)| *t).unwrap_or(r);
+            let mut id = format!(
                 "{map}-{}-{}-{}-{}-{}-{}",
                 g.kind,
                 g.side,
@@ -332,19 +399,14 @@ pub fn write(root: &Path) -> Result<()> {
                 first.pitch.round() as i32,
                 first.yaw.round() as i32
             );
+            while !used_ids.insert(id.clone()) {
+                id.push('b');
+            }
             for (mid, t) in &g.members {
                 out.by_throw.insert(format!("{mid}@{}", t.tick), id.clone());
             }
             lineups.push(Lineup {
-                id: format!(
-                    "{map}-{}-{}-{}-{}-{}-{}",
-                    g.kind,
-                    g.side,
-                    (first.from[0] / 16.0).round() as i32,
-                    (first.from[1] / 16.0).round() as i32,
-                    first.pitch.round() as i32,
-                    first.yaw.round() as i32
-                ),
+                id,
                 name: String::new(),
                 kind: g.kind.clone(),
                 category: category.into(),
@@ -352,7 +414,7 @@ pub fn write(root: &Path) -> Result<()> {
                 count: n,
                 matches: matches.len(),
                 throwers: throwers.len(),
-                spawn: if instant { spot_of(&g.side, r.spawn) } else { None },
+                spawn: if g.instant { spot_of(&g.side, Some([g.at[0], g.at[1]])) } else { None },
                 from_place: r.from_place.clone(),
                 to_place: place_near(r.to),
                 from: r.from,
@@ -381,15 +443,11 @@ pub fn write(root: &Path) -> Result<()> {
                 "flash" => "Flash",
                 _ => "HE",
             };
-            let cat = match l.category.as_str() {
-                "instant" => "Instant",
-                "set" => "Set",
-                _ => "On-the-move",
-            };
+            let cat = if l.category == "instant" { "Instant" } else { "Set" };
             l.name = format!("{cat} {kind} #{n}");
         }
         let mut counts: BTreeMap<String, usize> = BTreeMap::new();
-        for l in lineups.iter().filter(|l| l.category != "fly") {
+        for l in &lineups {
             *counts.entry(l.kind.clone()).or_default() += 1;
         }
         let ids: std::collections::HashSet<&str> = lineups.iter().map(|l| l.id.as_str()).collect();
@@ -402,9 +460,18 @@ pub fn write(root: &Path) -> Result<()> {
     // A small index for the map list, and a file per map.
     let dir = root.join("lineups");
     std::fs::create_dir_all(&dir)?;
-    let mut index = LineupsIndex::default();
+    let mut index = LineupsIndex { version: VERSION, ..Default::default() };
     for (map, m) in &out.maps {
-        index.maps.insert(map.clone(), MapSummary { counts: m.counts.clone(), throws: m.throws, matches: m.matches, lineups: m.lineups.len() });
+        index.maps.insert(
+            map.clone(),
+            MapSummary {
+                counts: m.counts.clone(),
+                throws: m.throws,
+                matches: m.matches,
+                lineups: m.lineups.len(),
+                instant: m.lineups.iter().filter(|l| l.category == "instant").count(),
+            },
+        );
         std::fs::write(dir.join(format!("{map}.json")), serde_json::to_string(m)?)?;
     }
     std::fs::write(root.join("lineups.json"), serde_json::to_string(&index)?)?;

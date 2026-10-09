@@ -513,11 +513,26 @@ const BANNER_JS: &str = r#"((s) => {
   }
   const t = d.querySelector("[data-t]"), bar = d.querySelector("[data-f]").parentNode, m = d.querySelector("[data-m]");
   if (!s.active) {
-    t.textContent = "Veloxify · sign in to FACEIT here (top right). You can close this window when you're done.";
+    // Signed in once FACEIT's page is up and shows no "Log in" / "Sign up" button.
+    const signedIn = () => {
+      const shown = [...document.querySelectorAll("a,button")].filter((e) => e.offsetParent && !d.contains(e));
+      if (document.readyState !== "complete" || shown.length < 8) return false;
+      return !shown.some((e) => /^(log ?in|sign ?in|sign ?up|register|join faceit)$/i.test((e.innerText || "").trim()));
+    };
+    const hint = () => {
+      t.textContent = signedIn()
+        ? "Veloxify · You're signed in to FACEIT. You can close this window."
+        : "Veloxify · sign in to FACEIT here (top right). You can close this window when you're done.";
+    };
+    d.dataset.idle = "1";
+    hint();
+    clearInterval(window.__veloxifyHint);
+    window.__veloxifyHint = setInterval(() => d.dataset.idle === "1" && hint(), 2000);
     bar.style.display = m.style.display = "none";
     d.querySelectorAll("[data-a]").forEach((a) => (a.style.display = "none"));
     return;
   }
+  d.dataset.idle = "0";
   t.textContent = `Veloxify · ${s.done}/${s.total} demos downloaded`;
   bar.style.display = "";
   d.querySelector("[data-f]").style.width = (s.frac * 100).toFixed(1) + "%";

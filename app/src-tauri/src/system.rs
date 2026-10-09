@@ -28,7 +28,8 @@ pub fn cs2_running() -> bool {
     }
 }
 
-/// SteamID64 of the account currently logged in to Steam (registry `ActiveProcess\ActiveUser`).
+/// SteamID64 of the account signed in to Steam (registry `ActiveProcess\ActiveUser`), else the
+/// account last signed in on this PC (Steam sometimes leaves that registry value at 0).
 pub fn active_steam_user() -> Option<u64> {
     let mut value: u32 = 0;
     let mut len = 4u32;
@@ -43,7 +44,7 @@ pub fn active_steam_user() -> Option<u64> {
             Some(&mut len),
         )
     };
-    (ok.is_ok() && value != 0).then(|| cs2hl_render::steam::STEAMID64_BASE + value as u64)
+    (ok.is_ok() && value != 0).then(|| cs2hl_render::steam::STEAMID64_BASE + value as u64).or_else(cs2hl_render::steam::recent_login)
 }
 
 /// The Steam display name last used in a game (registry `LastGameNameUsed`), as a hint for

@@ -52,8 +52,8 @@ FACEIT, Allstar or Valve.</sub>
 - Tells you what went wrong ("counter-strafe 200 ms late", "pulled down too far") and what to practice.
 
 **Grenades**
-- Every grenade thrown in your matches, by everyone, grouped into lineups: the same spot, the same aim and the same landing count as one, however many times and by whoever it was thrown.
-- Named and sorted the way you'd say them: "Instant Smoke #1" from T spawn #3, set smokes, set mollies, and how often each was thrown.
+- The lineups thrown in your matches, by everyone: **instant smokes** (thrown from spawn the moment the round starts) and **set lineups** (lined up against a wall or corner, crosshair placed, then thrown). The same spot to the same place counts as one lineup, however many times and by whoever it was thrown; grenades thrown on the move are left out.
+- Named and sorted the way you'd say them: "Instant Smoke #1" from T spawn #3, "Set Molotov #2", and how often each was thrown.
 - Tags for how it's thrown: jump throw, jump throw + W, running jump throw, crouch, walk, left or right click.
 - A **video of each lineup**, filmed from a demo in CS2: the thrower lining it up in first person, then the camera follows the grenade until it pops and holds on it.
 - Every map with its lineup count, then a radar with every arc; a `setpos` to stand and aim exactly like the thrower on a practice server.

@@ -314,6 +314,49 @@ pub struct LineupClip {
     pub too_old: bool,
 }
 
+/// After the lineups are rebuilt: a video whose lineup id is gone moves to the lineup its throw
+/// belongs to now (if that one has no video yet); videos of lineups that no longer exist are
+/// deleted, and so are notes about lineups that no longer exist. Returns how many videos moved.
+pub fn migrate_lineup_clips(lib: &Path) -> Result<usize> {
+    let all = cs2hl_core::lineups::load(lib);
+    let mut clips = load_lineup_clips(lib);
+    let ids: std::collections::HashSet<&str> = all.maps.values().flat_map(|m| m.lineups.iter().map(|l| l.id.as_str())).collect();
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    let stale: Vec<String> = clips.keys().filter(|k| !ids.contains(k.as_str())).cloned().collect();
+    if stale.is_empty() {
+        return Ok(0);
+    }
+    let mut moved = 0;
+    for old in stale {
+        let Some(c) = clips.remove(&old) else { continue };
+        let Some(rel) = c.clip.clone() else { continue };
+        let key = format!("{}@{}", c.match_id, c.tick);
+        let new = all.maps.values().find_map(|m| m.by_throw.get(&key)).filter(|n| !clips.get(n.as_str()).is_some_and(|x| x.clip.is_some())).cloned();
+        match new {
+            Some(new) => {
+                let clip = format!("lineups/{new}.mp4");
+                std::fs::rename(lib.join(&rel), lib.join(&clip))?;
+                let thumb = c.thumb.as_ref().and_then(|t| {
+                    let to = format!("lineups/{new}.jpg");
+                    std::fs::rename(lib.join(t), lib.join(&to)).ok().map(|_| to)
+                });
+                clips.insert(new, LineupClip { clip: Some(clip), thumb, ..c });
+                moved += 1;
+            }
+            None => {
+                let _ = std::fs::remove_file(lib.join(&rel));
+                if let Some(t) = &c.thumb {
+                    let _ = std::fs::remove_file(lib.join(t));
+                }
+            }
+        }
+    }
+    save_lineup_clips(lib, &clips)?;
+    Ok(moved)
+}
+
 pub fn load_lineup_clips(lib: &Path) -> BTreeMap<String, LineupClip> {
     std::fs::read_to_string(lib.join("lineup_clips.json")).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
 }
@@ -336,7 +379,7 @@ pub fn plan_lineups(lib: &Path, ids: Option<&[String]>) -> Vec<cs2hl_core::lineu
         .flat_map(|m| m.lineups)
         .filter(|l| match ids {
             Some(ids) => ids.contains(&l.id),
-            None => l.category != "fly" || l.count >= 3,
+            None => true,
         })
         .filter(|l| done.get(&l.id).is_none_or(|c| c.clip.is_none() && (ids.is_some() || c.error.is_none() || l.count > c.count)))
         .collect();

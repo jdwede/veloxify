@@ -212,6 +212,11 @@ impl Worker {
             let imported = self.import(&settings, me);
             if imported || !settings.library_dir.join("my_stats.json").exists() {
                 let _ = cs2hl_core::details::write_benchmarks(&settings.library_dir, Some(me));
+                let _ = batch::migrate_lineup_clips(&settings.library_dir);
+            } else if !cs2hl_core::lineups::current(&settings.library_dir) {
+                // The lineup rules changed in an update: regroup the throws already analyzed.
+                let _ = cs2hl_core::lineups::write(&settings.library_dir);
+                let _ = batch::migrate_lineup_clips(&settings.library_dir);
             }
             // Get demos started meanwhile: finish downloading before analyzing or rendering more.
             if crate::demos::downloading(&self.app) {
@@ -327,6 +332,7 @@ impl Worker {
         }
         if built > 0 {
             let _ = cs2hl_core::details::write_benchmarks(lib, Some(me));
+            let _ = batch::migrate_lineup_clips(lib);
         }
         built > 0
     }
@@ -503,11 +509,6 @@ impl Worker {
         }
         let lineups = matches!(what, Batch::Lineups(_));
         let noun = if lineups { "lineup videos" } else { "highlights" };
-        // CS2 asked for while Steam is at its sign-in window would start once you sign in.
-        if !cs2hl_render::steam::signed_in() {
-            self.set("waiting", format!("Steam isn't signed in; {noun} wait for it"), 0, 0);
-            return;
-        }
         let profile = match Profile::load(&settings.profile) {
             Ok(p) => p,
             Err(e) => {
@@ -604,7 +605,7 @@ impl Worker {
         };
         rendering.store(false, Ordering::SeqCst);
         if let Err(e) = result {
-            self.set("error", format!("Rendering stopped: {e}"), done, total);
+            self.set("error", format!("Rendering stopped: {e:#}"), done, total);
         }
     }
 }
