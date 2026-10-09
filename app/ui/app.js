@@ -4245,7 +4245,7 @@ function faceitAccountRow() {
 }
 
 // Veloxify's Ko-fi page ("https://ko-fi.com/<name>"): the Support button shows once it's set.
-const KOFI_URL = "";
+const KOFI_URL = "https://ko-fi.com/jdwede";
 const KOFI_CUP = `<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M4 6h13a4 4 0 0 1 0 8h-1.1A6 6 0 0 1 10 19H9a5 5 0 0 1-5-5V6zm12 2v4h1a2 2 0 0 0 0-4h-1z"/><path fill="#ff5e5b" d="M10.1 9.2c.7-.8 2-.7 2.5.2.5.8.1 1.7-.6 2.4L10 13.6 8 11.8c-.7-.7-1.1-1.6-.6-2.4.5-.9 1.8-1 2.5-.2z"/></svg>`;
 
 async function renderSettings(view) {

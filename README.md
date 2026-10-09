@@ -9,6 +9,8 @@ breaks down your worst deaths, films the grenade lineups thrown in your matches,
 Leetify-style match pages: aim, utility, trades, 2D replays and HLTV Rating 3.0 round by round.
 No subscription, no cloud, no watermark.
 
+<a href="https://ko-fi.com/jdwede"><img src="https://img.shields.io/badge/Support%20Veloxify-Ko--fi-29abe0?logo=kofi&logoColor=white" alt="Support Veloxify on Ko-fi"></a>
+
 <img src="docs/screenshots/match-overview.png" alt="Veloxify match page: result, HLTV Rating 3.0 chart, highlights and scoreboard" width="900">
 
 </div>
@@ -97,6 +99,11 @@ FACEIT, Allstar or Valve.</sub>
 | **Lineups**: set grenades from the match | **Aim**: Leetify-style aim stats with benchmarks |
 | <img src="docs/screenshots/map-zones.png" alt="Map zones" width="440"> | <img src="docs/screenshots/head-to-head.png" alt="Head to head" width="440"> |
 | **Map Zones**: where you win and lose fights | **Head to Head**: every matchup in the game |
+
+## Support
+
+Veloxify is free and open source. If it helps your game, you can buy me a coffee on
+[Ko-fi](https://ko-fi.com/jdwede). It keeps the updates coming.
 
 ## Install
 
