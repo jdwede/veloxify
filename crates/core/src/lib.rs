@@ -6,6 +6,7 @@ pub mod faceit;
 pub mod highlights;
 pub mod ingest;
 pub mod library;
+pub mod lineups;
 pub mod lowlights;
 pub mod model;
 pub mod profile;

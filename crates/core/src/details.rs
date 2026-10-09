@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
 /// Bumped whenever what's in a details file changes, so older ones are rebuilt.
-pub const VERSION: u32 = 7;
+pub const VERSION: u32 = 10;
 
 /// Spotted state is sampled every this many ticks.
 const SPOT_STEP: i32 = 2;
@@ -54,6 +54,8 @@ pub struct MatchDetails {
     pub recoil: std::collections::BTreeMap<String, Vec<[f32; 3]>>,
     #[serde(default)]
     pub r3_model: R3Model,
+    #[serde(default)]
+    pub blinds: Vec<DBlind>,
 }
 
 /// Bullets of a spray kept for the reference recoil pattern.
@@ -87,6 +89,36 @@ pub struct DThrow {
     /// A set lineup, and how sure (0-1).
     pub set: bool,
     pub set_score: f32,
+    /// The grenade's flight, every 4 ticks from the throw until it went off: [x, y, z].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub path: Vec<[i32; 3]>,
+    /// The demo tick of the throw and of the grenade going off (for rendering the lineup).
+    #[serde(default)]
+    pub tick: i32,
+    #[serde(default)]
+    pub pop_tick: i32,
+    /// Keys held at the release (1 W, 2 S, 4 A, 8 D, 16 jump, 32 crouch, 128 walk) and the speed
+    /// (units/s): jump throw, jump throw + W, running jump throw...
+    #[serde(default)]
+    pub keys: u8,
+    #[serde(default)]
+    pub speed: f32,
+    /// Where the thrower stood when the round went live (their spawn spot).
+    #[serde(default)]
+    pub spawn: Option<[f32; 2]>,
+    /// CS2's callout where they threw from.
+    #[serde(default)]
+    pub from_place: String,
+}
+
+/// Someone blinded by a flash: when (seconds into the round), who, by whom, for how long.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DBlind {
+    pub round: u32,
+    pub t: f32,
+    pub player: String,
+    pub by: String,
+    pub secs: f32,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -114,6 +146,9 @@ pub struct DRound {
     /// Every player's round: kills, deaths, assists, damage, Round Swing.
     #[serde(default)]
     pub players: Vec<DRoundPlayer>,
+    /// Every change to someone's Round Swing this round, in order, and why.
+    #[serde(default)]
+    pub swings: Vec<DSwing>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -143,6 +178,21 @@ pub struct DRoundPlayer {
     pub rws: f32,
     #[serde(default)]
     pub rws_bomb: f32,
+}
+
+/// A change to a player's Round Swing (see `stats::SwingEvent`): when (seconds into the round),
+/// whose, how much (%, +12.0), why, the other player involved, and their team's chance to win
+/// before and after (%).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DSwing {
+    pub t: f32,
+    pub player: String,
+    pub delta: f32,
+    pub why: String,
+    #[serde(default)]
+    pub other: String,
+    pub before: f32,
+    pub after: f32,
 }
 
 /// Rating 3.0's averages and weights, so the match page can show the formula with the numbers.
@@ -480,6 +530,10 @@ pub fn write_benchmarks(root: &std::path::Path, me: Option<u64>) -> Result<()> {
         .filter(|(_, pts)| pts.len() >= 3)
         .collect();
     std::fs::write(root.join("recoil.json"), serde_json::to_string(&patterns)?)?;
+    // Grenade lineups across the library (the Grenades page).
+    if let Err(e) = crate::lineups::write(root) {
+        eprintln!("lineups: {e:#}");
+    }
     Ok(())
 }
 
@@ -647,6 +701,29 @@ fn median(mut v: Vec<f64>) -> Option<f64> {
 }
 
 /// Angle between two view directions given as (pitch, yaw) in degrees.
+/// A grenade's flight from the projectile positions: the thrower's projectile of that kind that
+/// appears right after the throw, followed until it went off.
+fn flight_path(points: &[raw::ProjectilePoint], thrower: u64, kind: GrenadeKind, from: i32, to: i32) -> Vec<[i32; 3]> {
+    let class_ok = |c: &str| match kind {
+        GrenadeKind::Smoke => c.contains("Smoke"),
+        GrenadeKind::Molotov => c.contains("Molotov") || c.contains("Incendiary"),
+        GrenadeKind::Flash => c.contains("Flashbang"),
+        GrenadeKind::He => c.contains("HEGrenade"),
+    };
+    let Some(entity) = points
+        .iter()
+        .filter(|p| p.steamid == thrower && class_ok(&p.class) && p.tick >= from && p.tick <= from + 16)
+        .min_by_key(|p| p.tick)
+        .map(|p| p.entity)
+    else {
+        return vec![];
+    };
+    let mut path: Vec<&raw::ProjectilePoint> = points.iter().filter(|p| p.entity == entity && p.tick >= from && p.tick <= to + 2).collect();
+    path.sort_by_key(|p| p.tick);
+    path.dedup_by_key(|p| p.tick);
+    path.iter().map(|p| [p.xyz[0].round() as i32, p.xyz[1].round() as i32, p.xyz[2].round() as i32]).collect()
+}
+
 fn view_angle(a: (f64, f64), b: (f64, f64)) -> f64 {
     let dir = |(p, y): (f64, f64)| {
         let (p, y) = (p.to_radians(), y.to_radians());
@@ -667,6 +744,7 @@ pub fn build(demo: &[u8], m: &Match, a: &Analysis, me: u64) -> Result<MatchDetai
     // ---- Rounds -------------------------------------------------------------------------------
     let swings = crate::stats::round_swings(m, a);
     let rc = crate::stats::round_counts(m, a);
+    let swing_events = crate::stats::swing_events_of(m, a);
     let mut rounds = vec![];
     let (mut sm, mut st) = (0, 0);
     for (r, round) in m.rounds.iter().enumerate() {
@@ -706,6 +784,19 @@ pub fn build(demo: &[u8], m: &Match, a: &Analysis, me: u64) -> Result<MatchDetai
             exploded,
             equip_mine: avg(my_team),
             equip_theirs: avg(other),
+            swings: swing_events
+                .iter()
+                .filter(|e| e.round == r)
+                .map(|e| DSwing {
+                    t: secs(r, e.tick),
+                    player: sid(e.player),
+                    delta: (e.delta * 1000.0).round() as f32 / 10.0,
+                    why: e.why.into(),
+                    other: e.other.map(sid).unwrap_or_default(),
+                    before: (e.before * 1000.0).round() as f32 / 10.0,
+                    after: (e.after * 1000.0).round() as f32 / 10.0,
+                })
+                .collect(),
             players: m
                 .players
                 .iter()
@@ -935,6 +1026,9 @@ pub fn build(demo: &[u8], m: &Match, a: &Analysis, me: u64) -> Result<MatchDetai
         _ => None,
     };
     let throw_events: Vec<(&crate::model::Shot, GrenadeKind)> = m.shots.iter().filter_map(|s| kind_of(&s.weapon).map(|k| (s, k))).collect();
+    for r in &m.rounds {
+        state_ticks.insert(r.live_tick);
+    }
     for (s, _) in &throw_events {
         for d in (0..=64).step_by(4) {
             state_ticks.insert(s.tick - d);
@@ -942,10 +1036,30 @@ pub fn build(demo: &[u8], m: &Match, a: &Analysis, me: u64) -> Result<MatchDetai
         state_ticks.insert(s.tick - 1);
         state_ticks.insert(s.tick - 2);
     }
+    // Grenades in flight (their paths): from each throw until it went off.
+    let mut flight_ticks: Vec<i32> = vec![];
+    for (s, kind) in &throw_events {
+        let end = m
+            .grenades
+            .iter()
+            .filter(|g| g.player == s.player && g.kind == *kind && g.tick >= s.tick)
+            .map(|g| g.tick)
+            .min()
+            .unwrap_or(s.tick + (6.0 * TICKRATE) as i32)
+            .min(s.tick + (12.0 * TICKRATE) as i32);
+        flight_ticks.extend((s.tick..=end + 2).step_by(4));
+    }
+    flight_ticks.sort_unstable();
+    flight_ticks.dedup();
+    let flights = if flight_ticks.is_empty() { vec![] } else { raw::projectiles(demo, &flight_ticks).unwrap_or_default() };
     let mut state_ticks: Vec<i32> = state_ticks.into_iter().filter(|t| *t > 0).collect();
     state_ticks.sort_unstable();
     let state =
-        raw::players_values(demo, &["X", "Y", "Z", "pitch", "yaw", "duck_amount", "is_airborne", "buttons", "inventory", "active_weapon_ammo", "aim_punch_angle"], &state_ticks)?;
+        raw::players_values(
+            demo,
+            &["X", "Y", "Z", "pitch", "yaw", "duck_amount", "is_airborne", "buttons", "inventory", "active_weapon_ammo", "aim_punch_angle", "last_place_name"],
+            &state_ticks,
+        )?;
     let num = |s: u64, t: i32, k: &str| match state.get(&(s, t)).and_then(|v| v.get(k)) {
         Some(Val::Num(x)) => Some(*x),
         _ => None,
@@ -1272,12 +1386,35 @@ pub fn build(demo: &[u8], m: &Match, a: &Analysis, me: u64) -> Result<MatchDetai
             aim_moved_deg: (aim_moved * 10.0).round() as f32 / 10.0,
             set,
             set_score: (score * 100.0).round() / 100.0,
+            path: flight_path(&flights, p, *kind, s.tick, g.tick),
+            tick: s.tick,
+            pop_tick: g.tick,
+            keys: {
+                let b = buttons;
+                let on = |bit: u32| b & (1u64 << bit) != 0;
+                (on(3) as u8) | (on(4) as u8) << 1 | (on(9) as u8) << 2 | (on(10) as u8) << 3 | ((on(1) || airborne) as u8) << 4 | (on(2) as u8) << 5 | (on(16) as u8) << 7
+            },
+            speed: speed.round() as f32,
+            spawn: {
+                let live = m.rounds[s.round].live_tick;
+                num(p, live, "X").zip(num(p, live, "Y")).map(|(a, b)| [a.round() as f32, b.round() as f32])
+            },
+            from_place: match state.get(&(p, s.tick)).or_else(|| state.get(&(p, s.tick - 1))).and_then(|v| v.get("last_place_name")) {
+                Some(Val::Strs(v)) => v.first().cloned().unwrap_or_default(),
+                _ => String::new(),
+            },
         });
     }
 
+    let blinds = m
+        .blinds
+        .iter()
+        .filter(|b| b.duration >= 0.3)
+        .map(|b| DBlind { round: m.rounds[b.round].number, t: secs(b.round, b.tick), player: sid(b.victim), by: sid(b.attacker), secs: (b.duration * 100.0).round() / 100.0 })
+        .collect();
     let q = crate::stats::R3;
     let r3_model = R3Model { kpr: q.kpr, adr: q.adr, dpr: q.dpr, kast: q.kast, multi: q.multi, swing_scale: q.swing_scale, weights: crate::stats::R3_WEIGHTS };
-    Ok(MatchDetails { version: VERSION, rounds, kills, clutches, players, grenades, throws, recoil, r3_model })
+    Ok(MatchDetails { version: VERSION, rounds, kills, clutches, players, grenades, throws, recoil, r3_model, blinds })
 }
 
 /// Where a match's details live.
@@ -1312,13 +1449,18 @@ pub fn write(root: &std::path::Path, id: &str, demo: &[u8], m: &Match, a: &Analy
 pub const REPLAY_STEP: i32 = 8;
 
 /// Everyone's position, view direction and health through each round, for the 2D replay
-/// (`matches/<id>.replay.json.gz`). Frames hold `[x, y, yaw, hp]` for each player in `players`
-/// order, every `step` ticks from `start`; hp 0 = dead.
+/// (`matches/<id>.replay.json.gz`). Frames hold `[x, y, yaw, hp, weapon]` (`stride` numbers) for
+/// each player in `players` order, every `step` ticks from `start`; hp 0 = dead; weapon is an
+/// index into `weapons` (-1 = unknown). Older files have stride 4 (no weapon).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Replay {
     pub step: i32,
     pub players: Vec<String>,
     pub rounds: Vec<ReplayRound>,
+    #[serde(default)]
+    pub stride: usize,
+    #[serde(default)]
+    pub weapons: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -1341,7 +1483,20 @@ pub fn build_replay(demo: &[u8], m: &Match) -> Result<Replay> {
     for &(a, b) in &spans {
         ticks.extend((a..=b).step_by(REPLAY_STEP as usize));
     }
-    let vals = raw::players_values(demo, &["X", "Y", "yaw", "health"], &ticks)?;
+    let vals = raw::players_values(demo, &["X", "Y", "yaw", "health", "active_weapon_name"], &ticks)?;
+    let mut weapons: Vec<String> = vec![];
+    let mut weapon_index = |s: u64, t: i32| -> i32 {
+        let Some(Val::Strs(w)) = vals.get(&(s, t)).and_then(|v| v.get("active_weapon_name")) else { return -1 };
+        let Some(name) = w.first() else { return -1 };
+        let name = weapon_icon_name(name);
+        match weapons.iter().position(|x| *x == name) {
+            Some(i) => i as i32,
+            None => {
+                weapons.push(name);
+                weapons.len() as i32 - 1
+            }
+        }
+    };
     let num = |s: u64, t: i32, k: &str| match vals.get(&(s, t)).and_then(|v| v.get(k)) {
         Some(Val::Num(x)) => Some(*x),
         _ => None,
@@ -1361,14 +1516,76 @@ pub fn build_replay(demo: &[u8], m: &Match) -> Result<Replay> {
                         .flat_map(|p| {
                             let s = p.steamid;
                             let hp = num(s, t, "health").unwrap_or(0.0).max(0.0);
-                            [num(s, t, "X").unwrap_or(0.0).round() as i32, num(s, t, "Y").unwrap_or(0.0).round() as i32, num(s, t, "yaw").unwrap_or(0.0).round() as i32, hp as i32]
+                            [
+                                num(s, t, "X").unwrap_or(0.0).round() as i32,
+                                num(s, t, "Y").unwrap_or(0.0).round() as i32,
+                                num(s, t, "yaw").unwrap_or(0.0).round() as i32,
+                                hp as i32,
+                                if hp > 0.0 { weapon_index(s, t) } else { -1 },
+                            ]
                         })
                         .collect()
                 })
                 .collect(),
         })
         .collect();
-    Ok(Replay { step: REPLAY_STEP, players: m.players.iter().map(|p| sid(p.steamid)).collect(), rounds })
+    Ok(Replay { step: REPLAY_STEP, players: m.players.iter().map(|p| sid(p.steamid)).collect(), rounds, stride: 5, weapons })
+}
+
+/// The icon file (`library/weapons/<name>.svg`) for a weapon as the demo names it ("AK-47",
+/// "USP-S", "Karambit", ...).
+fn weapon_icon_name(display: &str) -> String {
+    let n = display.trim_start_matches("weapon_").to_lowercase().replace(' ', "_");
+    let mapped = match n.as_str() {
+        "ak-47" => "ak47",
+        "m4a4" => "m4a1",
+        "m4a1-s" => "m4a1_silencer",
+        "usp-s" => "usp_silencer",
+        "glock-18" => "glock",
+        "desert_eagle" => "deagle",
+        "five-seven" => "fiveseven",
+        "tec-9" => "tec9",
+        "cz75-auto" => "cz75a",
+        "p2000" => "hkp2000",
+        "dual_berettas" => "elite",
+        "r8_revolver" => "revolver",
+        "ssg_08" => "ssg08",
+        "galil_ar" => "galilar",
+        "sg_553" => "sg556",
+        "mac-10" => "mac10",
+        "mp5-sd" => "mp5sd",
+        "ump-45" => "ump45",
+        "pp-bizon" => "bizon",
+        "zeus_x27" => "taser",
+        "smoke_grenade" => "smokegrenade",
+        "high_explosive_grenade" => "hegrenade",
+        "incendiary_grenade" => "incgrenade",
+        "decoy_grenade" => "decoy",
+        "c4_explosive" => "c4",
+        "karambit" => "knife_karambit",
+        "bayonet" => "bayonet",
+        "m9_bayonet" => "knife_m9_bayonet",
+        "butterfly_knife" => "knife_butterfly",
+        "flip_knife" => "knife_flip",
+        "gut_knife" => "knife_gut",
+        "skeleton_knife" => "knife_skeleton",
+        "stiletto_knife" => "knife_stiletto",
+        "talon_knife" => "knife_widowmaker",
+        "ursus_knife" => "knife_ursus",
+        "navaja_knife" => "knife_gypsy_jackknife",
+        "huntsman_knife" => "knife_tactical",
+        "falchion_knife" => "knife_falchion",
+        "bowie_knife" => "knife_survival_bowie",
+        "shadow_daggers" => "knife_push",
+        "paracord_knife" => "knife_cord",
+        "survival_knife" => "knife_canis",
+        "nomad_knife" => "knife_outdoor",
+        "classic_knife" => "knife_css",
+        "kukri_knife" => "knife_kukri",
+        other if other.contains("knife") => "knife",
+        other => other,
+    };
+    mapped.to_string()
 }
 
 pub fn write_replay(root: &std::path::Path, id: &str, demo: &[u8], m: &Match) -> Result<()> {

@@ -132,6 +132,17 @@ fn read_room(fm: &mut FaceitMatch, room: &Value, player_id: &str) {
         };
         fm.team_elo = avg(mine);
         fm.enemy_elo = avg(theirs);
+        // Your party: teammates with your party id (a league game: your whole team).
+        let roster = teams[mine]["roster"].as_array().cloned().unwrap_or_default();
+        let my_party = roster.iter().find(|p| p["id"].as_str() == Some(player_id)).and_then(|p| p["partyId"].as_str()).unwrap_or("").to_string();
+        let league = room["entity"]["type"].as_str() == Some("championship");
+        fm.party = roster
+            .iter()
+            .filter(|p| p["id"].as_str() != Some(player_id))
+            .filter(|p| league || (!my_party.is_empty() && p["partyId"].as_str() == Some(my_party.as_str())))
+            .filter_map(|p| p["gameId"].as_str().map(str::to_string))
+            .collect();
+        fm.party_read = true;
     }
 }
 
@@ -171,8 +182,10 @@ pub fn refresh(root: &Path, steamid: u64, candidates: &[String], light: bool) ->
     // What earlier refreshes learned from match rooms is kept, so each room is read only once.
     for fm in matches.iter_mut() {
         if let Some(prev) = old.as_ref().and_then(|o| o.matches.iter().find(|p| p.match_id == fm.match_id && p.map_number == fm.map_number)) {
-            // Rooms read before competitions were recorded are read again.
-            if prev.detailed && !prev.competition.is_empty() {
+            // Rooms read before competitions and parties were recorded are read again.
+            if prev.detailed && !prev.competition.is_empty() && prev.party_read {
+                fm.party = prev.party.clone();
+                fm.party_read = true;
                 fm.competition = prev.competition.clone();
                 fm.started_ts = prev.started_ts;
                 fm.team_elo = prev.team_elo;

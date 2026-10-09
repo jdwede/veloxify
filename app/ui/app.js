@@ -271,6 +271,13 @@ async function route() {
       return;
     }
   }
+  // The League tab only for players with ESEA league games.
+  const hasLeague = state.all?.some((m) => leagueOf(m.faceit?.competition)) || state.faceit?.matches?.some((m) => leagueOf(m.competition));
+  document.querySelector('[data-nav="league"]').hidden = !hasLeague;
+  if (parts[0] === "league") {
+    document.querySelector('[data-nav="league"]').classList.add("active");
+    return renderLeague(view);
+  }
   if (parts[0] === "ratings") {
     document.querySelector('[data-nav="profile"]').classList.add("active");
     return renderRatingBuilder(view, parts[1] ? decodeURIComponent(parts[1]) : null);
@@ -555,7 +562,7 @@ const MATCH_SORTS = {
   name: (p) => p.name.toLowerCase(), kills: (p) => p.counts.kills, assists: (p) => p.counts.assists, deaths: (p) => p.counts.deaths,
   kd: (p) => p.derived.kd, adr: (p) => p.derived.adr, kast: (p) => p.derived.kast,
   k2: (p) => p.counts.multikill_rounds[2], k3: (p) => p.counts.multikill_rounds[3], k4: (p) => p.counts.multikill_rounds[4], k5: (p) => p.counts.multikill_rounds[5],
-  rws: (p) => p.derived.rws, swing: (p) => p.derived.swing || 0, rating: (p) => r3(p.derived),
+  rws: (p) => p.derived.rws, swing: (p) => p.derived.swing || 0, rating: (p) => r3(p.derived), kr: (p) => p.derived.kpr,
 };
 const matchSort = { key: "rating", desc: true };
 
@@ -574,6 +581,7 @@ async function renderMatchPage(view, id, tab) {
   const when = new Date(s.played_ts * 1000);
   const stamp = `${when.getFullYear()}-${String(when.getMonth() + 1).padStart(2, "0")}-${String(when.getDate()).padStart(2, "0")} ${fmtTime(s.played_at)}`;
   const elo = eloNow ? `<span class="mp-chip">${levelBadge(levelFor(eloNow), 20)}${eloNow.toLocaleString("en-US")} ${deltaHtml(eloDelta)}</span>`
+    : leagueOf(fm?.competition) ? `<span class="mp-chip">${leagueChip(fm.competition, true)}</span>`
     : s.premier ? `<span class="mp-chip">${premierChip(s.premier)}${deltaHtml(s.premier_delta)}</span>` : "";
   const source = s.source === "valve" ? "Premier" : s.source === "faceit" ? "FACEIT" : s.source;
   view.innerHTML = `
@@ -613,11 +621,23 @@ async function renderMatchPage(view, id, tab) {
   await renderMatchSummary(body.querySelector("#mp-summary"), m, id);
 }
 
+// The scoreboard's columns in their default order; drag a header to reorder (saved).
+const BOARD_COLS = [["rating", "HLTV 3.0"], ["rws", "RWS"], ["swing", "Swing"], ["kills", "Kills"], ["assists", "Assists"], ["deaths", "Deaths"], ["kd", "K/D"],
+  ["adr", "ADR"], ["kr", "K/R"], ["kast", "KAST"], ["k2", "2K"], ["k3", "3K"], ["k4", "4K"], ["k5", "5K"]];
+function boardCols() {
+  let saved = [];
+  try { saved = JSON.parse(localStorage.getItem("veloxify.boardCols") || "[]"); } catch (e) { /* default order */ }
+  const known = new Map(BOARD_COLS);
+  const order = saved.filter((k) => known.has(k));
+  // Columns added since the order was saved go where they are by default.
+  BOARD_COLS.forEach(([k], i) => { if (!order.includes(k)) order.splice(Math.min(i, order.length), 0, k); });
+  return order.map((k) => [k, known.get(k)]);
+}
+
 // Both teams, Leetify's match-details columns (no Leetify rating), sortable by any column.
 function renderMatchScoreboard(body, m) {
   const me = state.index.me;
-  const COLS = [["rating", "HLTV 3.0"], ["rws", "RWS"], ["swing", "Swing"], ["kills", "Kills"], ["assists", "Assists"], ["deaths", "Deaths"], ["kd", "K/D"],
-    ["adr", "ADR"], ["kast", "KAST"], ["k2", "2K"], ["k3", "3K"], ["k4", "4K"], ["k5", "5K"]];
+  const COLS = boardCols();
   const by = MATCH_SORTS[matchSort.key];
   const sorted = (side) => m.players.filter((p) => p.side === side).sort((a, b) => {
     const x = by(a), y = by(b);
@@ -631,6 +651,7 @@ function renderMatchScoreboard(body, m) {
       case "deaths": return `<td>${c.deaths}</td>`;
       case "kd": return `<td class="${gradeClass("kd", d.kd)}">${f2(d.kd)}</td>`;
       case "adr": return `<td class="${gradeClass("adr", d.adr)}">${Math.round(d.adr)}</td>`;
+      case "kr": return `<td>${f2(d.kpr)}</td>`;
       case "kast": return `<td class="${gradeClass("kast", d.kast)}">${Math.round(d.kast)}%</td>`;
       case "rws": return `<td class="${gradeClass("rws", d.rws)}">${f1(d.rws)}</td>`;
       case "swing": return `<td class="${gradeClass("swing", d.swing || 0)}" title="Round Swing: average change in the team's chance to win each round (HLTV Rating 3.0)">${fmtSwing(d.swing || 0)}</td>`;
@@ -639,7 +660,7 @@ function renderMatchScoreboard(body, m) {
     }
   };
   const head = (title, won) => `<tr class="mp-team"><th class="mp-name">${title} <span class="mp-badge ${won ? "win" : "loss"}">${won ? "WIN" : m.result === "tie" ? "TIE" : "LOSS"}</span></th>
-    ${COLS.map(([k, t]) => `<th data-sort="${k}" class="${matchSort.key === k ? "on" : ""}">${t}${matchSort.key === k ? (matchSort.desc ? " ↓" : " ↑") : ""}</th>`).join("")}</tr>`;
+    ${COLS.map(([k, t]) => `<th data-sort="${k}" draggable="true" title="Click to sort, drag to move" class="${matchSort.key === k ? "on" : ""}">${t}${matchSort.key === k ? (matchSort.desc ? " ↓" : " ↑") : ""}</th>`).join("")}</tr>`;
   const row = (p, won) => `<tr class="${won ? "won" : "lost"} ${p.steamid === me ? "me" : ""}">
     <td class="mp-name">${nameCell(p, m._roster)}</td>
     ${COLS.map(([k]) => cell(p, k)).join("")}</tr>`;
@@ -651,13 +672,30 @@ function renderMatchScoreboard(body, m) {
       <thead>${head("Enemy Team", theirsWon)}</thead>
       <tbody>${sorted("enemy").map((p) => row(p, theirsWon)).join("")}</tbody>
     </table></div>
-    <div class="note">Kills, assists and deaths come from CS2's end-of-match scoreboard. HLTV 3.0 is estimated from the demo. Click a column to sort.</div>`;
-  body.querySelectorAll("th[data-sort]").forEach((th) => (th.onclick = () => {
-    const k = th.dataset.sort;
-    matchSort.desc = matchSort.key === k ? !matchSort.desc : k !== "name";
-    matchSort.key = k;
-    renderMatchScoreboard(body, m);
-  }));
+    <div class="note">Kills, assists and deaths come from CS2's end-of-match scoreboard. HLTV 3.0 is estimated from the demo. Click a column to sort, drag it to move it (your order is saved; <a class="link" href="#" id="mp-cols-reset">reset</a>).</div>`;
+  body.querySelectorAll("th[data-sort]").forEach((th) => {
+    th.onclick = () => {
+      const k = th.dataset.sort;
+      matchSort.desc = matchSort.key === k ? !matchSort.desc : k !== "name";
+      matchSort.key = k;
+      renderMatchScoreboard(body, m);
+    };
+    // Drag a header onto another to put it there.
+    th.ondragstart = (e) => { e.dataTransfer.setData("text/plain", th.dataset.sort); e.dataTransfer.effectAllowed = "move"; th.classList.add("dragging"); };
+    th.ondragend = () => th.classList.remove("dragging");
+    th.ondragover = (e) => { e.preventDefault(); th.classList.add("drop"); };
+    th.ondragleave = () => th.classList.remove("drop");
+    th.ondrop = (e) => {
+      e.preventDefault();
+      const from = e.dataTransfer.getData("text/plain"), to = th.dataset.sort;
+      if (!from || from === to) return;
+      const order = COLS.map(([k]) => k).filter((k) => k !== from);
+      order.splice(order.indexOf(to) + (COLS.findIndex(([k]) => k === from) < COLS.findIndex(([k]) => k === to) ? 1 : 0), 0, from);
+      try { localStorage.setItem("veloxify.boardCols", JSON.stringify(order)); } catch (err) { /* not saved */ }
+      renderMatchScoreboard(body, m);
+    };
+  });
+  body.querySelector("#mp-cols-reset").onclick = (e) => { e.preventDefault(); try { localStorage.removeItem("veloxify.boardCols"); } catch (err) { /* nothing saved */ } renderMatchScoreboard(body, m); };
 }
 
 // ---- match details: HLTV-style summary, Aim, Utility, Activity, Opening duels, Clutches ----------
@@ -1079,9 +1117,9 @@ async function renderZonesTab(body, m, id) {
 
 // ---- match page: rating breakdown ------------------------------------------------------------------
 
-// HLTV Rating 3.0 or RWS for one player, taken apart: by side, by part of the formula and round by
-// round, with the arithmetic shown. Rating 3.0 is the average of per-round ratings (every part of
-// the formula is a per-round sum over the rounds), so each round's bar is exact.
+// HLTV Rating 3.0, RWS or Round Swing for one player, taken apart: by side, by what added or cost
+// the most, and round by round in plain words (the formula is at the bottom). Rating 3.0 is the
+// average of per-round ratings (every part is a per-round sum), so each round's bar is exact.
 const breakdown = { player: null, metric: "rating3" };
 const R3_PARTS = [
   ["kills", "Kills", "Eco-adjusted kill points per round: a kill counts about 1, less on an eco or with an assist, more for an opening kill."],
@@ -1091,6 +1129,21 @@ const R3_PARTS = [
   ["multi", "Multi-kills", "Multi-kill points per round (2K, 3K, ... weigh more than their kills)."],
   ["swing", "Round Swing", "How much you changed your team's chance to win each round."],
 ];
+// What each part means in a sentence ("your kills", "dying").
+const PART_WORDS = [["your kills", "no kills"], ["the damage you did", "low damage"], ["surviving", "dying"], ["KAST (a kill, assist, survival or trade)", "no KAST"], ["the multi-kill", ""], ["helping the round", "hurting your team's chances"]];
+// Each Round Swing reason, for one event.
+const SWING_WHY = {
+  kill: ["Killed", "+"], damage: ["Damaged", "+"], flash: ["Flashed", "+"], traded: ["Got traded after dying to", "+"], death: ["Died to", "-"],
+  teamkill: ["Team-killed", "-"], plant: ["Planted the bomb", "+"], planted_on: ["Bomb planted while you were alive on CT", "-"], clutch: ["Won the clutch", "+"],
+  won_kills: ["Round won: credit for your kills", "+"], defuse: ["Defused the bomb", "+"], won_alive: ["Round won with you alive", "+"], won: ["Round won", "+"],
+  lost_alive: ["Round lost while you were still alive (saving or a lost clutch)", "-"], lost: ["Round lost", "-"],
+};
+// The same, summed over a match ("where your swing came from").
+const SWING_GROUPS = {
+  kill: "Kills", damage: "Damage on players a teammate killed", flash: "Flash assists", traded: "Deaths your team traded", death: "Deaths",
+  teamkill: "Team kills", plant: "Bomb plants", planted_on: "Bomb planted on you (CT, alive)", clutch: "Clutches won", won_kills: "Rounds won (kill share)",
+  defuse: "Defuses", won_alive: "Rounds won, alive", won: "Rounds won", lost_alive: "Rounds lost while alive (saves, lost clutches)", lost: "Rounds lost",
+};
 
 // Each part of Rating 3.0 for a set of rounds (1.00 = average), and the rating.
 function r3Parts(rows, model) {
@@ -1118,7 +1171,11 @@ async function renderBreakdownTab(body, m, id) {
   if (breakdown.matchId !== id) Object.assign(breakdown, { matchId: id, player: state.index.me });
   const who = m.players.some((p) => p.steamid === breakdown.player) ? breakdown.player : m.players[0].steamid;
   const me = m.players.find((p) => p.steamid === who);
-  const rws = breakdown.metric === "rws";
+  const metric = breakdown.metric;
+  const rws = metric === "rws", swingView = metric === "swing";
+  const names = new Map(m.players.map((p) => [p.steamid, p.name]));
+  const nameOf = (s) => esc(names.get(s) || "someone");
+  const hasSwings = d.rounds.some((r) => r.swings?.length);
   // This player's rounds, with the round's result for them and their team's damage (for RWS).
   const rows = d.rounds.map((r) => {
     const p = r.players.find((x) => x.steamid === who);
@@ -1126,72 +1183,134 @@ async function renderBreakdownTab(body, m, id) {
     const won = (r.winner === "mine") === (me.side === "mine");
     const teamDamage = r.players.filter((x) => x.side === p.side).reduce((a, x) => a + x.damage, 0);
     const teamSize = r.players.filter((x) => x.side === p.side).length;
-    return { ...p, number: r.number, won, reason: r.reason, teamDamage, teamSize, bombRound: r.reason === "bomb_exploded" || r.reason === "bomb_defused" };
+    const events = (r.swings || []).filter((e) => e.player === who);
+    return { ...p, number: r.number, won, reason: r.reason, teamDamage, teamSize, events, bombRound: r.reason === "bomb_exploded" || r.reason === "bomb_defused" };
   }).filter(Boolean);
   const w = model.weights;
   const roundRating = (r) => r3Parts([r], model).rating;
-  const value = (rs) => (rws ? rs.reduce((a, r) => a + r.rws, 0) / Math.max(1, rs.length) : r3Parts(rs, model).rating);
-  const fmt = (v) => (rws ? v.toFixed(1) : v.toFixed(2));
+  const value = (rs) => (rws ? rs.reduce((a, r) => a + r.rws, 0) / Math.max(1, rs.length) : swingView ? rs.reduce((a, r) => a + r.swing, 0) / Math.max(1, rs.length) : r3Parts(rs, model).rating);
+  const fmt = (v) => (rws ? v.toFixed(1) : swingView ? fmtSwing(v) : v.toFixed(2));
   const sides = { all: rows, T: rows.filter((r) => r.side === "T"), CT: rows.filter((r) => r.side === "CT") };
   const verdict = (v) => {
+    if (swingView) return v >= 2 ? ["Swinging rounds", "up"] : v <= -2 ? ["Costing rounds", "down"] : ["Even", ""];
     const avg = rws ? 10 : 1;
     return v >= avg * 1.1 ? ["Overperforming", "up"] : v <= avg * 0.9 ? ["Underperforming", "down"] : ["On par", ""];
   };
-  const dialOf = (v, label, color) => { const [t, c] = verdict(v); return dial(fmt(v), rws ? v / 25 : v / 2, label, t, 150, color, c); };
+  const dialOf = (v, label, color) => { const [t, c] = verdict(v); return dial(fmt(v), rws ? v / 25 : swingView ? 0.5 + v / 20 : v / 2, label, t, 150, color, c); };
+  const pct = (v) => `${Math.round(v)}%`;
+  const signed = (v) => `${v >= 0 ? "+" : "−"}${Math.abs(v).toFixed(1)}%`;
 
-  // Gained and lost, by part: Rating 3.0 = 1.00 + Σ weight × (part − 1).
-  let gains;
+  // One swing event in words.
+  const kill = (r, attacker, victim) => d.kills.find((k) => k.round === r.number && k.attacker === attacker && k.victim === victim);
+  const eventLine = (r, e) => {
+    const [what] = SWING_WHY[e.why] || [e.why];
+    const other = e.other ? nameOf(e.other) : "";
+    let text;
+    switch (e.why) {
+      case "kill": { const k = kill(r, who, e.other); text = `Killed <b>${other}</b>${k ? ` with the ${esc(WEAPON_NAMES[k.weapon] || k.weapon)}${k.headshot ? " (headshot)" : ""}${k.opening ? ", the round's first kill" : ""}${k.trade ? ", trading a teammate" : ""}` : ""}`; break; }
+      case "damage": text = `Hurt <b>${other}</b>, and a teammate finished him`; break;
+      case "flash": text = `Your flash set up the kill on <b>${other}</b>`; break;
+      case "traded": text = `<b>${other}</b> traded your death right away (you drew the enemy out, so you get a share)`; break;
+      case "planted_on": text = `<b>${other}</b> planted the bomb while you were alive on CT`; break;
+      case "death": { const k = kill(r, e.other, who); text = `Died to <b>${other}</b>${k?.opening ? ", the round's first death" : ""}${k && !k.traded ? " and nobody traded you" : k?.traded ? " (you were traded)" : ""}`; break; }
+      default: text = esc(what) + (other ? ` <b>${other}</b>` : "");
+    }
+    const chance = ["kill", "damage", "flash", "traded", "death", "teamkill", "plant", "planted_on"].includes(e.why) ? ` <span class="sub">(your team's chance to win: ${pct(e.before)} → ${pct(e.after)})</span>` : "";
+    return `<div class="bd-ev"><span class="bd-evt">${mmss(e.t)}</span><span>${text}${chance}</span><b class="${e.delta > 0.05 ? "up" : e.delta < -0.05 ? "down" : ""}">${signed(e.delta)}</b></div>`;
+  };
+  // Why a round rated what it did, in a sentence: what helped and what hurt most.
+  const ratingWhy = (r, rating, parts) => {
+    const contrib = parts.map((p, i) => [i, w[i] * (p - 1)]);
+    const good = contrib.filter(([, c]) => c > 0.04).sort((a, b) => b[1] - a[1]).map(([i]) => PART_WORDS[i][0]).filter(Boolean);
+    const bad = contrib.filter(([, c]) => c < -0.04).sort((a, b) => a[1] - b[1]).map(([i]) => PART_WORDS[i][1]).filter(Boolean);
+    const level = rating >= 1.5 ? "A big round" : rating >= 1.1 ? "A good round" : rating >= 0.9 ? "An average round" : rating >= 0.5 ? "A below-average round" : "A rough round";
+    const facts = [`${r.kills} kill${r.kills === 1 ? "" : "s"}`, r.assists ? `${r.assists} assist${r.assists === 1 ? "" : "s"}` : "", `${r.damage} damage`, r.deaths ? "died" : "survived"].filter(Boolean).join(", ");
+    return `<b>${level}: ${rating.toFixed(2)}</b> <span class="sub">(1.00 is average)</span><br>${facts}.${good.length ? ` Pushed it up: ${good.join(", ")}.` : ""}${bad.length ? ` Pulled it down: ${bad.join(", ")}.` : ""}`;
+  };
+  const explain = (r) => {
+    const shown = r.events.filter((e) => Math.abs(e.delta) >= 0.05);
+    const evs = shown.length ? `<div class="bd-evs">${shown.map((e) => eventLine(r, e)).join("")}</div>` : "";
+    if (rws) {
+      if (!r.won) return `<b>Round ${r.number} · lost · 0 points</b><br>RWS only gives points in rounds your team wins.`;
+      const pool = r.bombRound ? 70 : 100;
+      const share = r.teamDamage > 0 ? Math.round((100 * r.damage) / r.teamDamage) : Math.round(100 / r.teamSize);
+      return `<b>Round ${r.number} · won · ${r.rws.toFixed(1)} points</b><br>You did ${r.damage} of your team's ${r.teamDamage} damage (${share}%), so you got ${share}% of the round's ${pool} points${r.rws_bomb ? `, plus 30 for ${r.reason === "bomb_defused" ? "defusing" : "planting"} the bomb` : ""}.${r.bombRound && !r.rws_bomb ? " (The bomb ended this round, so 30 of the 100 went to whoever planted or defused it.)" : ""}`;
+    }
+    if (swingView) {
+      return `<b>Round ${r.number} · ${r.won ? "won" : "lost"} · swing ${signed(r.swing)}</b><br>Every moment that changed your team's chance to win, and your share of it:${evs || `<div class="sub">Nothing you did changed the odds this round.</div>`}`;
+    }
+    const { parts, rating } = r3Parts([r], model);
+    return `<b>Round ${r.number} · ${r.won ? "won" : "lost"}</b><br>${ratingWhy(r, rating, parts)}${evs ? `<div class="bd-evhead">What happened</div>${evs}` : ""}`;
+  };
+
+  // Gained and lost, by part: Rating 3.0 = 1.00 + Σ weight × (part − 1). Swing: by cause.
+  let gains, gainsTitle, gainsSub;
   if (rws) {
     const n = Math.max(1, rows.length);
     const bomb = rows.reduce((a, r) => a + r.rws_bomb, 0) / n;
     const dmg = rows.reduce((a, r) => a + r.rws - r.rws_bomb, 0) / n;
     gains = [["Damage share in rounds won", dmg, "Points for your share of your team's damage in the rounds you won (70 or 100 per round, split by damage)."],
       ["Bomb planted / defused", bomb, "30 points for planting the bomb that exploded, or defusing it, in rounds you won."]];
+    [gainsTitle, gainsSub] = ["Where the points came from", "points per round"];
+  } else if (swingView) {
+    const n = Math.max(1, rows.length);
+    const by = {};
+    for (const r of rows) for (const e of r.events) by[e.why] = (by[e.why] || 0) + e.delta;
+    gains = Object.entries(by).map(([k, v]) => [SWING_GROUPS[k] || k, v / n, `${(v >= 0 ? "+" : "")}${v.toFixed(1)}% over the match`]).sort((a, b) => b[1] - a[1]);
+    [gainsTitle, gainsSub] = ["Where your swing came from", "% per round, by cause"];
   } else {
     const { parts } = r3Parts(rows, model);
     gains = R3_PARTS.map(([, label, tip], i) => [label, w[i] * (parts[i] - 1), tip]).sort((a, b) => b[1] - a[1]);
+    [gainsTitle, gainsSub] = ["Rating gained & lost", "vs an average player (1.00)"];
   }
-  const gmax = Math.max(0.05, ...gains.map((g) => Math.abs(g[1])));
+  const gmax = Math.max(rws ? 1 : 0.05, ...gains.map((g) => Math.abs(g[1])));
   const gainsHtml = gains.map(([label, v, tip]) => `<div class="bd-gain" title="${esc(tip)}"><span>${esc(label)}</span>
     <div class="bd-gtrack ${rws ? "one" : ""}"><i class="${v >= 0 ? "pos" : "neg"}" style="${rws ? "" : v >= 0 ? "left:50%;" : `right:50%;`}width:${(Math.abs(v) / gmax) * (rws ? 100 : 50)}%"></i></div>
-    <b class="${v > 0.004 ? "up" : v < -0.004 ? "down" : ""}">${rws ? v.toFixed(1) : `${v >= 0 ? "+" : ""}${v.toFixed(2)}`}</b></div>`).join("");
+    <b class="${v > 0.004 ? "up" : v < -0.004 ? "down" : ""}">${rws ? v.toFixed(1) : swingView ? signed(v) : `${v >= 0 ? "+" : ""}${v.toFixed(2)}`}</b></div>`).join("");
 
-  // Round by round.
-  const vals = rows.map((r) => (rws ? r.rws : roundRating(r) - 1));
-  const vmax = Math.max(rws ? 20 : 0.5, ...vals.map(Math.abs));
+  // How to raise your swing: the biggest things costing it, in words.
+  let tips = "";
+  if (swingView) {
+    const n = Math.max(1, rows.length);
+    const tot = (k) => rows.reduce((a, r) => a + r.events.filter((e) => e.why === k).reduce((x, e) => x + e.delta, 0), 0);
+    const deaths = rows.flatMap((r) => r.events.filter((e) => e.why === "death").map((e) => ({ r, e, k: kill(r, e.other, who) })));
+    const untraded = deaths.filter((x) => x.k && !x.k.traded), openings = deaths.filter((x) => x.k?.opening);
+    const list = [];
+    if (untraded.length) list.push(`<b>${untraded.length} of your ${deaths.length} deaths weren't traded</b>, costing ${signed(untraded.reduce((a, x) => a + x.e.delta, 0))}. Play within a teammate's reach (or let them peek first) so a death still wins the fight back.`);
+    if (openings.length) list.push(`<b>You died first in ${openings.length} round${openings.length === 1 ? "" : "s"}</b> (${signed(openings.reduce((a, x) => a + x.e.delta, 0))}). An early death costs the most: the team plays 4v5 for the rest of the round.`);
+    const saves = tot("lost_alive");
+    if (saves < -1) list.push(`<b>Rounds lost while you were still alive</b> cost ${signed(saves)}. Saving keeps your gun, but Swing charges the round to the players left alive: when a round is winnable, playing for it helps your swing.`);
+    const flashes = tot("flash"), dmg = tot("damage");
+    if (flashes + dmg > 0.5) list.push(`Your utility and damage on kills teammates finished earned ${signed(flashes + dmg)}. Keep flashing for teammates and chipping enemies: it counts even when you don't get the kill.`);
+    const kills = rows.flatMap((r) => r.events.filter((e) => e.why === "kill"));
+    const big = kills.filter((e) => e.delta >= 10);
+    if (big.length) list.push(`Your biggest moments were ${big.length} kill${big.length === 1 ? "" : "s"} worth 10%+ each: opening kills and kills in close rounds move the odds most.`);
+    tips = list.length ? `<section class="panel bd-tips"><div class="panel-head"><div class="h3">How to raise your swing</div><span class="grow"></span><span class="sub">From this match</span></div><ul>${list.map((t) => `<li>${t}</li>`).join("")}</ul></section>` : "";
+    void n;
+  }
+
+  // Round by round: a bar each, its value written on it.
+  const vals = rows.map((r) => (rws ? r.rws : swingView ? r.swing : roundRating(r) - 1));
+  const labels = rows.map((r, i) => (rws ? (r.rws ? Math.round(r.rws) : "") : swingView ? `${r.swing >= 0 ? "+" : ""}${Math.round(r.swing)}` : roundRating(r).toFixed(2)));
+  const vmax = Math.max(rws ? 20 : swingView ? 10 : 0.5, ...vals.map(Math.abs));
   const CW = 1100, CH = 300, top = 16, bottom = 34, mid = rws ? CH - bottom : top + (CH - top - bottom) / 2;
   const bw = (CW - 50) / Math.max(1, rows.length);
   const yOf = (v) => (rws ? mid - (v / vmax) * (CH - top - bottom) : mid - (v / vmax) * ((CH - top - bottom) / 2));
   const ticks = rws ? [0, vmax / 2, vmax] : [-vmax, -vmax / 2, 0, vmax / 2, vmax];
   const bars = rows.map((r, i) => {
     const v = vals[i], x = 44 + i * bw, y = Math.min(yOf(v), mid), h = Math.max(1.5, Math.abs(yOf(v) - mid));
-    const cls = rws ? (v > 0 ? "pos" : "zero") : v > 0.05 ? "pos" : v < -0.05 ? "neg" : "zero";
+    const thr = swingView ? 0.5 : 0.05;
+    const cls = rws ? (v > 0 ? "pos" : "zero") : v > thr ? "pos" : v < -thr ? "neg" : "zero";
+    // The value inside the bar when it fits, else just outside its end.
+    const inside = h >= 20;
+    const ly = inside ? (v >= 0 ? y + 14 : y + h - 6) : v >= 0 ? y - 4 : y + h + 12;
     return `<g class="bd-bar" data-i="${i}"><rect x="${x}" y="${top}" width="${bw}" height="${CH - top - bottom + 4}" class="bd-hit"/>
-      <rect x="${x + bw * 0.14}" y="${y}" width="${bw * 0.72}" height="${h}" rx="3" class="${cls}"/>
+      <rect x="${x + bw * 0.1}" y="${y}" width="${bw * 0.8}" height="${h}" rx="3" class="${cls}"/>
+      ${labels[i] !== "" ? `<text x="${x + bw / 2}" y="${ly}" text-anchor="middle" class="bd-val ${inside ? "in" : ""}">${labels[i]}</text>` : ""}
       <text x="${x + bw / 2}" y="${CH - 10}" text-anchor="middle" class="bd-rnum ${r.won ? "won" : "lost"}">${r.number}</text></g>`;
   }).join("");
   const grid = ticks.map((t) => `<line x1="40" x2="${CW}" y1="${yOf(t)}" y2="${yOf(t)}" class="bd-grid ${t === 0 ? "zero" : ""}"/>
-    <text x="34" y="${yOf(t) + 4}" text-anchor="end" class="bd-tick">${rws ? Math.round(t) : (t >= 0 ? "+" : "") + t.toFixed(2)}</text>`).join("");
-
-  // The arithmetic for one round.
-  const explain = (r) => {
-    if (rws) {
-      if (!r.won) return `<b>Round ${r.number}</b> · lost<br>0 points: RWS only counts rounds your team won.`;
-      const pool = r.bombRound ? 70 : 100;
-      const share = r.teamDamage > 0 ? `${pool} × ${r.damage} / ${r.teamDamage} team damage = ${(r.rws - r.rws_bomb).toFixed(1)}` : `${pool} / ${r.teamSize} players = ${(r.rws - r.rws_bomb).toFixed(1)}`;
-      return `<b>Round ${r.number}</b> · won · <b>${r.rws.toFixed(1)} points</b><br>Damage share: ${share}${r.rws_bomb ? `<br>+ 30 for the bomb (${r.reason === "bomb_defused" ? "defused" : "planted, exploded"})` : ""}${r.bombRound && !r.rws_bomb ? "<br>(70, not 100: the bomb ended this round, its 30 went to the planter/defuser)" : ""}`;
-    }
-    const { parts, rating } = r3Parts([r], model);
-    const lines = [
-      `Kills ${r.kills} (eco-adjusted ${r.e_kills.toFixed(2)}): ${r.e_kills.toFixed(2)} ÷ ${model.kpr} × ${w[0]} = ${(parts[0] * w[0]).toFixed(2)}`,
-      `Damage ${r.damage} (eco-adjusted ${r.e_damage.toFixed(0)}): ${r.e_damage.toFixed(0)} ÷ ${model.adr} × ${w[1]} = ${(parts[1] * w[1]).toFixed(2)}`,
-      `Survival ${r.deaths ? `died (${r.e_deaths.toFixed(2)})` : "survived"}: (1 − ${r.e_deaths.toFixed(2)}) ÷ ${(1 - model.dpr).toFixed(3)} × ${w[2]} = ${(parts[2] * w[2]).toFixed(2)}`,
-      `KAST ${r.kast ? "✓" : "✗"}: ${r.kast ? 1 : 0} ÷ ${model.kast} × ${w[3]} = ${(parts[3] * w[3]).toFixed(2)}`,
-      `Multi-kill ${r.multi.toFixed(2)} pts: ${r.multi.toFixed(2)} ÷ ${model.multi} × ${w[4]} = ${(parts[4] * w[4]).toFixed(2)}`,
-      `Swing ${r.swing >= 0 ? "+" : ""}${r.swing.toFixed(1)}%: (1 ${r.swing < 0 ? "−" : "+"} ${Math.abs(r.swing / 100).toFixed(3)} ÷ ${model.swing_scale}) × ${w[5]} = ${(parts[5] * w[5]).toFixed(2)}`,
-    ];
-    return `<b>Round ${r.number}</b> · ${r.won ? "won" : "lost"} · <b>${rating.toFixed(2)}</b><br>${lines.join("<br>")}`;
-  };
+    <text x="34" y="${yOf(t) + 4}" text-anchor="end" class="bd-tick">${rws ? Math.round(t) : swingView ? `${t >= 0 ? "+" : ""}${Math.round(t)}%` : (t >= 0 ? "+" : "") + t.toFixed(2)}</text>`).join("");
 
   // How it's calculated, with this player's match numbers.
   const n = rows.length;
@@ -1199,39 +1318,44 @@ async function renderBreakdownTab(body, m, id) {
     ? `<p>In every round your team wins, the winners share <b>100 points</b> by damage dealt (or <b>70</b>, when the bomb exploding or being defused ended the round, with <b>30</b> to the planter or defuser). Lost rounds give 0.
        RWS is the average over all rounds:</p>
        <p class="bd-eq">RWS = ${rows.reduce((a, r) => a + r.rws, 0).toFixed(1)} points ÷ ${n} rounds = <b>${fmt(value(rows))}</b></p>`
-    : (() => {
-      const { parts, rating } = r3Parts(rows, model);
-      const sum = (f) => rows.reduce((a, r) => a + f(r), 0);
-      const items = [
-        ["Kills", `${sum((r) => r.e_kills).toFixed(1)} ÷ ${n} ÷ ${model.kpr}`],
-        ["Damage", `${sum((r) => r.e_damage).toFixed(0)} ÷ ${n} ÷ ${model.adr}`],
-        ["Survival", `(1 − ${sum((r) => r.e_deaths).toFixed(1)} ÷ ${n}) ÷ ${(1 - model.dpr).toFixed(3)}`],
-        ["KAST", `${sum((r) => (r.kast ? 1 : 0))} ÷ ${n} ÷ ${model.kast}`],
-        ["Multi-kills", `${sum((r) => r.multi).toFixed(2)} ÷ ${n} ÷ ${model.multi}`],
-        ["Round Swing", (() => { const sw = sum((r) => r.swing / 100); return `1 ${sw < 0 ? "−" : "+"} ${Math.abs(sw).toFixed(2)} ÷ ${n} ÷ ${model.swing_scale}`; })()],
-      ];
-      return `<p>HLTV Rating 3.0 adds six parts, each <b>1.00 for an average player</b>, with HLTV's weights. Kills, damage and deaths are eco-adjusted: a kill on an eco counts less, one against a better-armed enemy more.</p>
-        <table class="bd-ftable"><thead><tr><th>Part</th><th>This match</th><th>Value</th><th>Weight</th><th>Adds</th></tr></thead><tbody>
-        ${items.map(([label, expr], i) => `<tr><td>${label}</td><td><code>${expr}</code></td><td>${parts[i].toFixed(2)}</td><td>× ${w[i]}</td><td>${(parts[i] * w[i]).toFixed(3)}</td></tr>`).join("")}
-        <tr class="tot"><td colspan="4">Rating 3.0</td><td>${rating.toFixed(2)}</td></tr></tbody></table>
-        <p class="sub">Every part is a per-round sum, so the rating is also the average of the ${n} round ratings in the chart above.</p>`;
-    })();
+    : swingView
+      ? `<p>Round Swing (part of HLTV Rating 3.0) follows your team's chance to win the round, from the players alive on each side, their equipment and whether the bomb is down. Every kill changes it: the killer gets half the change, the teammates who damaged or flashed the victim share the rest (a traded player gets some back for drawing the enemy out), and the victim is charged the whole drop. A plant credits the planter. When the round ends, what's left of it goes to the winners (clutcher, players with kills, defuser, players alive) and is charged to the losers still alive.</p>
+         <p class="bd-eq">Swing = ${rows.reduce((a, r) => a + r.swing, 0).toFixed(1)}% over ${n} rounds = <b>${fmt(value(rows))}</b> per round</p>`
+      : (() => {
+        const { parts, rating } = r3Parts(rows, model);
+        const sum = (f) => rows.reduce((a, r) => a + f(r), 0);
+        const items = [
+          ["Kills", `${sum((r) => r.e_kills).toFixed(1)} ÷ ${n} ÷ ${model.kpr}`],
+          ["Damage", `${sum((r) => r.e_damage).toFixed(0)} ÷ ${n} ÷ ${model.adr}`],
+          ["Survival", `(1 − ${sum((r) => r.e_deaths).toFixed(1)} ÷ ${n}) ÷ ${(1 - model.dpr).toFixed(3)}`],
+          ["KAST", `${sum((r) => (r.kast ? 1 : 0))} ÷ ${n} ÷ ${model.kast}`],
+          ["Multi-kills", `${sum((r) => r.multi).toFixed(2)} ÷ ${n} ÷ ${model.multi}`],
+          ["Round Swing", (() => { const sw = sum((r) => r.swing / 100); return `1 ${sw < 0 ? "−" : "+"} ${Math.abs(sw).toFixed(2)} ÷ ${n} ÷ ${model.swing_scale}`; })()],
+        ];
+        return `<p>HLTV Rating 3.0 adds six parts, each <b>1.00 for an average player</b>, with HLTV's weights. Kills, damage and deaths are eco-adjusted: a kill on an eco counts less, one against a better-armed enemy more.</p>
+          <table class="bd-ftable"><thead><tr><th>Part</th><th>This match</th><th>Value</th><th>Weight</th><th>Adds</th></tr></thead><tbody>
+          ${items.map(([label, expr], i) => `<tr><td>${label}</td><td><code>${expr}</code></td><td>${parts[i].toFixed(2)}</td><td>× ${w[i]}</td><td>${(parts[i] * w[i]).toFixed(3)}</td></tr>`).join("")}
+          <tr class="tot"><td colspan="4">Rating 3.0</td><td>${rating.toFixed(2)}</td></tr></tbody></table>
+          <p class="sub">Every part is a per-round sum, so the rating is also the average of the ${n} round ratings in the chart above.</p>`;
+      })();
 
   const players = m.players.slice().sort((a, b) => (a.side === b.side ? r3(b.derived) - r3(a.derived) : a.side === "mine" ? -1 : 1));
+  const metrics = [["rating3", "HLTV Rating 3.0"], ["rws", "RWS"], ...(hasSwings ? [["swing", "Round Swing"]] : [])];
   body.innerHTML = `
     <div class="bd-bar-top">
       <select id="bd-player" aria-label="Player">${players.map((p) => `<option value="${p.steamid}" ${p.steamid === who ? "selected" : ""}>${esc(p.name)} · ${p.counts.kills}/${p.counts.deaths}/${p.counts.assists} · ${f2(r3(p.derived))}</option>`).join("")}</select>
-      <div class="seg" id="bd-metric">${[["rating3", "HLTV Rating 3.0"], ["rws", "RWS"]].map(([k, l]) => `<button data-metric="${k}" class="${breakdown.metric === k ? "on" : ""}">${l}</button>`).join("")}</div>
+      <div class="seg" id="bd-metric">${metrics.map(([k, l]) => `<button data-metric="${k}" class="${metric === k ? "on" : ""}">${l}</button>`).join("")}</div>
       <span class="bd-who">${avatarHtml(who, 28)}<b>${esc(me.name)}</b> <span class="sub">${me.counts.kills} / ${me.counts.deaths} / ${me.counts.assists}</span></span>
     </div>
     <div class="bd-top">
       <section class="panel bd-dials"><div class="panel-head"><div class="h3">Consistency</div></div>
-        <div class="bd-dialrow">${dialOf(value(sides.all), rws ? "RWS" : "Rating 3.0", "")}${sides.T.length ? dialOf(value(sides.T), "T side", "#e0a73a") : ""}${sides.CT.length ? dialOf(value(sides.CT), "CT side", "#5b8fd9") : ""}</div></section>
-      <section class="panel bd-gains"><div class="panel-head"><div class="h3">${rws ? "Where the points came from" : "Rating gained & lost"}</div><span class="grow"></span><span class="sub">${rws ? "points per round" : "vs an average player (1.00)"}</span></div>
+        <div class="bd-dialrow">${dialOf(value(sides.all), rws ? "RWS" : swingView ? "Swing / round" : "Rating 3.0", "")}${sides.T.length ? dialOf(value(sides.T), "T side", "#e0a73a") : ""}${sides.CT.length ? dialOf(value(sides.CT), "CT side", "#5b8fd9") : ""}</div></section>
+      <section class="panel bd-gains"><div class="panel-head"><div class="h3">${gainsTitle}</div><span class="grow"></span><span class="sub">${gainsSub}</span></div>
         <div class="bd-gainlist">${gainsHtml}</div></section>
     </div>
-    <section class="panel bd-rounds"><div class="panel-head"><div class="h3">${rws ? "RWS points by round" : "Rating by round"}</div><span class="grow"></span><span class="sub">${rws ? "Hover a round for the math" : "Bars show each round's rating above or below 1.00 · hover a round for the math"}</span></div>
+    <section class="panel bd-rounds"><div class="panel-head"><div class="h3">${rws ? "RWS points by round" : swingView ? "Round Swing by round" : "Rating by round"}</div><span class="grow"></span><span class="sub">Hover a round to see why</span></div>
       <div class="bd-chart"><svg viewBox="0 0 ${CW} ${CH}" id="bd-svg">${grid}${bars}</svg><div class="bd-tip" id="bd-tip" hidden></div></div></section>
+    ${tips}
     <section class="panel bd-how"><div class="panel-head"><div class="h3">How it's calculated</div></div><div class="bd-howbody">${formula}</div></section>`;
 
   body.querySelector("#bd-player").onchange = (e) => { breakdown.player = e.target.value; renderBreakdownTab(body, m, id); };
@@ -1242,8 +1366,9 @@ async function renderBreakdownTab(body, m, id) {
     g.onmousemove = (e) => {
       const b = chart.getBoundingClientRect();
       const x = e.clientX - b.left, y = e.clientY - b.top;
-      tip.style.left = `${Math.min(b.width - tip.offsetWidth - 8, x + 14)}px`;
-      tip.style.top = `${Math.max(4, y - tip.offsetHeight - 12)}px`;
+      const left = x + 16 + tip.offsetWidth > b.width ? x - tip.offsetWidth - 16 : x + 16;
+      tip.style.left = `${Math.max(4, left)}px`;
+      tip.style.top = `${Math.max(4, Math.min(y - 20, b.height - tip.offsetHeight - 4))}px`;
     };
     g.onmouseleave = () => { tip.hidden = true; g.classList.remove("on"); };
   });
@@ -2304,7 +2429,7 @@ function roundStripHtml(rounds, nr) {
   }).join(`<div class="tl-sep"></div>`);
 }
 
-const replay = { round: 1, t: 0, speed: 1, playing: false, names: true };
+const replay = { round: 1, t: 0, speed: 1, playing: false, names: true, weapons: true };
 let replayRaf = null;
 
 const ROUND_S = 115, BOMB_S = 40, KILL_LINE_S = 1.2;
@@ -2322,6 +2447,8 @@ async function renderReplayTab(body, m, id) {
   const names = new Map(m.players.map((p) => [p.steamid, p.name]));
   const team = new Map(m.players.map((p) => [p.steamid, p.side]));
   const ids = rp.players;
+  const stride = rp.stride || 4; // newer replays add the weapon each player holds
+  const blinds = (d.blinds || []).filter((b) => b.round === round.number);
   const offset = (round.live_tick - rr.start) / 64; // replay frames start a few ticks before the round goes live
   const duration = (rr.frames.length - 1) * rp.step / 64 - offset;
   const kills = d.kills.filter((k) => k.round === round.number && !k.team_kill);
@@ -2351,6 +2478,7 @@ async function renderReplayTab(body, m, id) {
           </div>
           <span class="rp-time" id="rp-time"></span>
           <label class="check"><input type="checkbox" id="rp-names" ${replay.names ? "checked" : ""}> Names</label>
+          ${stride >= 5 ? `<label class="check"><input type="checkbox" id="rp-guns" ${replay.weapons ? "checked" : ""}> Weapons</label>` : ""}
         </div>
       </section>
       <section class="tl-events rp-feed"><div class="h3" style="padding:4px 6px 8px">Round ${round.number} kills</div>
@@ -2366,10 +2494,11 @@ async function renderReplayTab(body, m, id) {
     const f0 = Math.min(rr.frames.length - 1, Math.floor(fpos)), f1 = Math.min(rr.frames.length - 1, f0 + 1), w = fpos - f0;
     const a = rr.frames[f0], b = rr.frames[f1];
     return ids.map((sid, i) => {
-      const o = i * 4;
+      const o = i * stride;
       const hp = a[o + 3];
+      const weapon = stride >= 5 && a[o + 4] >= 0 ? rp.weapons[a[o + 4]] : null;
       const lerp = (k) => a[o + k] + (b[o + k] - a[o + k]) * (b[o + 3] > 0 ? w : 0);
-      return { sid, x: lerp(0), y: lerp(1), yaw: lerpYaw(a[o + 2], b[o + 2], b[o + 3] > 0 ? w : 0), hp };
+      return { sid, x: lerp(0), y: lerp(1), yaw: lerpYaw(a[o + 2], b[o + 2], b[o + 3] > 0 ? w : 0), hp, weapon };
     });
   };
   const draw = () => {
@@ -2381,9 +2510,17 @@ async function renderReplayTab(body, m, id) {
       const g = nades.find((n) => n.player === th.player && n.kind === th.kind && n.t >= th.t && n.t - th.t < 12);
       const end = g ? g.t : th.t + 2;
       if (t >= th.t && t < end) {
-        const [ax, ay] = at(th.from[0], th.from[1]), [bx, by] = at(th.to[0], th.to[1]);
-        const f = Math.min(1, (t - th.t) / Math.max(0.3, end - th.t));
-        out += `<line x1="${ax}" y1="${ay}" x2="${ax + (bx - ax) * f}" y2="${ay + (by - ay) * f}" class="rp-throw ${th.kind}"/>`;
+        if (th.path?.length > 1) {
+          // Its real flight (a point every 4 ticks): the trail so far and the grenade itself.
+          const k = Math.min(th.path.length - 1, Math.floor(((t - th.t) * 64) / 4));
+          const pts = th.path.slice(0, k + 1).map(([x, y]) => at(x, y));
+          out += `<polyline points="${pts.map((p) => p.join(",")).join(" ")}" class="rp-throw ${th.kind}"/>
+            <circle cx="${pts[pts.length - 1][0]}" cy="${pts[pts.length - 1][1]}" r="4.5" class="rp-proj ${th.kind}"/>`;
+        } else {
+          const [ax, ay] = at(th.from[0], th.from[1]), [bx, by] = at(th.to[0], th.to[1]);
+          const f = Math.min(1, (t - th.t) / Math.max(0.3, end - th.t));
+          out += `<line x1="${ax}" y1="${ay}" x2="${ax + (bx - ax) * f}" y2="${ay + (by - ay) * f}" class="rp-throw ${th.kind}"/>`;
+        }
       }
     }
     for (const g of nades) {
@@ -2413,8 +2550,12 @@ async function renderReplayTab(body, m, id) {
       const [x, y] = at(p.x, p.y);
       const c = TEAM_COLOR[team.get(p.sid)] || "#ccc";
       const rad = (p.yaw * Math.PI) / 180;
-      out += `<g class="rp-p"><line x1="${x}" y1="${y}" x2="${x + Math.cos(rad) * 20}" y2="${y - Math.sin(rad) * 20}" class="rp-look"/>
-        <circle cx="${x}" cy="${y}" r="9" fill="${c}" class="rp-dot"/>
+      // Flashed: a white glow that fades as the blindness wears off.
+      const bl = blinds.find((b) => b.player === p.sid && t >= b.t && t < b.t + b.secs);
+      const glow = bl ? `<circle cx="${x}" cy="${y}" r="15" class="rp-blind" style="opacity:${(0.25 + 0.75 * (1 - (t - bl.t) / bl.secs)).toFixed(2)}"/>` : "";
+      const gun = replay.weapons && p.weapon ? `<image href="${assetUrl(`weapons/${p.weapon}.svg`)}" x="${x - 14}" y="${y + 11}" width="28" height="12" class="rp-gun"/>` : "";
+      out += `<g class="rp-p">${glow}<line x1="${x}" y1="${y}" x2="${x + Math.cos(rad) * 20}" y2="${y - Math.sin(rad) * 20}" class="rp-look"/>
+        <circle cx="${x}" cy="${y}" r="9" fill="${c}" class="rp-dot"/>${gun}
         ${replay.names ? `<text x="${x}" y="${y - 14}" text-anchor="middle" class="rp-name">${esc(names.get(p.sid) || "")}</text>` : ""}</g>`;
     }
     svg.innerHTML = out;
@@ -2454,6 +2595,7 @@ async function renderReplayTab(body, m, id) {
   body.querySelectorAll("[data-rspeed]").forEach((b) => (b.onclick = () => { replay.speed = Number(b.dataset.rspeed); body.querySelectorAll("[data-rspeed]").forEach((x) => x.classList.toggle("on", x === b)); }));
   scrub.oninput = () => { replay.t = Number(scrub.value); draw(); };
   body.querySelector("#rp-names").onchange = (e) => { replay.names = e.target.checked; draw(); };
+  body.querySelector("#rp-guns")?.addEventListener("change", (e) => { replay.weapons = e.target.checked; draw(); });
   body.querySelectorAll("[data-kt]").forEach((b) => (b.onclick = () => { replay.t = Math.max(0, Number(b.dataset.kt) - 2); draw(); }));
   body.querySelectorAll("[data-round]").forEach((b) => (b.onclick = () => { replay.round = Number(b.dataset.round); replay.t = 0; replay.playing = false; renderReplayTab(body, m, id); }));
   draw();
@@ -2864,6 +3006,142 @@ function renderProfile(view) {
   }));
 }
 
+// ---- ESEA league ------------------------------------------------------------------------------------
+
+// "S59 NA Open9-10 East A - Regular Season" (a FACEIT league game's competition) -> its parts.
+function leagueOf(comp) {
+  const m = /^S(\d+)\s+(\S+)\s+(.+?)\s+-\s+(.+)$/.exec(comp || "");
+  if (!m) return null;
+  const [division, ...conf] = m[3].split(" ");
+  return { season: m[1], region: m[2], division, conference: conf.join(" "), stage: m[4] };
+}
+const ESEA_MARK = `<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M12 2.5l2.5 6.4h6.8l-5.5 4 2.1 6.6L12 15.6l-5.9 3.9 2.1-6.6-5.5-4h6.8z"/></svg>`;
+const leagueLogo = () => (state.league?.league?.avatar ? `<img src="${esc(state.league.league.avatar)}" alt="ESEA">` : ESEA_MARK);
+// The ESEA badge where a league game has no ELO: season and division, like FACEIT's match list.
+function leagueChip(comp, link = false) {
+  const l = leagueOf(comp);
+  if (!l) return "";
+  const tag = link ? "a" : "span";
+  return `<${tag} class="esea-chip" ${link ? `href="#/league"` : ""} title="ESEA League · Season ${l.season} · ${esc(l.division)} ${esc(l.conference)} · ${esc(l.stage)}">${ESEA_MARK}<span><b>S${l.season}</b><i>${esc(l.division)} ${esc(l.conference)}</i></span></${tag}>`;
+}
+
+// The league data (the app fetches it from FACEIT and caches it; the preview reads the cache).
+async function loadLeague(force = false) {
+  if (state.league && !force) return state.league;
+  try {
+    state.league = tauri ? await tauri.core.invoke("league_info", { force }) : await (await fetch(assetUrl("league.json"), { cache: "no-store" })).json();
+  } catch (e) { state.league = state.league || null; }
+  return state.league;
+}
+
+const leagueView = { sort: "m2", desc: true, shown: 50, teamSort: "rating3", teamDesc: true };
+const LEADER_COLS = [["m2", "Wins"], ["m3", "Kills"], ["m5", "Assists"], ["m4", "Deaths"], ["m10", "3K"], ["m11", "4K"], ["m12", "5K"], ["m13", "HS%"], ["m8", "Rounds"], ["k17", "ADR"], ["m14", "K/R"], ["m1", "Matches"]];
+
+async function renderLeague(view) {
+  view.innerHTML = `<div class="empty">Loading your league from FACEIT…</div>`;
+  const L = await loadLeague();
+  if (!L) { view.innerHTML = `<div class="empty">Couldn't reach FACEIT for your league. Try again in a bit.</div>`; return; }
+  if (L.none) { view.innerHTML = `<div class="empty">No ESEA league games in your FACEIT history yet.</div>`; return; }
+  const st = L.standing || {};
+  const me = state.index.me;
+  const pl = st.placement || {};
+  const place = pl.left ? (pl.left === pl.right ? `#${pl.left}` : `#${pl.left}–${pl.right}`) : "";
+  const mine = L.standings.find((t) => t.premade_team_id === L.team_id);
+  const rosterIds = new Set((L.roster || []).map((r) => r.user_id));
+  const when = (iso) => { if (!iso) return ""; const d = new Date(iso); return `${d.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })} ${d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })}`; };
+  const roleOf = (r) => ({ player: "Player", substitute: "Sub", coach: "Coach" }[r.game_role] || r.game_role || "");
+  const rankOf = (r) => ({ leader: "Captain", officer: "Officer" }[r.team_role] || "");
+
+  // Your league matches: played (linked to the match page when the demo is in your library) and coming up.
+  const libIds = new Set(state.all.map((m) => m.id));
+  const matchRow = (g, done) => {
+    const us = g.factions.find((f) => f.premade_team_id === L.team_id) || {};
+    const them = g.factions.find((f) => f.premade_team_id !== L.team_id) || {};
+    const id = `faceit-${g.id.replace(/^1-/, "")}-m1`;
+    const won = done && g.winning_team_premade_id === L.team_id;
+    const map = g.maps_picked?.[0]?.name || "";
+    const href = libIds.has(id) ? matchHref(id) : null;
+    return `<${href ? `a href="${href}"` : "div"} class="lg-match ${done ? (won ? "win" : "loss") : "next"}">
+      <span class="lg-when">${when(done ? g.started_time || g.scheduled_time : g.scheduled_time)}</span>
+      <span class="lg-vs">vs <b>${esc(them.name || "TBD")}</b></span>
+      ${done ? `<span class="lg-score"><b class="${won ? "up" : "down"}">${us.match_score ?? ""}</b>:${them.match_score ?? ""}</span><span class="lg-map">${esc(map)}</span>` : `<span class="lg-score sub">Upcoming</span><span></span>`}
+    </${href ? "a" : "div"}>`;
+  };
+
+  // Your team's stats from the league demos in your library (the session scoreboard's numbers).
+  const leagueMatches = state.all.filter((m) => leagueOf(m.faceit?.competition)?.season === leagueOf(L.competition)?.season && leagueOf(m.faceit?.competition));
+  const withDemo = leagueMatches.filter((m) => !m.stats_only);
+  const entries = await Promise.all(withDemo.map((m) => loadMatch(m.id)));
+  const team = sumPlayers(entries, me).filter((p) => p.mine > 0);
+  const TCOLS = [["name", "Player"], ["maps", "Maps"], ["wins", "W-L"], ["rating3", "HLTV 3.0"], ["rws", "RWS"], ["swing", "Swing"], ["kills", "K"], ["deaths", "D"], ["assists", "A"], ["kd", "K/D"], ["adr", "ADR"], ["kast", "KAST"], ["hs", "HS%"]];
+  const tval = (p, k) => ({ name: p.name.toLowerCase(), kills: p.c.kills || 0, deaths: p.c.deaths || 0, assists: p.c.assists || 0 }[k] ?? p[k] ?? 0);
+  team.sort((a, b) => { const x = tval(a, leagueView.teamSort), y = tval(b, leagueView.teamSort); return (typeof x === "string" ? x.localeCompare(y) : x - y) * (leagueView.teamDesc ? -1 : 1); });
+  const tcell = (p, k) => {
+    switch (k) {
+      case "name": return `<td class="left">${avatarHtml(p.steamid, 24)}<span>${esc(p.name)}</span>${p.is_me ? ` <span class="sc-you">You</span>` : ""}</td>`;
+      case "wins": return `<td>${p.wins}-${p.maps - p.wins}</td>`;
+      case "rating3": return `<td><span class="mp-rating ${ratingClass(p.rating3)}">${f2(p.rating3)}</span></td>`;
+      case "rws": return `<td class="${gradeClass("rws", p.rws)}">${f1(p.rws)}</td>`;
+      case "swing": return `<td class="${p.swing > 0 ? "up" : p.swing < 0 ? "down" : ""}">${fmtSwing(p.swing)}</td>`;
+      case "kd": return `<td>${f2(p.kd)}</td>`;
+      case "adr": return `<td>${f1(p.adr)}</td>`;
+      case "kast": return `<td>${Math.round(p.kast)}%</td>`;
+      case "hs": return `<td>${Math.round(p.hs)}%</td>`;
+      default: return `<td>${tval(p, k)}</td>`;
+    }
+  };
+
+  // Every player in the division (FACEIT's league stats).
+  const num = (p, k) => Number(p.stats?.[k] ?? 0);
+  const leaders = L.players.slice().sort((a, b) => (num(b, leagueView.sort) - num(a, leagueView.sort)) * (leagueView.desc ? 1 : -1) || num(b, "m3") - num(a, "m3"));
+  const lfmt = (k, v) => (k === "m13" ? `${Math.round(v)}%` : k === "k17" ? v.toFixed(1) : k === "m14" ? v.toFixed(2) : Math.round(v));
+
+  view.innerHTML = `
+    <section class="lg-hero">
+      <div class="lg-logo">${leagueLogo()}</div>
+      <div class="lg-title">
+        <div class="sub">${esc(L.league.name || "ESEA League")} · Season ${esc(L.league.season || "")}</div>
+        <div class="h1">${L.team.avatar ? `<img class="lg-team-av" src="${esc(L.team.avatar)}" alt="">` : ""}${esc(L.team.name || "Your team")}</div>
+        <div class="lg-div"><b>${esc(st.division_name || "")}</b> · ${esc(st.conference_name || "")} · ${esc(st.stage_name || "")} · ${esc(st.region_name || "")}</div>
+      </div>
+      <div class="lg-nums">
+        <div><b><span class="up">${st.wins ?? mine?.won ?? 0}</span>-<span class="down">${st.losses ?? mine?.lost ?? 0}</span></b><span>Record</span></div>
+        <div><b>${place || "–"}</b><span>of ${L.standings.length} teams</span></div>
+        <div><b>${mine?.points ?? 0}</b><span>Points</span></div>
+      </div>
+      <button class="btn ghost" id="lg-refresh">Refresh</button>
+    </section>
+    ${L.stale ? `<div class="ml-note">Showing what Veloxify saved last time: FACEIT couldn't be reached (${esc(L.stale)}).</div>` : ""}
+    <div class="lg-grid">
+      <section class="panel"><div class="panel-head"><div class="h3">Roster</div><span class="grow"></span><span class="sub">${(L.roster || []).length} members</span></div>
+        <div class="lg-roster">${(L.roster || []).map((r) => `<div class="lg-member">${r.avatar_img ? `<img src="${esc(r.avatar_img)}" alt="">` : `<span class="lg-noav"></span>`}
+          <div><b>${esc(r.user_name)}</b><span>${roleOf(r)}${rankOf(r) ? ` · ${rankOf(r)}` : ""}</span></div></div>`).join("")}</div></section>
+      <section class="panel"><div class="panel-head"><div class="h3">League matches</div></div>
+        <div class="lg-matches">${(L.scheduled || []).map((g) => matchRow(g, false)).join("")}${(L.finished || []).map((g) => matchRow(g, true)).join("") || `<div class="empty small">No league matches played yet.</div>`}</div></section>
+    </div>
+    <section class="panel lg-section"><div class="panel-head"><div class="h3">Team stats</div><span class="grow"></span><span class="sub">From ${withDemo.length} of ${leagueMatches.length} league match${leagueMatches.length === 1 ? "" : "es"} with a demo in your library</span></div>
+      ${team.length ? `<div class="table-wrap"><table class="lg-table"><thead><tr>${TCOLS.map(([k, t]) => `<th data-tsort="${k}" class="${leagueView.teamSort === k ? "on" : ""} ${k === "name" ? "left" : ""}">${t}${leagueView.teamSort === k ? (leagueView.teamDesc ? " ↓" : " ↑") : ""}</th>`).join("")}</tr></thead>
+        <tbody>${team.map((p) => `<tr class="${p.is_me ? "me" : ""}">${TCOLS.map(([k]) => tcell(p, k)).join("")}</tr>`).join("")}</tbody></table></div>`
+        : `<div class="empty small">Get the demos of your league matches (Match history → Get demos) and your team's stats show here.</div>`}</section>
+    <section class="panel lg-section"><div class="panel-head"><div class="h3">Standings</div><span class="grow"></span><span class="sub">${esc(st.division_name || "")} ${esc(st.conference_name || "")} · ${esc(st.stage_name || "")}</span></div>
+      <div class="table-wrap"><table class="lg-table lg-standings"><thead><tr><th>#</th><th class="left">Team</th><th>Country</th><th>Matches</th><th>Won</th><th>Lost</th><th>+/-</th><th>Rounds</th><th>Points</th></tr></thead>
+        <tbody>${L.standings.map((t) => { const tb = t.tie_breakers || {}; const diff = (t.won || 0) - (t.lost || 0); return `<tr class="${t.premade_team_id === L.team_id ? "me" : ""}">
+          <td>${t.rank_start === t.rank_end ? t.rank_start : `${t.rank_start}–${t.rank_end}`}</td>
+          <td class="left">${t.avatar_url ? `<img class="lg-tav" src="${esc(t.avatar_url)}" alt="">` : `<span class="lg-tav none"></span>`}<span>${esc(t.name)}</span></td>
+          <td><span class="lg-cc">${esc(t.country_code || "")}</span></td><td>${t.matches || 0}</td><td>${t.won || 0}</td><td>${t.lost || 0}</td>
+          <td class="${diff > 0 ? "up" : diff < 0 ? "down" : ""}">${diff > 0 ? "+" : ""}${diff}</td><td>${tb.rounds_won ?? 0}-${tb.rounds_lost ?? 0}</td><td><b>${t.points || 0}</b></td></tr>`; }).join("")}</tbody></table></div></section>
+    <section class="panel lg-section"><div class="panel-head"><div class="h3">Stat leaders</div><span class="grow"></span><span class="sub">Every player in ${esc(st.division_name || "the division")} ${esc(st.conference_name || "")} · FACEIT's league stats</span></div>
+      <div class="table-wrap"><table class="lg-table lg-leaders"><thead><tr><th>#</th><th class="left">Player</th>${LEADER_COLS.map(([k, t]) => `<th data-lsort="${k}" class="${leagueView.sort === k ? "on" : ""}">${t}${leagueView.sort === k ? (leagueView.desc ? " ↓" : " ↑") : ""}</th>`).join("")}</tr></thead>
+        <tbody>${leaders.slice(0, leagueView.shown).map((p, i) => `<tr class="${rosterIds.has(p.id) ? "me" : ""}"><td>${i + 1}</td><td class="left"><b>${esc(p.nickname)}</b></td>${LEADER_COLS.map(([k]) => `<td>${lfmt(k, num(p, k))}</td>`).join("")}</tr>`).join("")}</tbody></table></div>
+      ${leaders.length > leagueView.shown ? `<button class="btn ghost lg-more" id="lg-more">Show all ${leaders.length} players</button>` : ""}</section>
+    <div class="note">From FACEIT's public league pages, refreshed every 20 minutes (or with Refresh). Team stats come from your own demos: HLTV Rating 3.0, RWS and Swing the same way as the rest of Veloxify.</div>`;
+
+  view.querySelector("#lg-refresh").onclick = async (e) => { e.target.disabled = true; e.target.textContent = "Refreshing…"; await loadLeague(true); renderLeague(view); };
+  view.querySelector("#lg-more")?.addEventListener("click", () => { leagueView.shown = 10000; renderLeague(view); });
+  view.querySelectorAll("[data-lsort]").forEach((th) => (th.onclick = () => { const k = th.dataset.lsort; leagueView.desc = leagueView.sort === k ? !leagueView.desc : true; leagueView.sort = k; renderLeague(view); }));
+  view.querySelectorAll("[data-tsort]").forEach((th) => (th.onclick = () => { const k = th.dataset.tsort; leagueView.teamDesc = leagueView.teamSort === k ? !leagueView.teamDesc : k !== "name"; leagueView.teamSort = k; renderLeague(view); }));
+}
+
 // ---- match history --------------------------------------------------------------------------
 
 let mh = { source: "all", result: "all", map: "all", shown: 50 };
@@ -2877,7 +3155,7 @@ function historyRows() {
       when: parseLocal(m.played_at), mine: m.score_mine, theirs: m.score_theirs, line: m.line, hl: m.highlight_count,
       elo: m.elo ?? fm?.elo ?? null,
       delta: m.source === "faceit" ? m.elo_delta ?? fm?.elo_delta ?? null : m.premier_delta ?? null,
-      premier: m.premier ?? null, placement: !!fm?.calibrating,
+      premier: m.premier ?? null, placement: !!fm?.calibrating, competition: fm?.competition || "",
       room: m.source === "faceit" ? fm?.match_id || m.id.replace(/^faceit-/, "1-").replace(/-m\d+$/, "") : null,
     };
   }).sort((a, b) => b.when - a.when);
@@ -2886,7 +3164,7 @@ function historyRows() {
 function historyRow(r) {
   const l = r.line;
   const elo = r.source === "faceit"
-    ? r.elo ? `${levelBadge(levelFor(r.elo))}<span>${r.elo.toLocaleString("en-US")}</span>${deltaHtml(r.delta)}` : r.placement ? `<span class="none" title="FACEIT shows no ELO during a new season's placement matches">Placement match</span>` : `<span class="none">–</span>`
+    ? r.elo ? `${levelBadge(levelFor(r.elo))}<span>${r.elo.toLocaleString("en-US")}</span>${deltaHtml(r.delta)}` : leagueOf(r.competition) ? leagueChip(r.competition) : r.placement ? `<span class="none" title="FACEIT shows no ELO during a new season's placement matches">Placement match</span>` : `<span class="none">–</span>`
     : r.source === "valve"
       ? r.premier ? `${premierChip(r.premier)}${deltaHtml(r.delta)}` : `<span class="none">Unranked</span>`
       : `<span class="none">–</span>`;
@@ -3605,6 +3883,8 @@ function renderHighlightsTab(view) {
     if (day) grid += "</div>";
   }
 
+  // Filters beyond the top bar that are on (they live behind the Filters button).
+  const activeFilters = (browser.preset ? 1 : 0) + browser.types.length + browser.tags.length + (browser.hideEco ? 1 : 0) + (browser.playableOnly === BROWSER_DEFAULTS.playableOnly ? 0 : 1);
   view.innerHTML = `
     <section class="hero">
       <div class="hero-head">
@@ -3621,7 +3901,12 @@ function renderHighlightsTab(view) {
         ${browser.when === "custom" ? `<span class="dates"><input type="date" id="from" value="${browser.from}"> – <input type="date" id="to" value="${browser.to}"></span>` : ""}
         <label>Source <select id="source"><option value="all">All</option>${sources.map((s) => `<option value="${esc(s)}" ${browser.source === s ? "selected" : ""}>${esc(s)}</option>`).join("")}</select></label>
         <label>Map <select id="map"><option value="all">All maps</option>${maps.map((m) => `<option value="${m}" ${browser.map === m ? "selected" : ""}>${esc(mapName(m))}</option>`).join("")}</select></label>
+        <button class="btn ghost filters-btn ${browser.filtersOpen ? "on" : ""}" id="filters-btn">Filters${activeFilters ? ` <span class="badge">${activeFilters}</span>` : ""} ${browser.filtersOpen ? "▴" : "▾"}</button>
+        <span class="grow"></span>
+        <span class="sub">${list.length} highlight${list.length === 1 ? "" : "s"}</span>
+        ${activeFilters ? `<button class="btn ghost" id="reset">Reset filters</button>` : ""}
       </div>
+      <div class="filters-panel" ${browser.filtersOpen ? "" : "hidden"}>
       <div class="controls folders-bar">
         <span class="h2">Folders</span>
         <button class="chip ${!folder ? "on" : ""}" data-folder="">All highlights</button>
@@ -3638,18 +3923,17 @@ function renderHighlightsTab(view) {
         <div class="chips">${TYPE_FILTERS.map(([k, label]) => `<button class="chip ${browser.types.includes(k) ? "on" : ""}" data-type="${k}">${label}</button>`).join("")}</div>
         <label class="check"><input type="checkbox" id="playable" ${browser.playableOnly ? "checked" : ""}> Playable only</label>
         <label class="check" title="Hide highlights where most of the kills were on players who'd saved (under $2,000 of equipment)"><input type="checkbox" id="hide-eco" ${browser.hideEco ? "checked" : ""}> Hide vs eco</label>
-        <span class="grow"></span>
-        <span class="sub">${list.length} highlight${list.length === 1 ? "" : "s"}</span>
-        <button class="btn ghost" id="reset">Reset filters</button>
       </div>
       <div class="controls">
         <span class="h2">Tags</span>
         <div class="chips">${topTags.map((t) => `<button class="chip ${browser.tags.includes(t) ? "on" : ""}" data-tag="${esc(t)}">${esc(t)}</button>`).join("")}</div>
       </div>
+      </div>
       <div class="browser-body">${list.length ? grid : `<div class="empty">Nothing matches these filters.</div>`}</div>
     </section>`;
 
   const rerender = () => { saveBrowser(); renderHighlightsTab(view); };
+  view.querySelector("#filters-btn").onclick = () => { browser.filtersOpen = !browser.filtersOpen; rerender(); };
   view.querySelectorAll(".seg").forEach((el) => el.querySelectorAll("button").forEach((b) => (b.onclick = () => { browser[el.dataset.key] = b.dataset.v; rerender(); })));
   view.querySelectorAll("[data-type]").forEach((b) => (b.onclick = () => {
     const k = b.dataset.type;
@@ -3685,7 +3969,7 @@ function renderHighlightsTab(view) {
   wireCardMenus(view, folder);
   view.querySelector("#playable").onchange = (e) => { browser.playableOnly = e.target.checked; rerender(); };
   view.querySelector("#hide-eco").onchange = (e) => { browser.hideEco = e.target.checked; rerender(); };
-  view.querySelector("#reset").onclick = () => { browser = { ...BROWSER_DEFAULTS, heroPeriod: browser.heroPeriod, folder: browser.folder }; rerender(); };
+  view.querySelector("#reset")?.addEventListener("click", () => { browser = { ...BROWSER_DEFAULTS, heroPeriod: browser.heroPeriod, folder: browser.folder, filtersOpen: browser.filtersOpen }; rerender(); });
   for (const id of ["from", "to"]) {
     const el = view.querySelector(`#${id}`);
     if (el) el.onchange = (e) => { browser[id] = e.target.value; rerender(); };

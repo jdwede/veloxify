@@ -9,7 +9,7 @@ use crate::lowlights::{self, Lowlight};
 use crate::model::{Match, Source, TeamId, TICKRATE};
 use crate::stats::{Counts, Derived, PlayerStats};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// Which moments become clips: who gets them, how picky selection is, and how many per match.
 #[derive(Debug, Clone)]
@@ -134,6 +134,9 @@ pub struct MatchEntry {
     /// FACEIT competition (e.g. a matchmaking queue or an ESEA league season), from FACEIT.
     #[serde(default)]
     pub competition: Option<String>,
+    /// Who queued with you, from FACEIT's match room (SteamID64s), when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub faceit_party: Option<Vec<String>>,
     /// FACEIT ELO after this match and its change, once known from FACEIT.
     #[serde(default)]
     pub elo: Option<u32>,
@@ -429,6 +432,7 @@ pub fn match_entry(
         highlights: hls,
         lowlights: lls,
         competition: None,
+        faceit_party: None,
         elo: None,
         elo_delta: None,
     })
@@ -490,17 +494,29 @@ pub fn build_index(me: u64, matches: &mut [MatchEntry], date_of: impl Fn(i64) ->
         last_end = m.played_ts + m.duration_s as i64;
     }
 
-    // Party: teammates who were on my side in at least two matches of the same session.
+    // Party: in a FACEIT match, whoever FACEIT says queued with you. Otherwise (Premier, or FACEIT
+    // not read yet), teammates on your side in at least two matches of the session that FACEIT
+    // doesn't say were randoms.
     for sess in &sessions {
         let mut together: HashMap<String, u32> = HashMap::new();
+        let mut randoms: HashSet<String> = HashSet::new();
         for &i in sess {
             for p in matches[i].players.iter().filter(|p| p.side == "mine" && p.steamid != me_s) {
                 *together.entry(p.steamid.clone()).or_default() += 1;
+                if matches[i].faceit_party.as_ref().is_some_and(|party| !party.contains(&p.steamid)) {
+                    randoms.insert(p.steamid.clone());
+                }
             }
         }
         for &i in sess {
+            let party = matches[i].faceit_party.clone();
             for p in matches[i].players.iter_mut() {
-                p.party = p.side == "mine" && together.get(&p.steamid).copied().unwrap_or(0) >= 2;
+                p.party = p.side == "mine"
+                    && p.steamid != me_s
+                    && match &party {
+                        Some(party) => party.contains(&p.steamid),
+                        None => together.get(&p.steamid).copied().unwrap_or(0) >= 2 && !randoms.contains(&p.steamid),
+                    };
             }
         }
     }

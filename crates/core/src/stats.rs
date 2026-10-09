@@ -247,6 +247,38 @@ fn wp_t(t: u32, ct: u32, planted: bool, eq_t: f64, eq_ct: f64) -> f64 {
 /// losing the clutch.
 fn round_swing(m: &Match, a: &Analysis, equip: &HashMap<(u64, usize), u32>) -> HashMap<(u64, usize), f64> {
     let mut out: HashMap<(u64, usize), f64> = HashMap::new();
+    for e in swing_events(m, a, equip) {
+        *out.entry((e.player, e.round)).or_default() += e.delta;
+    }
+    out
+}
+
+/// One change to a player's Round Swing, and why (the rating breakdown explains each).
+#[derive(Debug, Clone, Serialize)]
+pub struct SwingEvent {
+    pub round: usize,
+    pub tick: i32,
+    pub player: u64,
+    /// The change credited (0.12 = +12% to the team's chance to win the round).
+    pub delta: f64,
+    /// "kill", "damage" (damaged someone a teammate killed), "flash" (flash assist), "traded" (you
+    /// died and a teammate killed your killer), "death", "teamkill", "plant", "planted_on" (alive
+    /// on CT when the bomb went down), "clutch", "won_kills", "defuse", "won_alive", "won",
+    /// "lost_alive" (alive when the round was lost: saving), "lost".
+    pub why: &'static str,
+    /// The other player (victim or killer), and the player's team's chance to win before and after.
+    pub other: Option<u64>,
+    pub before: f64,
+    pub after: f64,
+}
+
+/// Every Round Swing change in the match, in order.
+pub fn swing_events_of(m: &Match, a: &Analysis) -> Vec<SwingEvent> {
+    swing_events(m, a, &equip_map(m))
+}
+
+fn swing_events(m: &Match, a: &Analysis, equip: &HashMap<(u64, usize), u32>) -> Vec<SwingEvent> {
+    let mut out: Vec<SwingEvent> = vec![];
     for (r, round) in m.rounds.iter().enumerate() {
         let side_of = |sid: u64| m.team_of(sid).map(|t| round.side_of(t));
         let team_eq = |side: Side| {
@@ -262,7 +294,11 @@ fn round_swing(m: &Match, a: &Analysis, equip: &HashMap<(u64, usize), u32>) -> H
         let mut alive: HashSet<u64> = m.players.iter().map(|p| p.steamid).collect();
         let count = |alive: &HashSet<u64>, side: Side| alive.iter().filter(|s| side_of(**s) == Some(side)).count() as u32;
         let wp = |alive: &HashSet<u64>, planted: bool| wp_t(count(alive, Side::T), count(alive, Side::CT), planted, eq_t, eq_ct);
-        let mut add = |sid: u64, v: f64| *out.entry((sid, r)).or_default() += v;
+        // p0/p1: T's chance to win before and after (stored as the player's own team's).
+        let mut add = |sid: u64, v: f64, why: &'static str, tick: i32, other: Option<u64>, p0: f64, p1: f64| {
+            let own = |p: f64| if side_of(sid) == Some(Side::T) { p } else { 1.0 - p };
+            out.push(SwingEvent { round: r, tick, player: sid, delta: v, why, other, before: own(p0), after: own(p1) });
+        };
         let plant = m.bomb.iter().find(|b| b.round == r && !b.defused);
         let mut planted = false;
         let mut p_t = wp(&alive, false);
@@ -270,16 +306,18 @@ fn round_swing(m: &Match, a: &Analysis, equip: &HashMap<(u64, usize), u32>) -> H
         let mut kills: Vec<(usize, &Kill)> = m.kills.iter().enumerate().filter(|(_, k)| k.round == r && k.tick <= round.end_tick).collect();
         kills.sort_by_key(|(_, k)| k.tick);
         let all_kills = kills.clone();
-        let apply_plant = |planted: &mut bool, p_t: &mut f64, alive: &HashSet<u64>, add: &mut dyn FnMut(u64, f64)| {
+        type Add<'x> = dyn FnMut(u64, f64, &'static str, i32, Option<u64>, f64, f64) + 'x;
+        let apply_plant = |planted: &mut bool, p_t: &mut f64, alive: &HashSet<u64>, add: &mut Add| {
             let Some(b) = plant else { return };
             *planted = true;
+            let before = *p_t;
             let after = wp(alive, true);
             let d = after - *p_t;
             *p_t = after;
-            add(b.player, d);
+            add(b.player, d, "plant", b.tick, None, before, after);
             let cts: Vec<u64> = alive.iter().copied().filter(|s| side_of(*s) == Some(Side::CT)).collect();
             for s in &cts {
-                add(*s, -d / cts.len() as f64);
+                add(*s, -d / cts.len() as f64, "planted_on", b.tick, Some(b.player), before, after);
             }
         };
         for (ki, k) in kills {
@@ -293,11 +331,12 @@ fn round_swing(m: &Match, a: &Analysis, equip: &HashMap<(u64, usize), u32>) -> H
             let after = wp(&alive, planted);
             // Change for the victim's team (negative).
             let d = if v_side == Side::T { after - p_t } else { p_t - after };
+            let before = p_t;
             p_t = after;
             let enemy_kill = is_enemy_kill(m, k.attacker, k.victim);
             match (enemy_kill, k.attacker) {
                 (true, Some(killer)) => {
-                    add(k.victim, d);
+                    add(k.victim, d, "death", k.tick, Some(killer), before, after);
                     let gain = -d;
                     let flasher = k.assister.filter(|s| k.flash_assist && side_of(*s) != Some(v_side));
                     // On a trade, the teammate the victim had just killed.
@@ -313,12 +352,12 @@ fn round_swing(m: &Match, a: &Analysis, equip: &HashMap<(u64, usize), u32>) -> H
                     let avenged = avenged.flatten();
                     let mut pool = gain;
                     if let Some(f) = flasher {
-                        add(f, gain * 0.15);
+                        add(f, gain * 0.15, "flash", k.tick, Some(k.victim), before, after);
                         *kill_swing.entry(f).or_default() += gain * 0.15;
                         pool -= gain * 0.15;
                     }
                     if let Some(t) = avenged {
-                        add(t, gain * 0.2);
+                        add(t, gain * 0.2, "traded", k.tick, Some(killer), before, after);
                         pool -= gain * 0.2;
                     }
                     let mut dmg: HashMap<u64, f64> = HashMap::new();
@@ -335,23 +374,23 @@ fn round_swing(m: &Match, a: &Analysis, equip: &HashMap<(u64, usize), u32>) -> H
                             if *sid == killer {
                                 killer_share += share;
                             } else {
-                                add(*sid, share);
+                                add(*sid, share, "damage", k.tick, Some(k.victim), before, after);
                                 *kill_swing.entry(*sid).or_default() += share;
                             }
                         }
                     } else {
                         killer_share = pool;
                     }
-                    add(killer, killer_share);
+                    add(killer, killer_share, "kill", k.tick, Some(k.victim), before, after);
                     *kill_swing.entry(killer).or_default() += killer_share;
                 }
                 _ => {
                     // Team kill, suicide or the world: charge whoever caused it; nobody earned it.
                     let charged = k.attacker.filter(|a| side_of(*a) == Some(v_side)).unwrap_or(k.victim);
-                    add(charged, d);
+                    add(charged, d, "teamkill", k.tick, Some(k.victim), before, after);
                     let gainers: Vec<u64> = alive.iter().copied().filter(|s| side_of(*s).is_some_and(|sd| sd != v_side)).collect();
                     for s in &gainers {
-                        add(*s, -d / gainers.len() as f64);
+                        add(*s, -d / gainers.len() as f64, "won_alive", k.tick, None, before, after);
                     }
                 }
             }
@@ -362,6 +401,7 @@ fn round_swing(m: &Match, a: &Analysis, equip: &HashMap<(u64, usize), u32>) -> H
         // Round end: the rest of the round goes to the winners.
         let w = round.winner;
         let rest = if w == Side::T { 1.0 - p_t } else { p_t };
+        let (end, before, after) = (round.end_tick, p_t, if w == Side::T { 1.0 } else { 0.0 });
         if rest > 1e-6 {
             let winners: Vec<u64> = m.players.iter().map(|p| p.steamid).filter(|s| side_of(*s) == Some(w)).collect();
             let clutcher = a.rounds[r].clutches.iter().find(|c| c.won && side_of(c.player) == Some(w)).map(|c| c.player);
@@ -375,28 +415,28 @@ fn round_swing(m: &Match, a: &Analysis, equip: &HashMap<(u64, usize), u32>) -> H
             if weight > 0.0 {
                 let unit = rest / weight;
                 if let Some(c) = clutcher {
-                    add(c, unit);
+                    add(c, unit, "clutch", end, None, before, after);
                 }
                 let sw: f64 = swingers.iter().map(|(_, v)| v).sum();
                 for (s, v) in &swingers {
-                    add(*s, 2.0 * unit * v / sw);
+                    add(*s, 2.0 * unit * v / sw, "won_kills", end, None, before, after);
                 }
                 if let Some(d) = defuser {
-                    add(d, unit);
+                    add(d, unit, "defuse", end, None, before, after);
                 }
                 for s in &alive_w {
-                    add(*s, unit / alive_w.len() as f64);
+                    add(*s, unit / alive_w.len() as f64, "won_alive", end, None, before, after);
                 }
             } else if !winners.is_empty() {
                 for s in &winners {
-                    add(*s, rest / winners.len() as f64);
+                    add(*s, rest / winners.len() as f64, "won", end, None, before, after);
                 }
             }
             let losers: Vec<u64> = m.players.iter().map(|p| p.steamid).filter(|s| side_of(*s).is_some_and(|sd| sd != w)).collect();
             let alive_l: Vec<u64> = losers.iter().copied().filter(|s| alive.contains(s)).collect();
-            let charged = if alive_l.is_empty() { &losers } else { &alive_l };
+            let (charged, why) = if alive_l.is_empty() { (&losers, "lost") } else { (&alive_l, "lost_alive") };
             for s in charged {
-                add(*s, -rest / charged.len() as f64);
+                add(*s, -rest / charged.len() as f64, why, end, None, before, after);
             }
         }
     }

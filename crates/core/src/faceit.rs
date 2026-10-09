@@ -77,6 +77,10 @@ pub struct FaceitMatch {
     pub competition: String,
     /// Whether the match room was read (start time, team ELO, placement).
     pub detailed: bool,
+    /// Who queued with you (SteamID64s, without you), from the match room's party ids; in a league
+    /// game, your whole team. `party_read` once known.
+    pub party: Vec<String>,
+    pub party_read: bool,
 }
 
 impl FaceitMatch {

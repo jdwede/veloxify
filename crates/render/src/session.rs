@@ -31,6 +31,62 @@ const TICKRATE: f64 = 64.0;
 /// filmed from someone else's eyes.
 const POV_TOLERANCE: f64 = 64.0;
 
+/// One grenade lineup to film: the thrower's own view for a moment before the throw (where they
+/// stand, aim and how they move), then a free camera following the grenade along its real flight
+/// until it goes off, holding on it for a few seconds (the smoke blooming, the molotov spreading).
+#[derive(Debug, Clone)]
+pub struct LineupShot {
+    /// The thrower's name in the demo (the camera locks on by name) and where they stand.
+    pub thrower: String,
+    pub eye: Option<(f64, f64)>,
+    pub throw_tick: i32,
+    pub pop_tick: i32,
+    /// The grenade's position every 4 ticks from the throw.
+    pub path: Vec<[f64; 3]>,
+    pub lead_s: f64,
+    pub hold_s: f64,
+}
+
+/// The free camera behind and above the grenade while it flies, and how it eases back after.
+const CHASE_BACK: f64 = 150.0;
+const CHASE_UP: f64 = 55.0;
+const HOLD_BACK: f64 = 140.0;
+const HOLD_UP: f64 = 70.0;
+/// Ticks after the release before the camera leaves the thrower (the grenade clears the hand).
+const FOLLOW_DELAY_TICKS: f64 = 6.0;
+
+impl LineupShot {
+    /// The grenade at `tick` (interpolated along the path, held at the end).
+    fn grenade_at(&self, tick: f64) -> [f64; 3] {
+        let f = ((tick - self.throw_tick as f64) / 4.0).max(0.0);
+        let i = (f.floor() as usize).min(self.path.len().saturating_sub(1));
+        let j = (i + 1).min(self.path.len() - 1);
+        let w = (f - f.floor()).min(1.0);
+        let (a, b) = (self.path[i], self.path[j]);
+        [a[0] + (b[0] - a[0]) * w, a[1] + (b[1] - a[1]) * w, a[2] + (b[2] - a[2]) * w]
+    }
+    /// The direction the grenade travels on the map at `tick` (unit vector).
+    fn heading_at(&self, tick: f64) -> [f64; 2] {
+        let (a, b) = (self.grenade_at(tick - 12.0), self.grenade_at(tick));
+        let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+        let n = dx.hypot(dy);
+        if n < 1.0 {
+            let (a, b) = (self.path[0], self.path[self.path.len().min(4) - 1]);
+            let n = (b[0] - a[0]).hypot(b[1] - a[1]).max(1.0);
+            return [(b[0] - a[0]) / n, (b[1] - a[1]) / n];
+        }
+        [dx / n, dy / n]
+    }
+}
+
+/// `spec_goto` arguments looking from `cam` at `target`: x y z pitch yaw.
+fn look(cam: [f64; 3], target: [f64; 3]) -> String {
+    let (dx, dy, dz) = (target[0] - cam[0], target[1] - cam[1], target[2] - cam[2]);
+    let yaw = dy.atan2(dx).to_degrees();
+    let pitch = -dz.atan2(dx.hypot(dy)).to_degrees();
+    format!("spec_goto {:.1} {:.1} {:.1} {:.2} {:.2}", cam[0], cam[1], cam[2], pitch, yaw)
+}
+
 /// CS2's camera wasn't in the player's eyes, even after locking it again: the clip is skipped
 /// rather than made from someone else's view.
 #[derive(Debug)]
@@ -410,6 +466,116 @@ impl Renderer {
                 }
                 parts.push(Part { video: opts.out, seconds: opts.seconds, audio: outcome.audio, audio_offset_s: outcome.audio_offset_s });
             }
+            if let Some(dir) = out.parent() {
+                std::fs::create_dir_all(dir)?;
+            }
+            assemble::assemble(&parts, out, o, self.audio.as_ref())
+        })();
+        let _ = std::fs::remove_dir_all(&tmp);
+        result
+    }
+
+    /// Films a grenade lineup (see [`LineupShot`]) into `out`.
+    pub fn record_lineup(&self, shot: &LineupShot, out: &Path) -> Result<()> {
+        if shot.path.len() < 2 {
+            bail!("no flight path for this grenade");
+        }
+        let vc = self.vc();
+        let o = &self.profile.output;
+        let tmp = std::env::temp_dir().join(format!("veloxify-lineup-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp)?;
+        let result = (|| -> Result<()> {
+            self.check()?;
+            *self.pov_name.lock().unwrap() = shot.thrower.clone();
+            let start = shot.throw_tick - (shot.lead_s * TICKRATE) as i32;
+            let at = start - (SETTLE_S * TICKRATE) as i32;
+            vc.send("demo_pause");
+            vc.send(&format!("demo_gototick {at}"));
+            self.pause(Duration::from_millis(1500))?;
+            let mut on_them = false;
+            for attempt in 0..3u64 {
+                self.lock_pov();
+                self.pause(Duration::from_millis(400 + 400 * attempt))?;
+                match (shot.eye, self.camera()) {
+                    (None, _) => {
+                        on_them = true;
+                        break;
+                    }
+                    (Some(want), Some(got)) if (want.0 - got.0).hypot(want.1 - got.1) <= POV_TOLERANCE => {
+                        on_them = true;
+                        break;
+                    }
+                    _ => (self.log)(&format!("camera isn't on {} yet; locking it again", shot.thrower)),
+                }
+            }
+            if !on_them {
+                return Err(WrongPov.into());
+            }
+            let flight_s = (shot.pop_tick - shot.throw_tick).max(1) as f64 / TICKRATE;
+            let seconds = SETTLE_S + shot.lead_s + flight_s + shot.hold_s;
+            let video = tmp.join("lineup.mp4");
+            let opts = CaptureOptions {
+                window_title: window::TITLE.into(),
+                out: video.display().to_string(),
+                seconds,
+                bitrate_mbps: o.capture_bitrate_mbps,
+                fps: o.fps,
+                audio_pid: self.pid,
+                abort: Some(self.abort.clone()),
+            };
+            let (tx, rx) = std::sync::mpsc::channel();
+            let o2 = opts.clone();
+            let capture = std::thread::spawn(move || record_window(&o2, Some(tx)));
+            if rx.recv_timeout(Duration::from_secs(10)).is_err() {
+                let res = capture.join().map_err(|_| anyhow!("capture thread panicked"))?;
+                self.check()?;
+                bail!("capture never started: {:?}", res.err());
+            }
+            vc.send("demo_resume");
+            let t0 = Instant::now();
+            // Drive the camera while the demo plays in real time: the thrower's eyes until the
+            // grenade leaves the hand, then a free camera chasing it, then holding on where it
+            // went off.
+            let pop = shot.pop_tick as f64;
+            let mut free = false;
+            let mut chase_at_pop: Option<([f64; 3], [f64; 2])> = None;
+            while t0.elapsed().as_secs_f64() < seconds - 0.05 {
+                if self.abort.load(Ordering::SeqCst) {
+                    break;
+                }
+                let tick = at as f64 + t0.elapsed().as_secs_f64() * TICKRATE;
+                if tick >= shot.throw_tick as f64 + FOLLOW_DELAY_TICKS {
+                    if !free {
+                        vc.send("spec_mode 4");
+                        free = true;
+                    }
+                    let cmd = if tick < pop {
+                        let g = shot.grenade_at(tick);
+                        let d = shot.heading_at(tick);
+                        let cam = [g[0] - d[0] * CHASE_BACK, g[1] - d[1] * CHASE_BACK, g[2] + CHASE_UP];
+                        chase_at_pop = Some((cam, d));
+                        look(cam, g)
+                    } else {
+                        // Ease back and up over a second, looking at where it went off (a bit
+                        // above it, where a smoke fills).
+                        let land = shot.grenade_at(pop);
+                        let (cam0, d) = chase_at_pop.unwrap_or(([land[0], land[1], land[2] + 200.0], shot.heading_at(pop)));
+                        let f = ((tick - pop) / TICKRATE).min(1.0);
+                        let e = f * f * (3.0 - 2.0 * f);
+                        let cam = [cam0[0] - d[0] * HOLD_BACK * e, cam0[1] - d[1] * HOLD_BACK * e, cam0[2] + HOLD_UP * e];
+                        look(cam, [land[0], land[1], land[2] + 40.0])
+                    };
+                    vc.send(&cmd);
+                }
+                std::thread::sleep(Duration::from_millis(15));
+            }
+            let outcome = capture.join().map_err(|_| anyhow!("capture thread panicked"))??;
+            vc.send("demo_pause");
+            self.check()?;
+            if outcome.aborted {
+                return Err(Aborted { wants_cs2: self.wants_cs2.load(Ordering::SeqCst) }.into());
+            }
+            let parts = vec![Part { video: opts.out, seconds: opts.seconds, audio: outcome.audio, audio_offset_s: outcome.audio_offset_s }];
             if let Some(dir) = out.parent() {
                 std::fs::create_dir_all(dir)?;
             }

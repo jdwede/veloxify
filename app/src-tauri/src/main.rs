@@ -5,6 +5,7 @@
 mod clips;
 mod demos;
 mod faceit;
+mod league;
 mod mapicons;
 mod players;
 mod practice;
@@ -393,6 +394,13 @@ async fn player_avatars(state: State<'_, AppState>, ids: Vec<String>) -> Result<
     tauri::async_runtime::spawn_blocking(move || players::avatars(&lib, &ids)).await.map_err(|e| e.to_string())
 }
 
+/// Your ESEA league team: season, division, record, roster, standings, division stats, matches.
+#[tauri::command]
+async fn league_info(state: State<'_, AppState>, force: bool) -> Result<serde_json::Value, String> {
+    let lib = state.settings.lock().unwrap().library_dir.clone();
+    tauri::async_runtime::spawn_blocking(move || league::league(&lib, force)).await.map_err(|e| e.to_string())?.map_err(|e| e.to_string())
+}
+
 /// Everyone's FACEIT ELO and level in a FACEIT match (cached).
 #[tauri::command]
 async fn faceit_roster(state: State<'_, AppState>, match_id: String) -> Result<std::collections::HashMap<String, players::FaceitPlayer>, String> {
@@ -479,6 +487,7 @@ fn main() {
             launch_practice,
             player_avatars,
             faceit_roster,
+            league_info,
             save_practice,
             open_link
         ])

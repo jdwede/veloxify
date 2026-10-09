@@ -3,7 +3,7 @@
 use ahash::AHashMap;
 use anyhow::{anyhow, Result};
 use parser::first_pass::parser_settings::{rm_user_friendly_names, ParserInputs};
-use parser::first_pass::prop_controller::{STEAMID_ID, TICK_ID};
+use parser::first_pass::prop_controller::{ENTITY_ID_ID, GRENADE_TYPE_ID, GRENADE_X, GRENADE_Y, GRENADE_Z, STEAMID_ID, TICK_ID};
 use parser::parse_demo::{DemoOutput, Parser, ParsingMode};
 use parser::second_pass::parser_settings::create_huffman_lookup_table;
 use parser::second_pass::variants::VarVec;
@@ -236,6 +236,7 @@ pub fn players_values(demo: &[u8], props: &[&str], ticks: &[i32]) -> Result<Hash
             let v = match data {
                 VarVec::U64Vec(x) => x.get(row).map(|v| Val::Ids(v.clone())),
                 VarVec::StringVec(x) => x.get(row).map(|v| Val::Strs(v.clone())),
+                VarVec::String(x) => x.get(row).and_then(|v| v.clone()).map(|s| Val::Strs(vec![s])),
                 _ => num_at(data, row).map(Val::Num),
             };
             if let Some(v) = v {
@@ -304,4 +305,40 @@ pub fn players_series(demo: &[u8], steamids: &[u64], props: &[&str], ticks: &[i3
         result.insert((*sid, *tick), vals);
     }
     Ok(result)
+}
+
+/// A thrown grenade's position at a tick: which projectile (entity), whose, its class
+/// (`CSmokeGrenadeProjectile`, `CMolotovProjectile`, `CFlashbangProjectile`, `CHEGrenadeProjectile`,
+/// `CDecoyProjectile`) and where it is.
+#[derive(Debug, Clone)]
+pub struct ProjectilePoint {
+    pub tick: i32,
+    pub entity: i32,
+    pub steamid: u64,
+    pub class: String,
+    pub xyz: [f32; 3],
+}
+
+/// Every grenade in flight at the given ticks.
+pub fn projectiles(demo: &[u8], ticks: &[i32]) -> Result<Vec<ProjectilePoint>> {
+    let out = run(demo, |i| {
+        i.parse_projectiles = true;
+        i.wanted_ticks = ticks.to_vec();
+    })?;
+    let col = |id: u32| out.df.get(&id).and_then(|c| c.data.as_ref());
+    let (Some(VarVec::I32(t)), Some(VarVec::I32(e)), Some(VarVec::U64(s)), Some(VarVec::String(c)), Some(VarVec::F32(x)), Some(VarVec::F32(y)), Some(VarVec::F32(z))) =
+        (col(TICK_ID), col(ENTITY_ID_ID), col(STEAMID_ID), col(GRENADE_TYPE_ID), col(GRENADE_X), col(GRENADE_Y), col(GRENADE_Z))
+    else {
+        return Ok(vec![]);
+    };
+    let mut points = vec![];
+    for row in 0..t.len() {
+        let (Some(Some(tick)), Some(Some(entity)), Some(Some(steamid)), Some(Some(class)), Some(Some(x)), Some(Some(y)), Some(Some(z))) =
+            (t.get(row), e.get(row), s.get(row), c.get(row), x.get(row), y.get(row), z.get(row))
+        else {
+            continue;
+        };
+        points.push(ProjectilePoint { tick: *tick, entity: *entity, steamid: *steamid, class: class.clone(), xyz: [*x, *y, *z] });
+    }
+    Ok(points)
 }

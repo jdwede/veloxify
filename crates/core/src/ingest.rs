@@ -264,6 +264,9 @@ pub fn rebuild_index(root: &Path, me: u64) -> Result<Index> {
                 if !fm.competition.is_empty() {
                     m.competition = Some(fm.competition.clone());
                 }
+                if fm.party_read {
+                    m.faceit_party = Some(fm.party.clone());
+                }
             }
         }
     }

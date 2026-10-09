@@ -1044,6 +1044,12 @@ input[type=color] { width: 44px; height: 30px; padding: 2px; background: var(--r
 .rp-clock b { font-size: 34px; font-weight: 800; font-variant-numeric: tabular-nums; color: #fff; line-height: 1.1; }
 .rp-clock b.bomb { color: #ff5a6e; }
 .rp-killline { stroke-width: 3; stroke-linecap: round; }
+polyline.rp-throw { fill: none; stroke-dasharray: none; stroke-width: 2.5; stroke-linejoin: round; opacity: 0.85; }
+polyline.rp-throw.smoke { stroke: #d6dade; } polyline.rp-throw.molotov { stroke: #f06e28; } polyline.rp-throw.flash { stroke: #fff; } polyline.rp-throw.he { stroke: #e2445f; }
+.rp-proj { stroke: #0b0b0b; stroke-width: 1.5; }
+.rp-proj.smoke { fill: #d6dade; } .rp-proj.molotov { fill: #f06e28; } .rp-proj.flash { fill: #fff; } .rp-proj.he { fill: #e2445f; }
+.rp-blind { fill: rgba(255, 255, 255, 0.55); filter: blur(2px); }
+.rp-gun { opacity: 0.9; }
 .rp-skull { opacity: 0.9; }
 .rp-time { font-variant-numeric: tabular-nums; font-size: 13px; color: var(--muted); min-width: 92px; }
 .rp-teams { display: grid; gap: 12px; }
@@ -1068,6 +1074,65 @@ input[type=color] { width: 44px; height: 30px; padding: 2px; background: var(--r
 .rp-bomb rect { fill: #e2445f; stroke: #0b0b0b; stroke-width: 2; }
 .rp-bomb text { font: 800 8px var(--font); fill: #fff; }
 @media (max-width: 1250px) { .rp-main { grid-template-columns: 1fr; } }
+
+/* Clips: the extra filters open from the Filters button. */
+.filters-btn .badge { display: inline-flex; align-items: center; justify-content: center; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px;
+  background: var(--accent); color: var(--on-accent); font-size: 11px; font-weight: 800; margin-left: 4px; }
+.filters-btn.on { border-color: var(--accent); }
+.filters-panel[hidden] { display: none; }
+
+/* Scoreboard columns: drag to reorder. */
+.mp-board th[draggable="true"] { cursor: grab; }
+.mp-board th.dragging { opacity: 0.4; }
+.mp-board th.drop { box-shadow: inset 2px 0 0 var(--accent); }
+
+/* ---- ESEA league ----------------------------------------------------------------------------- */
+.esea-chip { display: inline-flex; align-items: center; gap: 8px; color: var(--text); text-decoration: none; line-height: 1.15; }
+.esea-chip img, .esea-chip svg { width: 22px; height: 22px; object-fit: contain; flex: 0 0 auto; color: #ff6b2c; }
+.esea-chip span { display: flex; flex-direction: column; min-width: 0; }
+.esea-chip b { font-size: 13px; font-weight: 800; }
+.esea-chip i { font-style: normal; font-size: 11.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 130px; }
+a.esea-chip:hover b { color: var(--accent); }
+.lg-hero { display: grid; grid-template-columns: auto 1fr auto auto; align-items: center; gap: 22px; padding: 22px 26px; margin-bottom: 18px; border-radius: var(--radius);
+  border: 1px solid var(--line); background: linear-gradient(110deg, rgba(255, 107, 44, 0.16), var(--card) 55%); }
+.lg-logo img { width: 120px; height: 64px; object-fit: contain; }
+.lg-logo svg { width: 64px; height: 64px; color: #ff6b2c; }
+.lg-title .h1 { display: flex; align-items: center; gap: 10px; margin: 2px 0 4px; }
+.lg-team-av { width: 36px; height: 36px; border-radius: 6px; object-fit: cover; }
+.lg-div { color: var(--muted); font-size: 13.5px; }
+.lg-div b { color: #ff8a50; }
+.lg-nums { display: flex; gap: 26px; }
+.lg-nums div { display: flex; flex-direction: column; align-items: center; }
+.lg-nums b { font-size: 26px; font-weight: 800; font-variant-numeric: tabular-nums; }
+.lg-nums > div > span { font-size: 12px; color: var(--muted); }
+.lg-nums b span { font-size: inherit; }
+.lg-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr); gap: 16px; margin-bottom: 16px; }
+.lg-roster { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; padding: 0 14px 14px; }
+.lg-member { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 6px; background: var(--row); }
+.lg-member img, .lg-noav { width: 34px; height: 34px; border-radius: 50%; object-fit: cover; background: var(--row-hi); flex: 0 0 auto; }
+.lg-member div { display: flex; flex-direction: column; min-width: 0; }
+.lg-member span { font-size: 12px; color: var(--muted); }
+.lg-matches { display: flex; flex-direction: column; gap: 6px; padding: 0 14px 14px; }
+.lg-match { display: grid; grid-template-columns: 150px 1fr 70px 80px; align-items: center; gap: 10px; padding: 9px 12px; border-radius: 6px; background: var(--row);
+  border-left: 3px solid var(--line-2); color: var(--text); text-decoration: none; font-size: 13px; }
+a.lg-match:hover { background: var(--row-hi); }
+.lg-match.win { border-left-color: var(--win); } .lg-match.loss { border-left-color: var(--loss); } .lg-match.next { border-left-color: #ff8a50; }
+.lg-when { color: var(--muted); font-size: 12px; }
+.lg-score { font-weight: 700; font-variant-numeric: tabular-nums; text-align: center; }
+.lg-map { color: var(--muted); text-align: right; }
+.lg-section { margin-bottom: 16px; }
+.lg-table { width: 100%; border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; }
+.lg-table th { padding: 8px 10px; color: var(--muted); font-weight: 600; font-size: 12px; text-align: center; white-space: nowrap; cursor: pointer; }
+.lg-table th.on { color: var(--accent); }
+.lg-table td { padding: 8px 10px; border-top: 1px solid var(--line); text-align: center; white-space: nowrap; }
+.lg-table .left { text-align: left; }
+.lg-table td.left > * { vertical-align: middle; }
+.lg-table td.left span { margin-left: 8px; }
+.lg-table tr.me td { background: rgba(255, 107, 44, 0.1); }
+.lg-tav { width: 24px; height: 24px; border-radius: 4px; object-fit: cover; display: inline-block; background: var(--row-hi); }
+.lg-cc { font-size: 11px; font-weight: 700; color: var(--muted); letter-spacing: 0.04em; }
+.lg-more { margin: 10px 14px 14px; }
+@media (max-width: 1100px) { .lg-grid { grid-template-columns: 1fr; } .lg-hero { grid-template-columns: auto 1fr; } }
 
 /* ---- rating breakdown ------------------------------------------------------------------------ */
 .bd-bar-top { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }
@@ -1100,9 +1165,20 @@ input[type=color] { width: 44px; height: 30px; padding: 2px; background: var(--r
 .bd-bar.on rect.pos, .bd-bar.on rect.neg, .bd-bar.on rect.zero { filter: brightness(1.35); }
 .bd-bar.on .bd-hit { fill: rgba(255, 255, 255, 0.04); }
 .bd-rnum { font: 700 12px var(--font); }
+.bd-val { font: 700 10.5px var(--font); fill: var(--muted); pointer-events: none; }
+.bd-val.in { fill: #fff; }
+.bd-evs { margin-top: 8px; display: flex; flex-direction: column; gap: 4px; }
+.bd-evhead { margin-top: 10px; font-size: 11px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
+.bd-ev { display: grid; grid-template-columns: 44px 1fr 56px; gap: 8px; align-items: baseline; white-space: normal; }
+.bd-ev b.up { color: var(--win); } .bd-ev b.down { color: var(--loss); }
+.bd-ev > b { text-align: right; }
+.bd-evt { color: var(--faint); font-size: 11.5px; }
+.bd-tips ul { margin: 0; padding: 4px 22px 16px 36px; display: flex; flex-direction: column; gap: 8px; color: var(--muted); font-size: 13.5px; line-height: 1.5; }
+.bd-tips li b { color: var(--text); }
+.bd-tips { margin-bottom: 16px; }
 .bd-rnum.won { fill: var(--win); } .bd-rnum.lost { fill: var(--loss); }
 .bd-tip { position: absolute; z-index: 5; pointer-events: none; background: #0d0d0d; border: 1px solid var(--line-2); border-radius: 6px; padding: 10px 12px;
-  font-size: 12.5px; line-height: 1.6; color: var(--text); box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5); max-width: 520px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+  font-size: 12.5px; line-height: 1.55; color: var(--text); box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5); width: 470px; max-width: 90%; font-variant-numeric: tabular-nums; }
 .bd-howbody { padding: 4px 18px 18px; font-size: 13.5px; line-height: 1.6; color: var(--muted); }
 .bd-howbody b { color: var(--text); }
 .bd-eq { font-size: 15px; color: var(--text); }
@@ -1189,3 +1265,6 @@ input[type=color] { width: 44px; height: 30px; padding: 2px; background: var(--r
 @media (max-width: 1000px) {
   .home, .day { grid-template-columns: 1fr; }
 }
+
+/* Nav entries that only some players get (League). */
+[data-nav][hidden] { display: none !important; }
