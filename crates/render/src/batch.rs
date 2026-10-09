@@ -418,8 +418,9 @@ pub fn render_lineups(
     save_lineup_clips(lib, &clips)?;
     // Loading a demo takes about a minute, filming a lineup about half that: go match by match,
     // each time the playable match with the most lineups still to film (newest on ties), filming
-    // all of them from it.
-    let mut remaining = jobs;
+    // all of them from it. Only among the most thrown lineups, so those get their videos first,
+    // whatever the map.
+    let mut remaining: Vec<Job> = jobs.into_iter().take(limit * 3).collect();
     let mut jobs: Vec<Job> = vec![];
     while jobs.len() < limit && !remaining.is_empty() {
         let mut serves: HashMap<String, usize> = HashMap::new();

@@ -182,6 +182,9 @@ impl Renderer {
         if cs2_running() {
             bail!("CS2 is running; renders only happen while it's closed");
         }
+        if !crate::steam::signed_in() {
+            bail!("Steam isn't signed in; renders wait until it is");
+        }
         crate::dpi_aware();
         // Order matters: send audio to the silent device before letting CS2 play while unfocused
         // (and undo in reverse), so nothing can reach the user's speakers in between.

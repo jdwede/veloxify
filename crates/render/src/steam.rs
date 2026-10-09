@@ -3,7 +3,7 @@
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use windows::core::w;
-use windows::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_SZ};
+use windows::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RRF_RT_REG_SZ};
 
 pub const STEAMID64_BASE: u64 = 76561197960265728;
 
@@ -30,6 +30,26 @@ pub fn steam_dir() -> PathBuf {
         }
     }
     PathBuf::from(r"C:\Program Files (x86)\Steam")
+}
+
+/// Whether Steam is running with an account signed in (Steam keeps the signed-in account id in
+/// the registry; 0 while it's at the sign-in window). A game launched before then waits for the
+/// sign-in and starts after it, when the user may want to play.
+pub fn signed_in() -> bool {
+    let mut user = 0u32;
+    let mut len = 4u32;
+    let ok = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            w!("Software\\Valve\\Steam\\ActiveProcess"),
+            w!("ActiveUser"),
+            RRF_RT_REG_DWORD,
+            None,
+            Some((&mut user as *mut u32).cast()),
+            Some(&mut len),
+        )
+    };
+    ok.is_ok() && user != 0
 }
 
 pub fn steam_exe() -> PathBuf {

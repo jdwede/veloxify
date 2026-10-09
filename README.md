@@ -5,8 +5,9 @@
 **Your CS2 highlights, stats and coaching, made on your own PC. Free.**
 
 Veloxify watches for your FACEIT and Premier matches, records your best plays as clean clips,
-breaks down your worst deaths, and gives you Leetify-style match pages: aim, utility, trades,
-2D replays, grenade lineups and HLTV Rating 3.0. No subscription, no cloud, no watermark.
+breaks down your worst deaths, films the grenade lineups thrown in your matches, and gives you
+Leetify-style match pages: aim, utility, trades, 2D replays and HLTV Rating 3.0 round by round.
+No subscription, no cloud, no watermark.
 
 <img src="docs/screenshots/match-overview.png" alt="Veloxify match page: result, HLTV Rating 3.0 chart, highlights and scoreboard" width="900">
 
@@ -29,7 +30,7 @@ elsewhere are free here, with no monthly clip caps.
 | Benchmarks against other players | Leetify Pro (pro-player benchmarks) | ✅ Free, against every player in your own matches |
 | Advanced aim, utility, trade and clutch stats | Partly behind Leetify Pro / FACEIT Premium | ✅ Free |
 | Whiff analyzer: *why* you lost a duel (spray, movement, crosshair) | Not offered | ✅ |
-| Grenade lineups pulled from your matches, with `setpos` | Not offered | ✅ |
+| Grenade lineups from your matches: grouped, counted, tagged (jump throw, run-and-jump...) and **filmed** | Not offered | ✅ |
 | Your data stays on your PC | Uploaded to their servers | ✅ Nothing leaves your machine |
 
 <sub>Compared with what these services listed in October 2026. Veloxify isn't affiliated with Leetify,
@@ -50,8 +51,16 @@ FACEIT, Allstar or Valve.</sub>
 - For each one: your crosshair against his body, your spray against the gun's real recoil pattern, the keys you pressed and your speed at every shot, in slow motion next to the clip.
 - Tells you what went wrong ("counter-strafe 200 ms late", "pulled down too far") and what to practice.
 
+**Grenades**
+- Every grenade thrown in your matches, by everyone, grouped into lineups: the same spot, the same aim and the same landing count as one, however many times and by whoever it was thrown.
+- Named and sorted the way you'd say them: "Instant Smoke #1" from T spawn #3, set smokes, set mollies, and how often each was thrown.
+- Tags for how it's thrown: jump throw, jump throw + W, running jump throw, crouch, walk, left or right click.
+- A **video of each lineup**, filmed from a demo in CS2: the thrower lining it up in first person, then the camera follows the grenade until it pops and holds on it.
+- Every map with its lineup count, then a radar with every arc; a `setpos` to stand and aim exactly like the thrower on a practice server.
+
 **Match page** (every match, for all 10 players)
 - Overview: HLTV Rating 3.0, Round Swing, RWS, KAST, ADR, HLTV-style summary and top highlights.
+- Rating Breakdown: HLTV Rating 3.0 or RWS for any player, round by round, in plain words: why that round was a 1.85, and where each bit of Round Swing came from.
 - Timeline: every round on the radar, kill by kill, with each player's swing.
 - 2D Replay: whole rounds on the map with positions, view direction, HP, grenades and the bomb.
 - Lineups: set smokes, molotovs and flashes, how they were thrown (jump-throw, crouch, left/right click) and a `setpos` to practice them.
@@ -69,20 +78,25 @@ FACEIT, Allstar or Valve.</sub>
 - FACEIT: one click downloads every missing demo through Veloxify's own FACEIT window. No API key; you sign in to FACEIT once, Veloxify never sees your password.
 - ESEA league matches work too, including split demos after a server change.
 
+**ESEA League** (only shown if you're on a league team)
+- Your team, roster and record, every league match played and to come, your division's standings and its stat leaders.
+
 ## Screenshots
 
 | | |
 |---|---|
-| <img src="docs/screenshots/profile.png" alt="Profile: ratings, FACEIT and Premier stats" width="440"> | <img src="docs/screenshots/clips.png" alt="Clips: top highlights this week" width="440"> |
-| **Profile**: ratings and FACEIT / Premier side by side | **Clips**: your best highlights |
-| <img src="docs/screenshots/replay.png" alt="2D replay of a round" width="440"> | <img src="docs/screenshots/whiff-analyzer.png" alt="Whiff analyzer" width="440"> |
-| **2D Replay**: any round, on the map | **Whiff analyzer**: why you lost the duel |
-| <img src="docs/screenshots/timeline.png" alt="Timeline of a round" width="440"> | <img src="docs/screenshots/lineups.png" alt="Grenade lineups on the radar" width="440"> |
-| **Timeline**: every kill, with round swing | **Lineups**: set grenades from the match |
-| <img src="docs/screenshots/aim.png" alt="Aim stats" width="440"> | <img src="docs/screenshots/map-zones.png" alt="Map zones" width="440"> |
-| **Aim**: Leetify-style aim stats with benchmarks | **Map Zones**: where you win and lose fights |
-| <img src="docs/screenshots/head-to-head.png" alt="Head to head" width="440"> | |
-| **Head to Head**: every matchup in the game | |
+| <img src="docs/screenshots/grenade-video.png" alt="A Dust II lineup with its video: thrower's view, then the molotov burning on Catwalk" width="440"> | <img src="docs/screenshots/grenades.png" alt="Grenades: lineups counted on every map" width="440"> |
+| **Grenades**: every lineup from your matches, with its video | **Grenades**: lineups per map, most thrown first |
+| <img src="docs/screenshots/breakdown.png" alt="Rating Breakdown: HLTV Rating 3.0 round by round with a plain-language explanation" width="440"> | <img src="docs/screenshots/profile.png" alt="Profile: ratings, FACEIT and Premier stats" width="440"> |
+| **Rating Breakdown**: why each round got its rating | **Profile**: ratings and FACEIT / Premier side by side |
+| <img src="docs/screenshots/clips.png" alt="Clips: top highlights this week" width="440"> | <img src="docs/screenshots/replay.png" alt="2D replay of a round" width="440"> |
+| **Clips**: your best highlights | **2D Replay**: any round, on the map |
+| <img src="docs/screenshots/whiff-analyzer.png" alt="Whiff analyzer" width="440"> | <img src="docs/screenshots/timeline.png" alt="Timeline of a round" width="440"> |
+| **Whiff analyzer**: why you lost the duel | **Timeline**: every kill, with round swing |
+| <img src="docs/screenshots/lineups.png" alt="Grenade lineups on the radar" width="440"> | <img src="docs/screenshots/aim.png" alt="Aim stats" width="440"> |
+| **Lineups**: set grenades from the match | **Aim**: Leetify-style aim stats with benchmarks |
+| <img src="docs/screenshots/map-zones.png" alt="Map zones" width="440"> | <img src="docs/screenshots/head-to-head.png" alt="Head to head" width="440"> |
+| **Map Zones**: where you win and lose fights | **Head to Head**: every matchup in the game |
 
 ## Install
 

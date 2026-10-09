@@ -503,6 +503,11 @@ impl Worker {
         }
         let lineups = matches!(what, Batch::Lineups(_));
         let noun = if lineups { "lineup videos" } else { "highlights" };
+        // CS2 asked for while Steam is at its sign-in window would start once you sign in.
+        if !cs2hl_render::steam::signed_in() {
+            self.set("waiting", format!("Steam isn't signed in; {noun} wait for it"), 0, 0);
+            return;
+        }
         let profile = match Profile::load(&settings.profile) {
             Ok(p) => p,
             Err(e) => {
