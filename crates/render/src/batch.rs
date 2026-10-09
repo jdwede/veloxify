@@ -6,7 +6,7 @@
 //! file is saved as soon as a clip is done, so the app shows clips as they finish and an
 //! interrupted run loses nothing.
 
-use crate::assemble::{make_thumb, SETTLE_S};
+use crate::assemble::{make_thumb, make_thumb_at, SETTLE_S};
 use crate::profile::Profile;
 use crate::session::{Aborted, DemoIncompatible, Renderer};
 use anyhow::{Context, Result};
@@ -281,6 +281,208 @@ pub fn render(
         save(&path, &m)?;
         // Keep index.json (and so the Highlights tab) current as each clip finishes.
         let _ = cs2hl_core::ingest::rebuild_index(lib, steamid64);
+    }
+    let wants_cs2 = renderer.wants_cs2();
+    renderer.close();
+    drain(on);
+    let _ = std::fs::remove_dir_all(&demos);
+    if stopped {
+        on(Event::Stopped { rendered, wants_cs2 });
+    } else {
+        on(Event::Done { rendered, minutes: t0.elapsed().as_secs_f64() / 60.0 });
+    }
+    Ok(rendered)
+}
+
+/// A rendered lineup video (`lineup_clips.json`, by lineup id).
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct LineupClip {
+    pub clip: Option<String>,
+    pub thumb: Option<String>,
+    pub error: Option<String>,
+    /// Which throw it shows.
+    #[serde(default)]
+    pub match_id: String,
+    #[serde(default)]
+    pub tick: i32,
+}
+
+pub fn load_lineup_clips(lib: &Path) -> BTreeMap<String, LineupClip> {
+    std::fs::read_to_string(lib.join("lineup_clips.json")).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
+}
+
+fn save_lineup_clips(lib: &Path, clips: &BTreeMap<String, LineupClip>) -> Result<()> {
+    let tmp = lib.join("lineup_clips.json.tmp");
+    std::fs::write(&tmp, serde_json::to_string(clips)?)?;
+    std::fs::rename(tmp, lib.join("lineup_clips.json"))?;
+    Ok(())
+}
+
+/// Lineups still without a video, most thrown first: the ones asked for (`ids`), or every
+/// instant and set lineup (and on-the-move ones thrown 3+ times).
+pub fn plan_lineups(lib: &Path, ids: Option<&[String]>) -> Vec<cs2hl_core::lineups::Lineup> {
+    let all = cs2hl_core::lineups::load(lib);
+    let done = load_lineup_clips(lib);
+    let mut todo: Vec<cs2hl_core::lineups::Lineup> = all
+        .maps
+        .into_values()
+        .flat_map(|m| m.lineups)
+        .filter(|l| match ids {
+            Some(ids) => ids.contains(&l.id),
+            None => l.category != "fly" || l.count >= 3,
+        })
+        .filter(|l| done.get(&l.id).is_none_or(|c| c.clip.is_none() && (ids.is_some() || c.error.is_none())))
+        .collect();
+    todo.sort_by(|a, b| b.count.cmp(&a.count).then(b.matches.cmp(&a.matches)));
+    todo
+}
+
+/// Films lineup videos (`lineups/<id>.mp4`): the thrower's view, then the grenade followed until
+/// it goes off. Each lineup is filmed from one of its throws whose demo is still on disk.
+#[allow(clippy::too_many_arguments)]
+pub fn render_lineups(
+    lib: &Path,
+    steamid64: u64,
+    profile: Profile,
+    work_dir: &Path,
+    ids: Option<Vec<String>>,
+    limit: usize,
+    abort: Arc<AtomicBool>,
+    on: &mut dyn FnMut(Event),
+) -> Result<usize> {
+    use crate::session::LineupShot;
+    let mut todo = plan_lineups(lib, ids.as_deref());
+    todo.truncate(limit);
+    // Pick each lineup's throw to film (a demo on disk), then film them a demo at a time.
+    struct Job {
+        id: String,
+        title: String,
+        kind: String,
+        match_id: String,
+        tick: i32,
+        pop_tick: i32,
+        player: String,
+    }
+    let entry_of = |mid: &str| -> Option<MatchEntry> { load(&lib.join("matches").join(format!("{mid}.json"))).ok() };
+    let mut jobs: Vec<Job> = vec![];
+    let mut clips = load_lineup_clips(lib);
+    for l in &todo {
+        let mut options = std::iter::once(&l.video).chain(l.examples.iter());
+        let pick = options.find(|o| o.tick > 0 && entry_of(&o.match_id).is_some_and(|e| Path::new(&e.demo_path).exists()));
+        match pick {
+            Some(o) => jobs.push(Job { id: l.id.clone(), title: l.name.clone(), kind: l.kind.clone(), match_id: o.match_id.clone(), tick: o.tick, pop_tick: o.pop_tick, player: o.player.clone() }),
+            None => {
+                clips.insert(l.id.clone(), LineupClip { error: Some("None of this lineup's demos are still on disk.".into()), ..Default::default() });
+            }
+        }
+    }
+    save_lineup_clips(lib, &clips)?;
+    jobs.sort_by(|a, b| a.match_id.cmp(&b.match_id));
+    on(Event::Plan { total: jobs.len() });
+    if jobs.is_empty() {
+        return Ok(0);
+    }
+    let t0 = Instant::now();
+    let (log_tx, log_rx) = std::sync::mpsc::channel::<String>();
+    let started = Renderer::start(
+        steamid64,
+        profile,
+        work_dir,
+        abort,
+        Box::new(move |s| {
+            let _ = log_tx.send(s.to_string());
+        }),
+    );
+    let renderer = match started {
+        Ok(r) => r,
+        Err(e) if e.downcast_ref::<Aborted>().is_some() => {
+            on(Event::Stopped { rendered: 0, wants_cs2: e.downcast_ref::<Aborted>().unwrap().wants_cs2 });
+            return Ok(0);
+        }
+        Err(e) => return Err(e),
+    };
+    let drain = |on: &mut dyn FnMut(Event)| {
+        while let Ok(s) = log_rx.try_recv() {
+            on(Event::Log(s));
+        }
+    };
+    let demos = std::env::temp_dir().join(format!("veloxify-lineup-demos-{}", std::process::id()));
+    std::fs::create_dir_all(&demos)?;
+    let mut loaded: Option<String> = None;
+    let mut bytes: Vec<u8> = vec![];
+    let mut throws: Vec<cs2hl_core::details::DThrow> = vec![];
+    let mut names: HashMap<String, String> = HashMap::new();
+    let (mut rendered, mut stopped) = (0, false);
+    for job in jobs {
+        if loaded.as_deref() != Some(job.match_id.as_str()) {
+            let Some(m) = entry_of(&job.match_id) else { continue };
+            let dem = demos.join(format!("{}.dem", job.match_id));
+            bytes = cs2hl_core::demo_io::read_demo(Path::new(&m.demo_path))?;
+            std::fs::write(&dem, &bytes)?;
+            throws = std::fs::read_to_string(cs2hl_core::details::path(lib, &job.match_id))
+                .ok()
+                .and_then(|t| serde_json::from_str::<cs2hl_core::details::MatchDetails>(&t).ok())
+                .map(|d| d.throws)
+                .unwrap_or_default();
+            names = m.players.iter().map(|p| (p.steamid.clone(), p.name.clone())).collect();
+            let first = names.get(&job.player).cloned().unwrap_or_default();
+            match renderer.load_demo(&dem, &first) {
+                Ok(()) => loaded = Some(job.match_id.clone()),
+                Err(e) if e.downcast_ref::<Aborted>().is_some() => {
+                    stopped = true;
+                    break;
+                }
+                Err(e) => {
+                    clips.insert(job.id.clone(), LineupClip { error: Some(e.to_string()), match_id: job.match_id.clone(), tick: job.tick, ..Default::default() });
+                    save_lineup_clips(lib, &clips)?;
+                    continue;
+                }
+            }
+            drain(on);
+        }
+        let Some(t) = throws.iter().find(|t| t.tick == job.tick && t.player == job.player) else { continue };
+        // Long enough before the throw to see the thrower line it up and move into it; long enough
+        // after to see it work (a smoke blooms over a couple of seconds).
+        let lead = 2.5;
+        let hold = match job.kind.as_str() {
+            "smoke" => 4.5,
+            "molotov" => 3.5,
+            _ => 2.0,
+        };
+        let start = job.tick - (lead * TICKRATE) as i32;
+        let sid: u64 = job.player.parse().unwrap_or(0);
+        let eye = cs2hl_core::raw::players_series(&bytes, &[sid], &["X", "Y"], &[start]).ok().and_then(|p| p.get(&(sid, start)).map(|v| (v["X"], v["Y"])));
+        let shot = LineupShot {
+            thrower: names.get(&job.player).cloned().unwrap_or_default(),
+            eye,
+            throw_tick: job.tick,
+            pop_tick: job.pop_tick.max(job.tick + 32),
+            path: t.path.iter().map(|p| [p[0] as f64, p[1] as f64, p[2] as f64]).collect(),
+            lead_s: lead,
+            hold_s: hold,
+        };
+        let rel = format!("lineups/{}.mp4", job.id);
+        let ts = Instant::now();
+        match renderer.record_lineup(&shot, &lib.join(&rel)) {
+            Ok(()) => {
+                // The thumbnail: the thrower lined up, just before the throw.
+                let thumb = format!("lineups/{}.jpg", job.id);
+                let thumb = make_thumb_at(&lib.join(&rel), &lib.join(&thumb), lead - 0.3).is_ok().then_some(thumb);
+                clips.insert(job.id.clone(), LineupClip { clip: Some(rel), thumb, error: None, match_id: job.match_id.clone(), tick: job.tick });
+                rendered += 1;
+                on(Event::Rendered { match_id: job.match_id.clone(), title: job.title.clone(), clip_s: 7.0, took_s: ts.elapsed().as_secs_f64() });
+            }
+            Err(e) if e.downcast_ref::<Aborted>().is_some() => {
+                stopped = true;
+                break;
+            }
+            Err(e) => {
+                clips.insert(job.id.clone(), LineupClip { error: Some(e.to_string()), match_id: job.match_id.clone(), tick: job.tick, ..Default::default() });
+                on(Event::Failed { match_id: job.match_id.clone(), title: job.title.clone(), error: e.to_string() });
+            }
+        }
+        save_lineup_clips(lib, &clips)?;
+        drain(on);
     }
     let wants_cs2 = renderer.wants_cs2();
     renderer.close();

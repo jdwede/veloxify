@@ -36,6 +36,9 @@ pub struct Settings {
     /// Also render the worst deaths (lowlights) of the latest session, after the highlights.
     #[serde(default = "d_true")]
     pub auto_lowlights: bool,
+    /// Film grenade lineup videos (the most thrown first) after the highlights.
+    #[serde(default = "d_true")]
+    pub auto_lineups: bool,
     pub profile: PathBuf,
     /// Look up the FACEIT account linked to the Steam account (level, ELO, match list).
     #[serde(default = "d_true")]
@@ -87,6 +90,7 @@ impl Settings {
                     steamid64: None,
                     auto_render: true,
                     auto_lowlights: true,
+                    auto_lineups: true,
                     profile: profile.clone(),
                     faceit_enabled: true,
                     faceit_nickname: String::new(),

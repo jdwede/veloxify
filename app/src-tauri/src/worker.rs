@@ -43,7 +43,19 @@ pub enum Job {
     /// Import these demos (file names in Veloxify's demos folder) again even though they were
     /// looked at before: Get demos found them downloaded but not in the library.
     Import(Vec<String>),
+    /// Film these grenade lineups' videos now (lineup ids).
+    RenderLineups(Vec<String>),
 }
+
+/// What a render run makes.
+enum Batch {
+    Clips(Scope),
+    /// Lineup videos: these, or the most thrown still without one.
+    Lineups(Option<Vec<String>>),
+}
+
+/// Lineup videos filmed per automatic run (about 15 s each).
+const LINEUPS_PER_RUN: usize = 20;
 
 /// An import that fails with an error (not a skip) is tried again on later passes, up to this
 /// many times, before the demo is left alone.
@@ -131,6 +143,7 @@ impl Worker {
     pub fn run(mut self, jobs: Receiver<Job>) {
         let mut pending_render: Vec<String> = vec![];
         let mut pending_clips: Vec<(String, String)> = vec![];
+        let mut pending_lineups: Vec<String> = vec![];
         let mut last_faceit: Option<Instant> = None;
         let mut icons_checked = false;
         let mut was_playing = false;
@@ -160,6 +173,7 @@ impl Worker {
                     Ok(Job::RenderClips(items)) => pending_clips.extend(items),
                     Ok(Job::Faceit) => last_faceit = None,
                     Ok(Job::Import(files)) => self.forget(&files),
+                    Ok(Job::RenderLineups(ids)) => pending_lineups.extend(ids),
                     Err(RecvTimeoutError::Disconnected) => return,
                     _ => {}
                 }
@@ -172,6 +186,7 @@ impl Worker {
                     Ok(Job::RenderClips(items)) => pending_clips.extend(items),
                     Ok(Job::Faceit) => last_faceit = None,
                     Ok(Job::Import(files)) => self.forget(&files),
+                    Ok(Job::RenderLineups(ids)) => pending_lineups.extend(ids),
                     Err(RecvTimeoutError::Disconnected) => return,
                     _ => {}
                 }
@@ -216,9 +231,12 @@ impl Worker {
                 last_faceit = Some(Instant::now());
             }
             was_playing = false;
-            // Clips you asked for come first.
+            // Clips and lineup videos you asked for come first.
             if !pending_clips.is_empty() {
                 self.render(&settings, me, Scope::Items(std::mem::take(&mut pending_clips)));
+            }
+            if !pending_lineups.is_empty() && !system::cs2_running() {
+                self.render_lineups(&settings, me, Some(std::mem::take(&mut pending_lineups)));
             }
             if settings.auto_render || !pending_render.is_empty() {
                 let scope =
@@ -230,6 +248,10 @@ impl Worker {
                     if !items.is_empty() {
                         self.render(&settings, me, Scope::Items(items));
                     }
+                }
+                // Then grenade lineup videos, the most thrown first, a batch at a time.
+                if settings.auto_render && settings.auto_lineups && !system::cs2_running() {
+                    self.render_lineups(&settings, me, None);
                 }
             } else if imported {
                 self.set("idle", "Up to date", 0, 0);
@@ -252,6 +274,7 @@ impl Worker {
                 Ok(Job::RenderClips(items)) => pending_clips.extend(items),
                 Ok(Job::Faceit) => last_faceit = None,
                 Ok(Job::Import(files)) => self.forget(&files),
+                Ok(Job::RenderLineups(ids)) => pending_lineups.extend(ids),
                 Err(RecvTimeoutError::Disconnected) => return,
                 _ => {}
             }
@@ -459,15 +482,27 @@ impl Worker {
     }
 
     fn render(&self, settings: &Settings, me: u64, scope: Scope) {
+        self.run_batch(settings, me, Batch::Clips(scope));
+    }
+
+    fn render_lineups(&self, settings: &Settings, me: u64, ids: Option<Vec<String>>) {
+        self.run_batch(settings, me, Batch::Lineups(ids));
+    }
+
+    fn run_batch(&self, settings: &Settings, me: u64, what: Batch) {
         let lib = settings.library_dir.clone();
         if !lib.join("index.json").exists() {
             return;
         }
-        match batch::plan(&lib, &scope) {
-            Ok(p) if p.is_empty() => return,
-            Err(_) => return,
-            _ => {}
+        let empty = match &what {
+            Batch::Clips(scope) => batch::plan(&lib, scope).map_or(true, |p| p.is_empty()),
+            Batch::Lineups(ids) => batch::plan_lineups(&lib, ids.as_deref()).is_empty(),
+        };
+        if empty {
+            return;
         }
+        let lineups = matches!(what, Batch::Lineups(_));
+        let noun = if lineups { "lineup videos" } else { "highlights" };
         let profile = match Profile::load(&settings.profile) {
             Ok(p) => p,
             Err(e) => {
@@ -509,17 +544,20 @@ impl Worker {
         let mut total = 0;
         let mut done = 0;
         let abort = self.abort.clone();
-        let result = batch::render(&lib, me, profile, &work, scope, None, abort, &mut |e| match e {
+        let mut on = |e: Event| match e {
             Event::Plan { total: t } => {
                 total = t;
-                self.set("rendering", format!("Rendering {t} highlights"), 0, t);
-                self.notify(
-                    "Rendering your highlights",
-                    &format!(
-                        "{t} clip{} from your session. CS2 runs hidden for a few minutes; \"Stop rendering\" in the tray hands it back.",
-                        if t == 1 { "" } else { "s" }
-                    ),
-                );
+                self.set("rendering", format!("Rendering {t} {noun}"), 0, t);
+                // Lineup videos run quietly after the highlights; highlights get a heads-up.
+                if !lineups {
+                    self.notify(
+                        "Rendering your highlights",
+                        &format!(
+                            "{t} clip{} from your session. CS2 runs hidden for a few minutes; \"Stop rendering\" in the tray hands it back.",
+                            if t == 1 { "" } else { "s" }
+                        ),
+                    );
+                }
             }
             Event::Rendered { title, .. } => {
                 done += 1;
@@ -532,7 +570,7 @@ impl Worker {
                 self.library_changed();
             }
             Event::Done { rendered, .. } => {
-                if rendered > 0 {
+                if rendered > 0 && !lineups {
                     self.notify("Your highlights are ready", &format!("{rendered} new highlight{} from your session", if rendered == 1 { "" } else { "s" }));
                 }
             }
@@ -551,7 +589,14 @@ impl Worker {
                 );
             }
             Event::Log(_) => {}
-        });
+        };
+        let result = match what {
+            Batch::Clips(scope) => batch::render(&lib, me, profile, &work, scope, None, abort, &mut on),
+            Batch::Lineups(ids) => {
+                let limit = if ids.is_some() { usize::MAX } else { LINEUPS_PER_RUN };
+                batch::render_lineups(&lib, me, profile, &work, ids, limit, abort, &mut on)
+            }
+        };
         rendering.store(false, Ordering::SeqCst);
         if let Err(e) = result {
             self.set("error", format!("Rendering stopped: {e}"), done, total);

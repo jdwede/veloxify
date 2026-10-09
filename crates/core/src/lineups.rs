@@ -20,11 +20,30 @@ const INSTANT_S: f32 = 10.0;
 /// Spawn spots closer than this are one spot.
 const SPAWN_RADIUS: f32 = 48.0;
 /// Example throws kept per lineup.
-const EXAMPLES: usize = 12;
+const EXAMPLES: usize = 8;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Lineups {
     pub maps: BTreeMap<String, MapLineups>,
+    /// Which lineup each throw belongs to: "<match id>@<tick>" -> lineup id (for a match's own
+    /// Lineups tab to show the lineup's video).
+    #[serde(default)]
+    pub by_throw: BTreeMap<String, String>,
+}
+
+/// `lineups.json`: each map's totals (the Grenades page's map list); the lineups themselves are in
+/// `lineups/<map>.json` (a [`MapLineups`] each), loaded when a map is opened.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LineupsIndex {
+    pub maps: BTreeMap<String, MapSummary>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MapSummary {
+    pub counts: BTreeMap<String, usize>,
+    pub throws: usize,
+    pub matches: usize,
+    pub lineups: usize,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -36,6 +55,21 @@ pub struct MapLineups {
     /// Spawn spots per side: [x, y] by number (Spawn #1 is the first).
     pub spawns: BTreeMap<String, Vec<[f32; 2]>>,
     pub lineups: Vec<Lineup>,
+    /// Which lineup each of this map's throws belongs to: "<match id>@<tick>" -> lineup id.
+    #[serde(default)]
+    pub by_throw: BTreeMap<String, String>,
+}
+
+/// Every map's lineups (from `lineups/<map>.json`).
+pub fn load(root: &Path) -> Lineups {
+    let index: LineupsIndex = std::fs::read_to_string(root.join("lineups.json")).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+    let mut out = Lineups::default();
+    for map in index.maps.keys() {
+        if let Some(m) = std::fs::read_to_string(root.join("lineups").join(format!("{map}.json"))).ok().and_then(|t| serde_json::from_str::<MapLineups>(&t).ok()) {
+            out.maps.insert(map.clone(), m);
+        }
+    }
+    out
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -248,8 +282,9 @@ pub fn write(root: &Path) -> Result<()> {
             let instant = g.members.iter().filter(|(_, t)| t.t < INSTANT_S).count() * 2 > n;
             let set = g.members.iter().filter(|(_, t)| t.set).count() * 2 >= n;
             let category = if instant { "instant" } else if set { "set" } else { "fly" };
-            // One-off throws on the move aren't lineups.
-            if category == "fly" && n < 2 {
+            // One-off throws on the move or in the first seconds aren't lineups (yet): a lineup is
+            // something thrown again, or lined up (stood still, aim held).
+            if n < 2 && (category == "fly" || (category == "instant" && !g.members[0].1.set)) {
                 continue;
             }
             let mut tags: BTreeMap<String, usize> = BTreeMap::new();
@@ -294,6 +329,18 @@ pub fn write(root: &Path) -> Result<()> {
             throwers.sort_unstable();
             throwers.dedup();
             let first = g.members[0].1;
+            let id = format!(
+                "{map}-{}-{}-{}-{}-{}-{}",
+                g.kind,
+                g.side,
+                (first.from[0] / 16.0).round() as i32,
+                (first.from[1] / 16.0).round() as i32,
+                first.pitch.round() as i32,
+                first.yaw.round() as i32
+            );
+            for (mid, t) in &g.members {
+                out.by_throw.insert(format!("{mid}@{}", t.tick), id.clone());
+            }
             lineups.push(Lineup {
                 id: format!(
                     "{map}-{}-{}-{}-{}-{}-{}",
@@ -318,7 +365,8 @@ pub fn write(root: &Path) -> Result<()> {
                 pitch: r.pitch,
                 yaw: r.yaw,
                 to: r.to,
-                path: r.path.clone(),
+                // Every other point (8 ticks apart) is plenty to draw it.
+                path: r.path.iter().step_by(2).chain(r.path.last()).copied().collect(),
                 technique,
                 tags,
                 click,
@@ -350,11 +398,21 @@ pub fn write(root: &Path) -> Result<()> {
         for l in lineups.iter().filter(|l| l.category != "fly") {
             *counts.entry(l.kind.clone()).or_default() += 1;
         }
+        let ids: std::collections::HashSet<&str> = lineups.iter().map(|l| l.id.as_str()).collect();
+        let by_throw: BTreeMap<String, String> = out.by_throw.iter().filter(|(_, id)| ids.contains(id.as_str())).map(|(k, v)| (k.clone(), v.clone())).collect();
         out.maps.insert(
             map.clone(),
-            MapLineups { counts, throws: throws.len(), matches: matches_on.get(map).copied().unwrap_or(0), spawns: spots, lineups },
+            MapLineups { counts, throws: throws.len(), matches: matches_on.get(map).copied().unwrap_or(0), spawns: spots, lineups, by_throw },
         );
     }
-    std::fs::write(root.join("lineups.json"), serde_json::to_string(&out)?)?;
+    // A small index for the map list, and a file per map.
+    let dir = root.join("lineups");
+    std::fs::create_dir_all(&dir)?;
+    let mut index = LineupsIndex::default();
+    for (map, m) in &out.maps {
+        index.maps.insert(map.clone(), MapSummary { counts: m.counts.clone(), throws: m.throws, matches: m.matches, lineups: m.lineups.len() });
+        std::fs::write(dir.join(format!("{map}.json")), serde_json::to_string(m)?)?;
+    }
+    std::fs::write(root.join("lineups.json"), serde_json::to_string(&index)?)?;
     Ok(())
 }

@@ -123,6 +123,8 @@ struct SettingsUpdate {
     auto_render: bool,
     #[serde(default)]
     auto_lowlights: bool,
+    #[serde(default = "yes")]
+    auto_lineups: bool,
     faceit_enabled: bool,
     faceit_nickname: String,
     selectivity: String,
@@ -145,6 +147,7 @@ fn save_settings(state: State<AppState>, update: SettingsUpdate) -> Result<(), S
     s.watch_dirs = update.watch_dirs;
     s.auto_render = update.auto_render;
     s.auto_lowlights = update.auto_lowlights;
+    s.auto_lineups = update.auto_lineups;
     s.faceit_enabled = update.faceit_enabled;
     s.faceit_nickname = update.faceit_nickname.trim().to_string();
     s.selectivity = update.selectivity;
@@ -394,6 +397,22 @@ async fn player_avatars(state: State<'_, AppState>, ids: Vec<String>) -> Result<
     tauri::async_runtime::spawn_blocking(move || players::avatars(&lib, &ids)).await.map_err(|e| e.to_string())
 }
 
+fn yes() -> bool {
+    true
+}
+
+/// Film these grenade lineups' videos now.
+#[tauri::command]
+fn render_lineups(state: State<AppState>, ids: Vec<String>) {
+    let _ = state.jobs.lock().unwrap().send(Job::RenderLineups(ids));
+}
+
+/// Lineup videos made so far (by lineup id).
+#[tauri::command]
+fn lineup_clips(state: State<AppState>) -> std::collections::BTreeMap<String, cs2hl_render::batch::LineupClip> {
+    cs2hl_render::batch::load_lineup_clips(&state.settings.lock().unwrap().library_dir)
+}
+
 /// Your ESEA league team: season, division, record, roster, standings, division stats, matches.
 #[tauri::command]
 async fn league_info(state: State<'_, AppState>, force: bool) -> Result<serde_json::Value, String> {
@@ -488,6 +507,8 @@ fn main() {
             player_avatars,
             faceit_roster,
             league_info,
+            render_lineups,
+            lineup_clips,
             save_practice,
             open_link
         ])

@@ -174,6 +174,11 @@ pub fn assemble(parts: &[Part], out: &Path, o: &Output, audio: Option<&Audio>) -
 
 /// Preview frame for a clip: by default just before the first kill (clips have 4 s pre-roll).
 pub fn make_thumb(clip: &Path, thumb: &Path) -> Result<()> {
+    make_thumb_at(clip, thumb, 3.7)
+}
+
+/// Preview frame `at` seconds into a clip (or just before its end).
+pub fn make_thumb_at(clip: &Path, thumb: &Path, at: f64) -> Result<()> {
     // The clip's length from ffmpeg's own "Duration: 00:00:21.00" line (no ffprobe needed).
     let mut probe = Command::new(ffmpeg_exe());
     probe.args(["-hide_banner", "-i"]).arg(clip);
@@ -185,7 +190,7 @@ pub fn make_thumb(clip: &Path, thumb: &Path) -> Result<()> {
         .and_then(|d| d.split(',').next())
         .map(|hms| hms.trim().split(':').filter_map(|x| x.parse::<f64>().ok()).fold(0.0, |acc, x| acc * 60.0 + x))
         .unwrap_or(0.0);
-    let t = (3.7f64).min(dur - 0.5).max(0.0);
+    let t = at.min(dur - 0.5).max(0.0);
     let mut c = ffmpeg();
     c.args(["-ss", &format!("{t:.2}"), "-i"]).arg(clip);
     c.args(["-frames:v", "1", "-vf", "scale=640:-2", "-q:v", "3"]).arg(thumb);
