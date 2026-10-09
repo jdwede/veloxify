@@ -366,6 +366,7 @@ impl Worker {
         mapicons::ensure(lib, &maps);
         mapicons::ensure_weapons(lib);
         mapicons::ensure_radars(lib, &maps);
+        mapicons::ensure_shots(lib, &maps);
     }
 
     /// New demo files in the watched folders, newest first, skipping ones still downloading.

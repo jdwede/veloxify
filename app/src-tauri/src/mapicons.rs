@@ -323,9 +323,42 @@ pub fn extract_radars(library: &Path, maps: &[String]) -> Result<usize> {
     Ok(n)
 }
 
+/// Writes `mapshots/<map>.png`: CS2's own screenshot of each map (the 360p one from the map
+/// picker), the blurred backdrop of a match page. The texture holds a plain PNG.
+pub fn extract_shots(library: &Path, maps: &[String]) -> Result<usize> {
+    let vpk = cs2hl_render::steam::cs2_csgo_dir()?.join("pak01_dir.vpk");
+    let names: Vec<String> = maps.iter().map(|m| format!("{m}_png")).collect();
+    let (entries, data_start) =
+        vpk_entries(&vpk, "vtex_c", |p, n| p == "panorama/images/map_icons/screenshots/360p" && names.iter().any(|x| x == n))?;
+    let out = library.join("mapshots");
+    std::fs::create_dir_all(&out)?;
+    let mut n = 0;
+    for e in &entries {
+        let data = read_entry(&vpk, e, data_start)?;
+        let Some(start) = data.windows(8).position(|w| w == b"\x89PNG\r\n\x1a\n") else { continue };
+        std::fs::write(out.join(format!("{}.png", e.name.trim_end_matches("_png"))), &data[start..])?;
+        n += 1;
+    }
+    if n == 0 {
+        bail!("no map screenshots found for {}", maps.join(", "));
+    }
+    Ok(n)
+}
+
 /// Radars for maps in the library that don't have one yet.
 pub fn ensure_radars(library: &Path, maps: &[String]) {
-    let dir = library.join("radars");
+    ensure_each(library, maps, "radars", extract_radars);
+}
+
+/// Map screenshots for maps in the library that don't have one yet.
+pub fn ensure_shots(library: &Path, maps: &[String]) {
+    ensure_each(library, maps, "mapshots", extract_shots);
+}
+
+/// Runs `extract` for the maps without a `<dir>/<map>.png`, once per CS2 version and set of maps
+/// (a map CS2 has nothing for would otherwise be retried every time).
+fn ensure_each(library: &Path, maps: &[String], dir: &str, extract: fn(&Path, &[String]) -> Result<usize>) {
+    let dir = library.join(dir);
     let missing: Vec<String> = maps.iter().filter(|m| !dir.join(format!("{m}.png")).exists()).cloned().collect();
     if missing.is_empty() {
         return;
@@ -339,7 +372,7 @@ pub fn ensure_radars(library: &Path, maps: &[String]) {
     if std::fs::read_to_string(dir.join(".source")).ok().as_deref() == Some(stamp.as_str()) {
         return; // already tried for these maps with this CS2 version
     }
-    match extract_radars(library, &missing) {
+    match extract(library, &missing) {
         Ok(_) => {
             let _ = std::fs::create_dir_all(&dir);
             let _ = std::fs::write(dir.join(".source"), stamp);

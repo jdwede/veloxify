@@ -578,7 +578,7 @@ async function renderMatchPage(view, id, tab) {
   const source = s.source === "valve" ? "Premier" : s.source === "faceit" ? "FACEIT" : s.source;
   view.innerHTML = `
     <a class="day-back" href="#/matches">◀ Match history</a>
-    <section class="mp-hero ${s.result}">
+    <section class="mp-hero ${s.result}" style="--shot:url('${assetUrl(`mapshots/${s.map}.png`)}')">
       <div class="mp-map">${mapIcon(s.map)}</div>
       <div class="mp-top">
         <div class="mp-result"><b>${resultWord(s.result)}</b><span class="mp-score"><span class="${s.result}">${s.score_mine}</span>:<span>${s.score_theirs}</span></span></div>
@@ -1187,13 +1187,20 @@ async function renderMatchSummary(el, m, id) {
   const hlPanel = best ? `
       <section class="hs-hl">
         <div class="hs-perf-head"><div class="h3">Highlights</div>${hls.length > 1 ? `<a class="link" href="${matchHref(id, "highlights")}">All ${hls.length}</a>` : ""}</div>
-        <div class="hl-card hs-hl-main ${best.clip ? "" : "pending"}" data-hl="${esc(best.id)}">
-          <div class="hl-thumb" style="--map-bg:${mapColor(m.map)};${thumb(best)}">
-            ${best.clip ? `<span class="play">▶</span>` : `<span class="state">${best.render_error ? esc(best.render_error) : "Rendering…"}</span>`}
-            <span class="dur">${fmtClip(best.duration_s)}</span></div>
-          <div class="hl-info"><div class="hl-title">${esc(best.title)}</div>
-            <div class="hl-meta"><span>${esc(names.get(best.player) || "")}</span><span>round ${best.round}</span></div>
-            <div class="tags">${best.tags.map((t) => tagHtml(t)).join("")}</div></div>
+        <div class="hs-hl-body ${hls.length > 1 ? "" : "solo"}">
+          <div class="hl-card hs-hl-main ${best.clip ? "" : "pending"}" data-hl="${esc(best.id)}" ${clipAttr(best)}>
+            <div class="hl-thumb" style="--map-bg:${mapColor(m.map)};${thumb(best)}">
+              ${best.clip ? `<span class="play">▶</span>` : `<span class="state">${best.render_error ? esc(best.render_error) : "Rendering…"}</span>`}
+              <span class="dur">${fmtClip(best.duration_s)}</span></div>
+            <div class="hl-info"><div class="hl-title">${esc(best.title)}</div>
+              <div class="hl-meta"><span>${esc(names.get(best.player) || "")}</span><span>round ${best.round}</span></div>
+              <div class="tags">${best.tags.map((t) => tagHtml(t)).join("")}</div></div>
+          </div>
+          ${hls.length > 1 ? `<div class="hs-hl-side">${hls.slice(1, 4).map((h) => `
+            <div class="hl-card hs-hl-mini ${h.clip ? "" : "pending"}" data-hl="${esc(h.id)}" ${clipAttr(h)} title="${esc(h.title)}">
+              <div class="hl-thumb" style="--map-bg:${mapColor(m.map)};${thumb(h)}">${h.clip ? `<span class="play">▶</span>` : `<span class="state">Rendering…</span>`}<span class="dur">${fmtClip(h.duration_s)}</span></div>
+              <div class="hs-hl-t">${esc(h.title)}</div>
+            </div>`).join("")}</div>` : ""}
         </div>
       </section>` : `
       <section class="hs-hl empty-hl"><div class="h3">Highlights</div><div class="empty small">No highlights this match.</div></section>`;
@@ -1807,6 +1814,7 @@ function whiffAnalyzer(l, m, VCOL) {
           <div class="seg" id="wa-speeds">${SPEEDS.map((s) => `<button data-speed="${s}" class="${s === waSpeed ? "on" : ""}">${s}x</button>`).join("")}</div>
           <input type="range" id="wa-scrub" min="0" max="${tr.look.length - 1}" value="0" step="1" aria-label="Moment">
           <span class="wa-time" id="wa-time"></span>
+          ${l.clip ? volumeControlHtml("wa-vol") : ""}
         </div>
       </div>
       <div class="wa-panels">
@@ -1948,6 +1956,7 @@ function wireWhiffAnalyzer(view, l, VCOL) {
   };
   view.querySelectorAll("[data-speed]").forEach((b) => (b.onclick = () => setSpeed(Number(b.dataset.speed))));
   if (video) {
+    wireVolume(view.querySelector("#wa-vol"), video);
     video.playbackRate = waSpeed;
     // Start a moment before the first shot.
     video.addEventListener("loadedmetadata", () => { video.currentTime = Math.max(0, (tr.start_tick - seg[0]) / 64); }, { once: true });
@@ -2280,7 +2289,7 @@ async function renderHighlights(body, ids) {
       <div class="hl-group">
         ${ids.length > 1 ? `<div class="h2">${esc(mapName(m.map))} · ${m.score_mine}-${m.score_theirs} · ${fmtTime(m.played_at)}</div>` : ""}
         <div class="hl-grid">${list.map((h) => `
-          <div class="hl-card ${h.clip ? "" : "pending"}" data-hl="${esc(h.id)}">
+          <div class="hl-card ${h.clip ? "" : "pending"}" data-hl="${esc(h.id)}" ${clipAttr(h)}>
             <div class="hl-thumb" style="--map-bg:${mapColor(m.map)};${h.thumb ? `background-image:url('${assetUrl(h.thumb)}')` : ""}">
               ${h.clip ? `<span class="play">▶</span>` : `<span class="state">${h.render_error ? esc(h.render_error) : "Rendering…"}</span>`}
               <span class="dur">${fmtClip(h.duration_s)}</span>
@@ -2299,6 +2308,101 @@ async function renderHighlights(body, ids) {
   }));
 }
 
+// ---- volume -----------------------------------------------------------------------------------------
+
+const SPEAKER = {
+  off: `<svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M3 9v6h4l5 5V4L7 9H3z"/><path d="M16 9l5 6M21 9l-5 6" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>`,
+  on: `<svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M3 9v6h4l5 5V4L7 9H3z"/><path d="M15.5 8.5a5 5 0 0 1 0 7M18.5 5.5a9 9 0 0 1 0 13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>`,
+};
+
+// One volume for every clip in the app (the clip player, the whiff analyzer, unmuted previews),
+// remembered. Starts at half: clips are loud.
+const clipVolume = { level: 0.5, muted: false };
+try { Object.assign(clipVolume, JSON.parse(localStorage.getItem("veloxify.clipVolume") || "{}")); } catch (e) { /* defaults */ }
+const saveVolume = () => { try { localStorage.setItem("veloxify.clipVolume", JSON.stringify(clipVolume)); } catch (e) { /* not remembered */ } };
+const applyVolume = (v) => { v.volume = clipVolume.level; v.muted = clipVolume.muted; };
+const volumeControlHtml = (id) => `<div class="vol" id="${id}"><button class="vol-btn" title="Mute"></button><input type="range" min="0" max="1" step="0.05" aria-label="Volume"></div>`;
+function wireVolume(el, video) {
+  if (!el || !video) return;
+  const btn = el.querySelector("button"), range = el.querySelector("input");
+  const paint = () => {
+    const silent = clipVolume.muted || clipVolume.level === 0;
+    btn.innerHTML = silent ? SPEAKER.off : SPEAKER.on;
+    btn.title = silent ? "Unmute" : "Mute";
+    range.value = clipVolume.muted ? 0 : clipVolume.level;
+  };
+  applyVolume(video);
+  paint();
+  btn.onclick = () => {
+    clipVolume.muted = !clipVolume.muted;
+    if (!clipVolume.muted && clipVolume.level === 0) clipVolume.level = 0.5;
+    applyVolume(video); saveVolume(); paint();
+  };
+  range.oninput = () => {
+    clipVolume.level = Number(range.value);
+    clipVolume.muted = clipVolume.level === 0;
+    applyVolume(video); saveVolume(); paint();
+  };
+}
+// The clip player's own controls change the same volume.
+{
+  const pv = document.getElementById("player-video");
+  applyVolume(pv);
+  pv.addEventListener("volumechange", () => { clipVolume.level = pv.volume; clipVolume.muted = pv.muted; saveVolume(); });
+}
+
+// ---- hover previews (like YouTube thumbnails) ------------------------------------------------------
+
+// Hovering a highlight plays it in place; muted unless you unmute it (remembered).
+const clipAttr = (h) => (h.clip ? `data-clip="${esc(h.clip)}"` : "");
+let previewMuted = true;
+try { previewMuted = localStorage.getItem("veloxify.previewMuted") !== "0"; } catch (e) { /* default: muted */ }
+let previewTimer = null;
+
+function startPreview(card) {
+  if (!card.matches(":hover") || card.querySelector(".hl-preview")) return;
+  const thumb = card.querySelector(".hl-thumb");
+  if (!thumb) return;
+  const v = document.createElement("video");
+  v.className = "hl-preview";
+  Object.assign(v, { src: assetUrl(card.dataset.clip), muted: previewMuted, loop: true, playsInline: true, preload: "auto", volume: clipVolume.level });
+  const mute = document.createElement("button");
+  mute.className = "hl-mute";
+  const paint = () => { mute.innerHTML = previewMuted ? SPEAKER.off : SPEAKER.on; mute.title = previewMuted ? "Unmute previews" : "Mute previews"; };
+  paint();
+  mute.onclick = (e) => {
+    e.stopPropagation(); // not a click on the card (that opens the player)
+    previewMuted = !previewMuted;
+    v.muted = previewMuted;
+    try { localStorage.setItem("veloxify.previewMuted", previewMuted ? "1" : "0"); } catch (err) { /* not remembered */ }
+    paint();
+  };
+  thumb.classList.add("previewing");
+  thumb.append(v, mute);
+  v.play().catch(() => { v.muted = true; v.play().catch(() => {}); }); // sound may need a click first
+}
+function stopPreview(card) {
+  card.querySelector(".hl-thumb")?.classList.remove("previewing");
+  card.querySelectorAll(".hl-preview, .hl-mute").forEach((el) => {
+    if (el.tagName === "VIDEO") { el.pause(); el.removeAttribute("src"); el.load(); }
+    el.remove();
+  });
+}
+document.addEventListener("mouseover", (e) => {
+  const card = e.target.closest?.(".hl-card[data-clip]");
+  if (!card || card.querySelector(".hl-preview")) return;
+  clearTimeout(previewTimer);
+  previewTimer = setTimeout(() => startPreview(card), 300); // passing over a card doesn't start it
+});
+document.addEventListener("mouseout", (e) => {
+  const card = e.target.closest?.(".hl-card[data-clip]");
+  if (!card || card.contains(e.relatedTarget)) return;
+  clearTimeout(previewTimer);
+  stopPreview(card);
+});
+// Opening the player stops any preview.
+document.addEventListener("click", (e) => { const card = e.target.closest?.(".hl-card[data-clip]"); if (card) stopPreview(card); }, true);
+
 function setPlayerSpeed(s) {
   const v = document.getElementById("player-video");
   v.playbackRate = s;
@@ -2316,6 +2420,7 @@ function play(i) {
   document.getElementById("player-sub").textContent = `${h.name} · ${mapName(h.match.map)} · round ${h.round}`;
   const v = document.getElementById("player-video");
   v.src = assetUrl(h.clip);
+  applyVolume(v);
   // Lowlights open in slow motion (the speed you last chose in the whiff analyzer); highlights at 1x.
   setPlayerSpeed(h.kind && h.reason != null ? waSpeed : 1);
   v.play().catch(() => {});
@@ -3220,7 +3325,7 @@ function heroPicks() {
 function cardHtml(h, big = false) {
   const when = `${relDay(h.played_at.slice(0, 10))}`;
   return `
-    <div class="hl-card ${h.clip ? "" : "pending"} ${big ? "big" : ""}" data-hl="${esc(h.id)}">
+    <div class="hl-card ${h.clip ? "" : "pending"} ${big ? "big" : ""}" data-hl="${esc(h.id)}" ${clipAttr(h)}>
       <div class="hl-thumb" style="--map-bg:${mapColor(h.map)};${h.thumb ? `background-image:url('${assetUrl(h.thumb)}')` : ""}">
         ${h.clip ? `<span class="play">▶</span>` : `<span class="state">${h.render_error ? "Demo too old to replay" : "Rendering…"}</span>`}
         <span class="dur">${fmtClip(h.duration_s)}</span>
