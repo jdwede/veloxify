@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
 /// Bumped whenever what's in a details file changes, so older ones are rebuilt.
-pub const VERSION: u32 = 6;
+pub const VERSION: u32 = 7;
 
 /// Spotted state is sampled every this many ticks.
 const SPOT_STEP: i32 = 2;
@@ -52,6 +52,8 @@ pub struct MatchDetails {
     /// over the library into `recoil.json`: the reference spray pattern for the whiff analyzer.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub recoil: std::collections::BTreeMap<String, Vec<[f32; 3]>>,
+    #[serde(default)]
+    pub r3_model: R3Model,
 }
 
 /// Bullets of a spray kept for the reference recoil pattern.
@@ -124,6 +126,36 @@ pub struct DRoundPlayer {
     pub damage: u32,
     /// Change in the team's chance to win this round credited to the player, in % (+25.0).
     pub swing: f64,
+    /// Rating 3.0 inputs this round (see `stats::Counts`): eco-adjusted kill points, damage and
+    /// death points, KAST (kill, assist, survived or traded) and multi-kill points.
+    #[serde(default)]
+    pub e_kills: f32,
+    #[serde(default)]
+    pub e_damage: f32,
+    #[serde(default)]
+    pub e_deaths: f32,
+    #[serde(default)]
+    pub kast: bool,
+    #[serde(default)]
+    pub multi: f32,
+    /// RWS points this round (0 when the team lost), and the 30 of them for the bomb.
+    #[serde(default)]
+    pub rws: f32,
+    #[serde(default)]
+    pub rws_bomb: f32,
+}
+
+/// Rating 3.0's averages and weights, so the match page can show the formula with the numbers.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct R3Model {
+    pub kpr: f64,
+    pub adr: f64,
+    pub dpr: f64,
+    pub kast: f64,
+    pub multi: f64,
+    pub swing_scale: f64,
+    /// Kills, damage, survival, KAST, multi-kills, swing.
+    pub weights: [f64; 6],
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -634,6 +666,7 @@ pub fn build(demo: &[u8], m: &Match, a: &Analysis, me: u64) -> Result<MatchDetai
 
     // ---- Rounds -------------------------------------------------------------------------------
     let swings = crate::stats::round_swings(m, a);
+    let rc = crate::stats::round_counts(m, a);
     let mut rounds = vec![];
     let (mut sm, mut st) = (0, 0);
     for (r, round) in m.rounds.iter().enumerate() {
@@ -687,6 +720,13 @@ pub fn build(demo: &[u8], m: &Match, a: &Analysis, me: u64) -> Result<MatchDetai
                         assists: m.kills.iter().filter(in_round).filter(|k| k.assister == Some(s) && is_enemy_kill(m, k.attacker, k.victim)).count() as u32,
                         damage: m.damages.iter().filter(|d| d.round == r && d.attacker == Some(s) && enemies(s, d.victim)).map(|d| d.health_removed.max(0) as u32).sum(),
                         swing: swings.get(&(s, r)).copied().unwrap_or(0.0) * 100.0,
+                        e_kills: rc.get(&(s, r)).map_or(0.0, |c| c.e_kills as f32),
+                        e_damage: rc.get(&(s, r)).map_or(0.0, |c| c.e_damage as f32),
+                        e_deaths: rc.get(&(s, r)).map_or(0.0, |c| c.e_deaths as f32),
+                        kast: rc.get(&(s, r)).is_some_and(|c| c.kast_rounds > 0),
+                        multi: rc.get(&(s, r)).map_or(0.0, |c| c.multi_points as f32),
+                        rws: rc.get(&(s, r)).map_or(0.0, |c| c.rws_points as f32),
+                        rws_bomb: rc.get(&(s, r)).map_or(0.0, |c| c.rws_bomb as f32),
                     }
                 })
                 .collect(),
@@ -1235,7 +1275,9 @@ pub fn build(demo: &[u8], m: &Match, a: &Analysis, me: u64) -> Result<MatchDetai
         });
     }
 
-    Ok(MatchDetails { version: VERSION, rounds, kills, clutches, players, grenades, throws, recoil })
+    let q = crate::stats::R3;
+    let r3_model = R3Model { kpr: q.kpr, adr: q.adr, dpr: q.dpr, kast: q.kast, multi: q.multi, swing_scale: q.swing_scale, weights: crate::stats::R3_WEIGHTS };
+    Ok(MatchDetails { version: VERSION, rounds, kills, clutches, players, grenades, throws, recoil, r3_model })
 }
 
 /// Where a match's details live.

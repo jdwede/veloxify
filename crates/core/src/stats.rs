@@ -63,8 +63,10 @@ pub struct Counts {
     pub team_flashed: u32,
     pub he_damage: i64,
     pub he_team_damage: i64,
-    /// Sum of per-round RWS points (0-100 in won rounds, 0 in lost rounds).
+    /// Sum of per-round RWS points (0-100 in won rounds, 0 in lost rounds), and the part of them
+    /// that's the 30 for planting the bomb that exploded or defusing it.
     pub rws_points: f64,
+    pub rws_bomb: f64,
     /// Rating 3.0 inputs: eco-adjusted kill and death points, eco-adjusted damage, multi-kill
     /// points and Round Swing (sum of win-probability changes, 0.20 = 20%).
     pub e_kills: f64,
@@ -120,6 +122,7 @@ impl AddAssign<&Counts> for Counts {
         self.he_damage += o.he_damage;
         self.he_team_damage += o.he_team_damage;
         self.rws_points += o.rws_points;
+        self.rws_bomb += o.rws_bomb;
         self.e_kills += o.e_kills;
         self.e_deaths += o.e_deaths;
         self.e_damage += o.e_damage;
@@ -182,7 +185,7 @@ pub struct R3Avg {
 }
 pub const R3: R3Avg = R3Avg { kpr: 0.660, dpr: 0.663, adr: 75.4, kast: 0.723, multi: 0.249, swing_scale: 0.149 };
 /// HLTV's Rating 3.0 weights (Oct 2025): kills, damage, survival, KAST, multi-kills, Round Swing.
-const R3_WEIGHTS: [f64; 6] = [0.25, 0.15, 0.15, 0.08, 0.04, 0.33];
+pub const R3_WEIGHTS: [f64; 6] = [0.25, 0.15, 0.15, 0.08, 0.04, 0.33];
 /// Points for rounds with 0..5 kills (the multi-kill sub-rating counts 2K and up).
 const MULTI_POINTS: [f64; 6] = [0.0, 0.0, 1.0, 2.2, 3.6, 5.2];
 
@@ -504,7 +507,9 @@ pub fn round_swings(m: &Match, a: &Analysis) -> HashMap<(u64, usize), f64> {
     round_swing(m, a, &equip_map(m))
 }
 
-pub fn player_stats(m: &Match, a: &Analysis, use_scoreboard: bool) -> Vec<PlayerStats> {
+/// Every player's counts in each round, by (steamid, round index): the inputs of every stat, which
+/// [`player_stats`] sums over the match (the rating breakdown shows them round by round).
+pub fn round_counts(m: &Match, a: &Analysis) -> HashMap<(u64, usize), Counts> {
     let mut pr: HashMap<(u64, usize), Counts> = HashMap::new();
     let match_end_tick = m.rounds.last().map(|r| r.end_tick).unwrap_or(i32::MAX);
     let pistols = crate::analysis::pistol_rounds(m);
@@ -670,6 +675,7 @@ pub fn player_stats(m: &Match, a: &Analysis, use_scoreboard: bool) -> Vec<Player
                 };
                 if bomb_player == Some(sid) {
                     c.rws_points += 30.0;
+                    c.rws_bomb += 30.0;
                 }
             }
         }
@@ -685,6 +691,11 @@ pub fn player_stats(m: &Match, a: &Analysis, use_scoreboard: bool) -> Vec<Player
         pr.entry((sid, r)).or_default().swing += v;
     }
 
+    pr
+}
+
+pub fn player_stats(m: &Match, a: &Analysis, use_scoreboard: bool) -> Vec<PlayerStats> {
+    let pr = round_counts(m, a);
     let mut out = vec![];
     for p in &m.players {
         let (mut total, mut t, mut ct) = (Counts::default(), Counts::default(), Counts::default());

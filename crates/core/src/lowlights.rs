@@ -186,6 +186,26 @@ fn gun(w: &str) -> bool {
 /// to the enemy your crosshair was on, so only shots at your killer count, and each gets a
 /// diagnosis. Without it, every shot is assumed to be at your killer, missed backs can't be
 /// found and the reason is "unknown".
+/// Each gun's usual recoil per bullet (aim punch pitch, yaw) from `recoil.json` in the library,
+/// for demos that don't record the aim punch (FACEIT's). See `details::write_benchmarks`.
+static PATTERNS: std::sync::RwLock<Option<HashMap<String, Vec<[f64; 2]>>>> = std::sync::RwLock::new(None);
+
+/// Loads the library's recoil patterns for the lowlights detected next.
+pub fn load_recoil_patterns(root: &std::path::Path) {
+    let patterns = std::fs::read_to_string(root.join("recoil.json")).ok().and_then(|t| serde_json::from_str(&t).ok());
+    if let Ok(mut p) = PATTERNS.write() {
+        *p = patterns;
+    }
+}
+
+/// The usual aim punch (pitch, yaw) of `weapon` at bullet `index` (0 = the first) of a spray.
+fn pattern_punch(weapon: &str, index: usize) -> Option<(f64, f64)> {
+    let patterns = PATTERNS.read().ok()?;
+    let row = patterns.as_ref()?.get(weapon.trim_start_matches("weapon_"))?;
+    let b = row.get(index.min(row.len().checked_sub(1)?))?;
+    Some((b[0], b[1]))
+}
+
 pub fn detect(m: &Match, me: u64, demo: Option<&[u8]>) -> Vec<Lowlight> {
     let Some(my_team) = m.team_of(me) else { return vec![] };
     let pistols = pistol_rounds(m);
@@ -254,6 +274,10 @@ pub fn detect(m: &Match, me: u64, demo: Option<&[u8]>) -> Vec<Lowlight> {
         (0..3).find_map(|d| data.get(&(sid, tick - d)).filter(|v| v.contains_key("X")))
     };
     let g = |p: &HashMap<String, f64>, k: &str| p.get(k).copied().unwrap_or(0.0);
+    // Whether this demo records your aim punch at all (Premier does, FACEIT doesn't).
+    let demo_punch = data
+        .as_ref()
+        .is_some_and(|d| d.iter().any(|((s, _), v)| *s == me && (g(v, "aim_punch_angle_0") != 0.0 || g(v, "aim_punch_angle_1") != 0.0)));
     // Horizontal speed (units/s) from the position change since the previous tick.
     let speed = |sid: u64, tick: i32| -> Option<f64> {
         let d = data.as_ref()?;
@@ -299,6 +323,19 @@ pub fn detect(m: &Match, me: u64, demo: Option<&[u8]>) -> Vec<Lowlight> {
             let at_killer = match at(me, *tick) {
                 None => data.is_none(), // no tick data: assume every shot was at him
                 Some(mp) => {
+                    // Without the aim punch in the demo, bullet i went where the gun usually
+                    // throws bullet i of a spray.
+                    let filled;
+                    let mp = match (demo_punch, pattern_punch(&d.weapon, i)) {
+                        (false, Some((pitch, yaw))) => {
+                            let mut x = mp.clone();
+                            x.insert("aim_punch_angle_0".into(), pitch);
+                            x.insert("aim_punch_angle_1".into(), yaw);
+                            filled = x;
+                            &filled
+                        }
+                        _ => mp,
+                    };
                     s.speed = speed(me, *tick).or_else(|| speed(me, *tick - 1));
                     s.airborne = g(mp, "is_airborne") > 0.5;
                     // Snipers drop out of scope as they fire, so look at the ticks just before.

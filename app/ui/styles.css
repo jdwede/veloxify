@@ -1054,6 +1054,50 @@ input[type=color] { width: 44px; height: 30px; padding: 2px; background: var(--r
 .rp-bomb text { font: 800 8px var(--font); fill: #fff; }
 @media (max-width: 1250px) { .rp-main { grid-template-columns: 1fr; } }
 
+/* ---- rating breakdown ------------------------------------------------------------------------ */
+.bd-bar-top { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }
+.bd-bar-top select { min-width: 260px; }
+.bd-who { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+.bd-top { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; margin-bottom: 16px; }
+.bd-dialrow { display: flex; justify-content: space-around; flex-wrap: wrap; gap: 10px; padding: 8px 12px 18px; }
+.bd-dialrow .dial-sub.up { color: var(--win); } .bd-dialrow .dial-sub.down { color: var(--loss); }
+.bd-gainlist { display: flex; flex-direction: column; gap: 10px; padding: 6px 16px 18px; }
+.bd-gain { display: grid; grid-template-columns: 170px 1fr 56px; align-items: center; gap: 12px; font-size: 13px; cursor: default; }
+.bd-gain b { text-align: right; font-variant-numeric: tabular-nums; }
+.bd-gain b.up { color: var(--win); } .bd-gain b.down { color: var(--loss); }
+.bd-gtrack { position: relative; height: 14px; border-radius: 3px; background: var(--row); }
+.bd-gtrack::after { content: ""; position: absolute; left: 50%; top: -3px; bottom: -3px; width: 1px; background: var(--line-2); }
+.bd-gtrack.one::after { display: none; }
+.bd-gtrack i { position: absolute; top: 0; bottom: 0; border-radius: 3px; }
+.bd-gtrack.one i { left: 0; }
+.bd-gtrack i.pos { background: color-mix(in srgb, var(--win) 70%, transparent); }
+.bd-gtrack i.neg { background: color-mix(in srgb, var(--loss) 70%, transparent); }
+.bd-rounds { margin-bottom: 16px; }
+.bd-chart { position: relative; padding: 4px 12px 10px; }
+.bd-chart svg { width: 100%; height: auto; display: block; }
+.bd-grid { stroke: var(--line); stroke-width: 1; }
+.bd-grid.zero { stroke: var(--line-2); stroke-width: 1.5; }
+.bd-tick { fill: var(--faint); font: 600 11px var(--font); }
+.bd-hit { fill: transparent; }
+.bd-bar rect.pos { fill: color-mix(in srgb, var(--win) 55%, #1b2a20); }
+.bd-bar rect.neg { fill: color-mix(in srgb, var(--loss) 55%, #2a1b1b); }
+.bd-bar rect.zero { fill: #4a4d55; }
+.bd-bar.on rect.pos, .bd-bar.on rect.neg, .bd-bar.on rect.zero { filter: brightness(1.35); }
+.bd-bar.on .bd-hit { fill: rgba(255, 255, 255, 0.04); }
+.bd-rnum { font: 700 12px var(--font); }
+.bd-rnum.won { fill: var(--win); } .bd-rnum.lost { fill: var(--loss); }
+.bd-tip { position: absolute; z-index: 5; pointer-events: none; background: #0d0d0d; border: 1px solid var(--line-2); border-radius: 6px; padding: 10px 12px;
+  font-size: 12.5px; line-height: 1.6; color: var(--text); box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5); max-width: 520px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.bd-howbody { padding: 4px 18px 18px; font-size: 13.5px; line-height: 1.6; color: var(--muted); }
+.bd-howbody b { color: var(--text); }
+.bd-eq { font-size: 15px; color: var(--text); }
+.bd-ftable { width: 100%; border-collapse: collapse; margin: 10px 0; font-variant-numeric: tabular-nums; }
+.bd-ftable th { text-align: left; font-size: 12px; color: var(--muted); padding: 6px 8px; }
+.bd-ftable td { padding: 7px 8px; border-top: 1px solid var(--line); color: var(--text); }
+.bd-ftable code { font-size: 12.5px; color: var(--muted); }
+.bd-ftable tr.tot td { font-weight: 800; font-size: 15px; }
+@media (max-width: 1100px) { .bd-top { grid-template-columns: 1fr; } }
+
 /* ---- trades / head to head / map zones -------------------------------------------------------- */
 .tr-deaths { margin-top: 16px; }
 .tr-list { display: flex; flex-direction: column; gap: 4px; padding: 0 12px 12px; }

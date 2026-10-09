@@ -50,6 +50,7 @@ pub fn add_demo(root: &Path, path: &Path, me: u64, policy: &ClipPolicy, refresh:
     };
     let a = analysis::analyze(&m);
     let st = stats::player_stats(&m, &a, true);
+    crate::lowlights::load_recoil_patterns(root);
     let played_at = local.format("%Y-%m-%dT%H:%M:%S").to_string();
     let Some(mut entry) =
         library::match_entry(&id, &path.display().to_string(), local.timestamp(), &played_at, &m, &a, &st, me, policy, Some(&demo))

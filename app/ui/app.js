@@ -565,7 +565,7 @@ async function renderMatchPage(view, id, tab) {
   const m = s.stats_only ? null : await loadMatch(id);
   if (m) m._roster = await loadRoster(m);
   const tabs = [["overview", "Overview"]];
-  if (m) tabs.push(["timeline", "Timeline"], ["replay", "2D Replay"], ["lineups", "Lineups"], ["aim", "Aim"], ["utility", "Utility"], ["activity", "Activity"], ["trades", "Trades"], ["opening", "Opening Duels"], ["clutches", "Clutches"], ["h2h", "Head to Head"], ["zones", "Map Zones"], ["ratings", "Ratings"],
+  if (m) tabs.push(["timeline", "Timeline"], ["replay", "2D Replay"], ["lineups", "Lineups"], ["aim", "Aim"], ["utility", "Utility"], ["activity", "Activity"], ["trades", "Trades"], ["opening", "Opening Duels"], ["clutches", "Clutches"], ["h2h", "Head to Head"], ["breakdown", "Rating Breakdown"], ["zones", "Map Zones"], ["ratings", "Ratings"],
     ["highlights", `Highlights${m.highlights.length ? ` (${m.highlights.length})` : ""}`], ["lowlights", `Lowlights${(m.lowlights || []).length ? ` (${m.lowlights.length})` : ""}`]);
   if (!tabs.some(([k]) => k === tab)) tab = "overview";
   const fm = s.faceit;
@@ -601,6 +601,7 @@ async function renderMatchPage(view, id, tab) {
   if (tab === "opening") return renderOpeningTab(body, m, id);
   if (tab === "trades") return renderTradesTab(body, m, id);
   if (tab === "h2h") return renderH2HTab(body, m, id);
+  if (tab === "breakdown") return renderBreakdownTab(body, m, id);
   if (tab === "zones") return renderZonesTab(body, m, id);
   if (tab === "clutches") return renderClutchTab(body, m, id);
   if (tab === "ratings") return renderRatingsTab(body, m, id);
@@ -1074,6 +1075,178 @@ async function renderZonesTab(body, m, id) {
   body.querySelector("#mz-player").onchange = (e) => { zones.player = e.target.value; zones.sel = null; rerender(); };
   body.querySelectorAll("[data-side]").forEach((b) => (b.onclick = () => { zones.side = b.dataset.side; zones.sel = null; rerender(); }));
   body.querySelectorAll("[data-zone]").forEach((el) => (el.onclick = () => { zones.sel = zones.sel === el.dataset.zone ? null : el.dataset.zone; rerender(); }));
+}
+
+// ---- match page: rating breakdown ------------------------------------------------------------------
+
+// HLTV Rating 3.0 or RWS for one player, taken apart: by side, by part of the formula and round by
+// round, with the arithmetic shown. Rating 3.0 is the average of per-round ratings (every part of
+// the formula is a per-round sum over the rounds), so each round's bar is exact.
+const breakdown = { player: null, metric: "rating3" };
+const R3_PARTS = [
+  ["kills", "Kills", "Eco-adjusted kill points per round: a kill counts about 1, less on an eco or with an assist, more for an opening kill."],
+  ["damage", "Damage", "Eco-adjusted damage per round."],
+  ["survival", "Survival", "1 − eco-adjusted death points per round."],
+  ["kast", "KAST", "Rounds with a kill, assist, survival or trade."],
+  ["multi", "Multi-kills", "Multi-kill points per round (2K, 3K, ... weigh more than their kills)."],
+  ["swing", "Round Swing", "How much you changed your team's chance to win each round."],
+];
+
+// Each part of Rating 3.0 for a set of rounds (1.00 = average), and the rating.
+function r3Parts(rows, model) {
+  const n = Math.max(1, rows.length);
+  const sum = (f) => rows.reduce((a, r) => a + f(r), 0);
+  const parts = [
+    sum((r) => r.e_kills) / n / model.kpr,
+    sum((r) => r.e_damage) / n / model.adr,
+    (1 - sum((r) => r.e_deaths) / n) / (1 - model.dpr),
+    sum((r) => (r.kast ? 1 : 0)) / n / model.kast,
+    sum((r) => r.multi) / n / model.multi,
+    1 + sum((r) => r.swing / 100) / n / model.swing_scale,
+  ];
+  return { parts, rating: parts.reduce((a, p, i) => a + p * model.weights[i], 0) };
+}
+
+async function renderBreakdownTab(body, m, id) {
+  const d = await loadDetails(id);
+  if (!d) return noDetails(body);
+  const model = d.r3_model;
+  if (!model?.weights || !d.rounds.some((r) => r.players.some((p) => p.e_kills != null))) {
+    body.innerHTML = `<div class="empty">The rating breakdown needs this match analyzed again; Veloxify does that in the background while CS2 is closed.</div>`;
+    return;
+  }
+  if (breakdown.matchId !== id) Object.assign(breakdown, { matchId: id, player: state.index.me });
+  const who = m.players.some((p) => p.steamid === breakdown.player) ? breakdown.player : m.players[0].steamid;
+  const me = m.players.find((p) => p.steamid === who);
+  const rws = breakdown.metric === "rws";
+  // This player's rounds, with the round's result for them and their team's damage (for RWS).
+  const rows = d.rounds.map((r) => {
+    const p = r.players.find((x) => x.steamid === who);
+    if (!p) return null;
+    const won = (r.winner === "mine") === (me.side === "mine");
+    const teamDamage = r.players.filter((x) => x.side === p.side).reduce((a, x) => a + x.damage, 0);
+    const teamSize = r.players.filter((x) => x.side === p.side).length;
+    return { ...p, number: r.number, won, reason: r.reason, teamDamage, teamSize, bombRound: r.reason === "bomb_exploded" || r.reason === "bomb_defused" };
+  }).filter(Boolean);
+  const w = model.weights;
+  const roundRating = (r) => r3Parts([r], model).rating;
+  const value = (rs) => (rws ? rs.reduce((a, r) => a + r.rws, 0) / Math.max(1, rs.length) : r3Parts(rs, model).rating);
+  const fmt = (v) => (rws ? v.toFixed(1) : v.toFixed(2));
+  const sides = { all: rows, T: rows.filter((r) => r.side === "T"), CT: rows.filter((r) => r.side === "CT") };
+  const verdict = (v) => {
+    const avg = rws ? 10 : 1;
+    return v >= avg * 1.1 ? ["Overperforming", "up"] : v <= avg * 0.9 ? ["Underperforming", "down"] : ["On par", ""];
+  };
+  const dialOf = (v, label, color) => { const [t, c] = verdict(v); return dial(fmt(v), rws ? v / 25 : v / 2, label, t, 150, color, c); };
+
+  // Gained and lost, by part: Rating 3.0 = 1.00 + Σ weight × (part − 1).
+  let gains;
+  if (rws) {
+    const n = Math.max(1, rows.length);
+    const bomb = rows.reduce((a, r) => a + r.rws_bomb, 0) / n;
+    const dmg = rows.reduce((a, r) => a + r.rws - r.rws_bomb, 0) / n;
+    gains = [["Damage share in rounds won", dmg, "Points for your share of your team's damage in the rounds you won (70 or 100 per round, split by damage)."],
+      ["Bomb planted / defused", bomb, "30 points for planting the bomb that exploded, or defusing it, in rounds you won."]];
+  } else {
+    const { parts } = r3Parts(rows, model);
+    gains = R3_PARTS.map(([, label, tip], i) => [label, w[i] * (parts[i] - 1), tip]).sort((a, b) => b[1] - a[1]);
+  }
+  const gmax = Math.max(0.05, ...gains.map((g) => Math.abs(g[1])));
+  const gainsHtml = gains.map(([label, v, tip]) => `<div class="bd-gain" title="${esc(tip)}"><span>${esc(label)}</span>
+    <div class="bd-gtrack ${rws ? "one" : ""}"><i class="${v >= 0 ? "pos" : "neg"}" style="${rws ? "" : v >= 0 ? "left:50%;" : `right:50%;`}width:${(Math.abs(v) / gmax) * (rws ? 100 : 50)}%"></i></div>
+    <b class="${v > 0.004 ? "up" : v < -0.004 ? "down" : ""}">${rws ? v.toFixed(1) : `${v >= 0 ? "+" : ""}${v.toFixed(2)}`}</b></div>`).join("");
+
+  // Round by round.
+  const vals = rows.map((r) => (rws ? r.rws : roundRating(r) - 1));
+  const vmax = Math.max(rws ? 20 : 0.5, ...vals.map(Math.abs));
+  const CW = 1100, CH = 300, top = 16, bottom = 34, mid = rws ? CH - bottom : top + (CH - top - bottom) / 2;
+  const bw = (CW - 50) / Math.max(1, rows.length);
+  const yOf = (v) => (rws ? mid - (v / vmax) * (CH - top - bottom) : mid - (v / vmax) * ((CH - top - bottom) / 2));
+  const ticks = rws ? [0, vmax / 2, vmax] : [-vmax, -vmax / 2, 0, vmax / 2, vmax];
+  const bars = rows.map((r, i) => {
+    const v = vals[i], x = 44 + i * bw, y = Math.min(yOf(v), mid), h = Math.max(1.5, Math.abs(yOf(v) - mid));
+    const cls = rws ? (v > 0 ? "pos" : "zero") : v > 0.05 ? "pos" : v < -0.05 ? "neg" : "zero";
+    return `<g class="bd-bar" data-i="${i}"><rect x="${x}" y="${top}" width="${bw}" height="${CH - top - bottom + 4}" class="bd-hit"/>
+      <rect x="${x + bw * 0.14}" y="${y}" width="${bw * 0.72}" height="${h}" rx="3" class="${cls}"/>
+      <text x="${x + bw / 2}" y="${CH - 10}" text-anchor="middle" class="bd-rnum ${r.won ? "won" : "lost"}">${r.number}</text></g>`;
+  }).join("");
+  const grid = ticks.map((t) => `<line x1="40" x2="${CW}" y1="${yOf(t)}" y2="${yOf(t)}" class="bd-grid ${t === 0 ? "zero" : ""}"/>
+    <text x="34" y="${yOf(t) + 4}" text-anchor="end" class="bd-tick">${rws ? Math.round(t) : (t >= 0 ? "+" : "") + t.toFixed(2)}</text>`).join("");
+
+  // The arithmetic for one round.
+  const explain = (r) => {
+    if (rws) {
+      if (!r.won) return `<b>Round ${r.number}</b> · lost<br>0 points: RWS only counts rounds your team won.`;
+      const pool = r.bombRound ? 70 : 100;
+      const share = r.teamDamage > 0 ? `${pool} × ${r.damage} / ${r.teamDamage} team damage = ${(r.rws - r.rws_bomb).toFixed(1)}` : `${pool} / ${r.teamSize} players = ${(r.rws - r.rws_bomb).toFixed(1)}`;
+      return `<b>Round ${r.number}</b> · won · <b>${r.rws.toFixed(1)} points</b><br>Damage share: ${share}${r.rws_bomb ? `<br>+ 30 for the bomb (${r.reason === "bomb_defused" ? "defused" : "planted, exploded"})` : ""}${r.bombRound && !r.rws_bomb ? "<br>(70, not 100: the bomb ended this round, its 30 went to the planter/defuser)" : ""}`;
+    }
+    const { parts, rating } = r3Parts([r], model);
+    const lines = [
+      `Kills ${r.kills} (eco-adjusted ${r.e_kills.toFixed(2)}): ${r.e_kills.toFixed(2)} ÷ ${model.kpr} × ${w[0]} = ${(parts[0] * w[0]).toFixed(2)}`,
+      `Damage ${r.damage} (eco-adjusted ${r.e_damage.toFixed(0)}): ${r.e_damage.toFixed(0)} ÷ ${model.adr} × ${w[1]} = ${(parts[1] * w[1]).toFixed(2)}`,
+      `Survival ${r.deaths ? `died (${r.e_deaths.toFixed(2)})` : "survived"}: (1 − ${r.e_deaths.toFixed(2)}) ÷ ${(1 - model.dpr).toFixed(3)} × ${w[2]} = ${(parts[2] * w[2]).toFixed(2)}`,
+      `KAST ${r.kast ? "✓" : "✗"}: ${r.kast ? 1 : 0} ÷ ${model.kast} × ${w[3]} = ${(parts[3] * w[3]).toFixed(2)}`,
+      `Multi-kill ${r.multi.toFixed(2)} pts: ${r.multi.toFixed(2)} ÷ ${model.multi} × ${w[4]} = ${(parts[4] * w[4]).toFixed(2)}`,
+      `Swing ${r.swing >= 0 ? "+" : ""}${r.swing.toFixed(1)}%: (1 ${r.swing < 0 ? "−" : "+"} ${Math.abs(r.swing / 100).toFixed(3)} ÷ ${model.swing_scale}) × ${w[5]} = ${(parts[5] * w[5]).toFixed(2)}`,
+    ];
+    return `<b>Round ${r.number}</b> · ${r.won ? "won" : "lost"} · <b>${rating.toFixed(2)}</b><br>${lines.join("<br>")}`;
+  };
+
+  // How it's calculated, with this player's match numbers.
+  const n = rows.length;
+  const formula = rws
+    ? `<p>In every round your team wins, the winners share <b>100 points</b> by damage dealt (or <b>70</b>, when the bomb exploding or being defused ended the round, with <b>30</b> to the planter or defuser). Lost rounds give 0.
+       RWS is the average over all rounds:</p>
+       <p class="bd-eq">RWS = ${rows.reduce((a, r) => a + r.rws, 0).toFixed(1)} points ÷ ${n} rounds = <b>${fmt(value(rows))}</b></p>`
+    : (() => {
+      const { parts, rating } = r3Parts(rows, model);
+      const sum = (f) => rows.reduce((a, r) => a + f(r), 0);
+      const items = [
+        ["Kills", `${sum((r) => r.e_kills).toFixed(1)} ÷ ${n} ÷ ${model.kpr}`],
+        ["Damage", `${sum((r) => r.e_damage).toFixed(0)} ÷ ${n} ÷ ${model.adr}`],
+        ["Survival", `(1 − ${sum((r) => r.e_deaths).toFixed(1)} ÷ ${n}) ÷ ${(1 - model.dpr).toFixed(3)}`],
+        ["KAST", `${sum((r) => (r.kast ? 1 : 0))} ÷ ${n} ÷ ${model.kast}`],
+        ["Multi-kills", `${sum((r) => r.multi).toFixed(2)} ÷ ${n} ÷ ${model.multi}`],
+        ["Round Swing", (() => { const sw = sum((r) => r.swing / 100); return `1 ${sw < 0 ? "−" : "+"} ${Math.abs(sw).toFixed(2)} ÷ ${n} ÷ ${model.swing_scale}`; })()],
+      ];
+      return `<p>HLTV Rating 3.0 adds six parts, each <b>1.00 for an average player</b>, with HLTV's weights. Kills, damage and deaths are eco-adjusted: a kill on an eco counts less, one against a better-armed enemy more.</p>
+        <table class="bd-ftable"><thead><tr><th>Part</th><th>This match</th><th>Value</th><th>Weight</th><th>Adds</th></tr></thead><tbody>
+        ${items.map(([label, expr], i) => `<tr><td>${label}</td><td><code>${expr}</code></td><td>${parts[i].toFixed(2)}</td><td>× ${w[i]}</td><td>${(parts[i] * w[i]).toFixed(3)}</td></tr>`).join("")}
+        <tr class="tot"><td colspan="4">Rating 3.0</td><td>${rating.toFixed(2)}</td></tr></tbody></table>
+        <p class="sub">Every part is a per-round sum, so the rating is also the average of the ${n} round ratings in the chart above.</p>`;
+    })();
+
+  const players = m.players.slice().sort((a, b) => (a.side === b.side ? r3(b.derived) - r3(a.derived) : a.side === "mine" ? -1 : 1));
+  body.innerHTML = `
+    <div class="bd-bar-top">
+      <select id="bd-player" aria-label="Player">${players.map((p) => `<option value="${p.steamid}" ${p.steamid === who ? "selected" : ""}>${esc(p.name)} · ${p.counts.kills}/${p.counts.deaths}/${p.counts.assists} · ${f2(r3(p.derived))}</option>`).join("")}</select>
+      <div class="seg" id="bd-metric">${[["rating3", "HLTV Rating 3.0"], ["rws", "RWS"]].map(([k, l]) => `<button data-metric="${k}" class="${breakdown.metric === k ? "on" : ""}">${l}</button>`).join("")}</div>
+      <span class="bd-who">${avatarHtml(who, 28)}<b>${esc(me.name)}</b> <span class="sub">${me.counts.kills} / ${me.counts.deaths} / ${me.counts.assists}</span></span>
+    </div>
+    <div class="bd-top">
+      <section class="panel bd-dials"><div class="panel-head"><div class="h3">Consistency</div></div>
+        <div class="bd-dialrow">${dialOf(value(sides.all), rws ? "RWS" : "Rating 3.0", "")}${sides.T.length ? dialOf(value(sides.T), "T side", "#e0a73a") : ""}${sides.CT.length ? dialOf(value(sides.CT), "CT side", "#5b8fd9") : ""}</div></section>
+      <section class="panel bd-gains"><div class="panel-head"><div class="h3">${rws ? "Where the points came from" : "Rating gained & lost"}</div><span class="grow"></span><span class="sub">${rws ? "points per round" : "vs an average player (1.00)"}</span></div>
+        <div class="bd-gainlist">${gainsHtml}</div></section>
+    </div>
+    <section class="panel bd-rounds"><div class="panel-head"><div class="h3">${rws ? "RWS points by round" : "Rating by round"}</div><span class="grow"></span><span class="sub">${rws ? "Hover a round for the math" : "Bars show each round's rating above or below 1.00 · hover a round for the math"}</span></div>
+      <div class="bd-chart"><svg viewBox="0 0 ${CW} ${CH}" id="bd-svg">${grid}${bars}</svg><div class="bd-tip" id="bd-tip" hidden></div></div></section>
+    <section class="panel bd-how"><div class="panel-head"><div class="h3">How it's calculated</div></div><div class="bd-howbody">${formula}</div></section>`;
+
+  body.querySelector("#bd-player").onchange = (e) => { breakdown.player = e.target.value; renderBreakdownTab(body, m, id); };
+  body.querySelectorAll("[data-metric]").forEach((b) => (b.onclick = () => { breakdown.metric = b.dataset.metric; renderBreakdownTab(body, m, id); }));
+  const tip = body.querySelector("#bd-tip"), chart = body.querySelector(".bd-chart");
+  body.querySelectorAll(".bd-bar").forEach((g) => {
+    g.onmouseenter = () => { tip.innerHTML = explain(rows[Number(g.dataset.i)]); tip.hidden = false; g.classList.add("on"); };
+    g.onmousemove = (e) => {
+      const b = chart.getBoundingClientRect();
+      const x = e.clientX - b.left, y = e.clientY - b.top;
+      tip.style.left = `${Math.min(b.width - tip.offsetWidth - 8, x + 14)}px`;
+      tip.style.top = `${Math.max(4, y - tip.offsetHeight - 12)}px`;
+    };
+    g.onmouseleave = () => { tip.hidden = true; g.classList.remove("on"); };
+  });
 }
 
 // Opening duels: who took the first fight of each round, with what, and how it went.
@@ -1926,7 +2099,8 @@ function wireWhiffAnalyzer(view, l, VCOL) {
         const parts = [];
         if (Math.abs(dy) > unit * 1.5) parts.push(dy < 0 ? "pulling down too little (bullets rise over him)" : "pulling down too much (bullets drop under him)");
         if (Math.abs(dx) > unit * 1.5) parts.push(dx > 0 ? "pulling too far left (bullets drift left of him)" : "pulling too far right (bullets drift right of him)");
-        note.textContent = (parts.length ? `Right now: ${parts.join(", ")}.` : "Right now: your pull matches the recoil.")
+        const at = fired.length ? `At bullet ${fired[fired.length - 1].bullet}` : "Right now";
+        note.textContent = (parts.length ? `${at}: ${parts.join(", ")}.` : `${at}: your pull matches the recoil.`)
           + (recoilFrom === "pattern" ? " (Recoil = this gun's usual pattern from your Premier demos; FACEIT demos don't record it.)" : "");
       }
     } else {
