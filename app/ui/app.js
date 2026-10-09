@@ -4294,6 +4294,7 @@ async function renderSettings(view) {
         ${row("Library", "Clips, match data and saved demos.", tauri ? `<button class="btn" id="open-lib">Open folder</button>` : "")}
         <div id="storage"></div>
         ${row("Start with Windows", "Starts in the tray, ready to process your games. It never runs anything while CS2 is open.", sw("start_with_windows", s.start_with_windows))}
+        ${row("Debug log", "Something not working? This saves a text file on your Desktop with what Veloxify did recently: its version, where it found Steam and CS2, and any errors. Send it to whoever is helping you. It has your Steam ID and match IDs, never passwords or cookies.", `<button class="btn" id="debug-log">Save debug log</button>`)}
       </section>
     </div>`;
   wireAppearance(view); // works in the preview too (saved in this browser)
@@ -4326,6 +4327,19 @@ async function renderSettings(view) {
   };
   view.querySelector("#open-lib").onclick = () => tauri.core.invoke("open_library");
   view.querySelector("#faceit-sign-in").onclick = () => tauri.core.invoke("faceit_sign_in");
+  view.querySelector("#debug-log").onclick = async (e) => {
+    const b = e.currentTarget;
+    b.disabled = true;
+    b.textContent = "Saving…";
+    try {
+      await tauri.core.invoke("save_debug_log");
+      b.textContent = "Saved to your Desktop";
+    } catch (err) {
+      b.textContent = "Couldn't save it";
+      b.title = String(err);
+    }
+    setTimeout(() => { b.disabled = false; b.textContent = "Save debug log"; }, 4000);
+  };
   renderStorage(view.querySelector("#storage"));
   wireFaceitRefresh();
 }

@@ -278,7 +278,7 @@ fn process(app: AppHandle, run: u64) {
                 q.login = false;
             }),
             Outcome::Skip(why) => {
-                eprintln!("demo {}: {why}", item.match_id);
+                vlog!("demo {}: {why}", item.match_id);
                 update(&app, |q| {
                     q.failed += 1;
                     q.skipped.push(item.match_id.clone());
@@ -404,7 +404,7 @@ fn fetch_one(app: &AppHandle, rx: &Receiver<Msg>, item: &Item, run: u64) -> Outc
                 for (i, url) in msg.urls.iter().enumerate() {
                     match download(app, url, &item.match_id, i, msg.urls.len(), run) {
                         Ok(()) => n += 1,
-                        Err(e) => eprintln!("demo download {}: {e}", item.match_id),
+                        Err(e) => vlog!("demo download {}: {e}", item.match_id),
                     }
                     if stopped(app, run) {
                         return Outcome::Stop;

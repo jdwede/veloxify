@@ -444,7 +444,16 @@ impl Renderer {
         // CS2 saves the config when a demo loads: make sure it saves the user's own values.
         self.revert_settings();
         let t0 = Instant::now();
+        let since = self.vc().mark();
         let loaded = self.play_demo(path);
+        if let Err(e) = &loaded {
+            // What CS2 said while it failed, for the log.
+            let lines: Vec<String> = self.vc().lines_since(since).into_iter().filter(|l| !l.contains("animgraph") && !l.trim().is_empty()).collect();
+            (self.log)(&format!("loading {} failed ({e:#}); CS2's last console lines:", path.display()));
+            for l in &lines[lines.len().saturating_sub(60)..] {
+                (self.log)(&format!("    | {l}"));
+            }
+        }
         match loaded {
             Err(e) if e.downcast_ref::<Cs2Crashed>().is_some_and(|c| c.0.contains("CopyNewEntity") || c.0.contains("class index")) => {
                 return Err(DemoIncompatible(path.to_path_buf()).into())

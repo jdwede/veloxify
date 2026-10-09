@@ -2,10 +2,16 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+/// Writes a line to Veloxify's log (see `log.rs`), like `eprintln!`.
+macro_rules! vlog {
+    ($($t:tt)*) => { crate::log::line(format!($($t)*)) };
+}
+
 mod clips;
 mod demos;
 mod faceit;
 mod league;
+mod log;
 mod mapicons;
 mod players;
 mod practice;
@@ -413,6 +419,20 @@ fn lineup_clips(state: State<AppState>) -> std::collections::BTreeMap<String, cs
     cs2hl_render::batch::load_lineup_clips(&state.settings.lock().unwrap().library_dir)
 }
 
+/// Saves a debug report (versions, where Steam and CS2 are, settings, the library's state, the
+/// recent log) to the Desktop and shows it in Explorer. Returns where it went.
+#[tauri::command]
+fn save_debug_log(app: tauri::AppHandle, state: State<AppState>) -> Result<String, String> {
+    let settings = state.settings.lock().unwrap().clone();
+    let status = state.status.lock().unwrap().clone();
+    let report = log::report(&app.package_info().version.to_string(), &settings, &status);
+    let dir = app.path().desktop_dir().ok().filter(|d| d.is_dir()).unwrap_or_else(settings::data_dir);
+    let path = dir.join(format!("Veloxify debug log {}.txt", chrono::Local::now().format("%Y-%m-%d %H%M")));
+    std::fs::write(&path, report).map_err(|e| e.to_string())?;
+    let _ = std::process::Command::new("explorer.exe").arg(format!("/select,{}", path.display())).spawn();
+    Ok(path.display().to_string())
+}
+
 /// Your ESEA league team: season, division, record, roster, standings, division stats, matches.
 #[tauri::command]
 async fn league_info(state: State<'_, AppState>, force: bool) -> Result<serde_json::Value, String> {
@@ -510,7 +530,8 @@ fn main() {
             render_lineups,
             lineup_clips,
             save_practice,
-            open_link
+            open_link,
+            save_debug_log
         ])
         .setup(move |app| {
             // Clips, thumbnails and match data are served from the library folder only.

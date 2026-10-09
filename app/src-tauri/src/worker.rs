@@ -100,6 +100,9 @@ impl Worker {
     fn set(&self, state: &str, message: impl Into<String>, done: usize, total: usize) {
         let s = Status { state: state.into(), message: message.into(), done, total };
         let changed_state = self.status.lock().unwrap().state != s.state;
+        if changed_state || self.status.lock().unwrap().message != s.message {
+            vlog!("[{}] {}", s.state, s.message);
+        }
         *self.status.lock().unwrap() = s.clone();
         let _ = self.app.emit("veloxify://status", s.clone());
         if let Some(tray) = self.app.tray_by_id("tray") {
@@ -207,7 +210,7 @@ impl Worker {
             // CS2 is closed and nothing's rendering: if a render was cut short, put the user's
             // own video settings back before they next start CS2.
             if cs2hl_render::session::repair_cut_short_render(me) {
-                eprintln!("put back your CS2 video settings after a render was cut short");
+                vlog!("put back your CS2 video settings after a render was cut short");
             }
             let imported = self.import(&settings, me);
             if imported || !settings.library_dir.join("my_stats.json").exists() {
@@ -327,7 +330,7 @@ impl Worker {
             });
             match result {
                 Ok(()) => built += 1,
-                Err(e) => eprintln!("details {id}: {e:#}"),
+                Err(e) => vlog!("details {id}: {e:#}"),
             }
         }
         if built > 0 {
@@ -369,7 +372,7 @@ impl Worker {
         match faceit::refresh(lib, me, &names, light) {
             Ok((_, changed)) => changed,
             Err(e) => {
-                eprintln!("faceit: {e:#}");
+                vlog!("faceit: {e:#}");
                 // Keep what we had through network hiccups; otherwise tell the app why it's empty.
                 let same = Faceit::load(lib).is_some_and(|f| f.steamid == me.to_string() && f.error.as_deref() == Some(e.to_string().as_str()));
                 if known || same {
@@ -572,15 +575,17 @@ impl Worker {
             }
             Event::Failed { title, error, .. } => {
                 done += 1;
-                eprintln!("render {title}: {error}");
+                vlog!("render {title}: {error}");
                 self.library_changed();
             }
-            Event::Done { rendered, .. } => {
+            Event::Done { rendered, minutes } => {
+                vlog!("{noun}: done, {rendered} made in {minutes:.1} min");
                 if rendered > 0 && !lineups {
                     self.notify("Your highlights are ready", &format!("{rendered} new highlight{} from your session", if rendered == 1 { "" } else { "s" }));
                 }
             }
             Event::Stopped { rendered, wants_cs2 } => {
+                vlog!("{noun}: stopped after {rendered} (CS2 wanted: {wants_cs2})");
                 // Veloxify never starts CS2 for you (it could be left running with nobody there):
                 // it closes its own and you start CS2 from Steam as usual.
                 let left = total.saturating_sub(rendered);
@@ -594,7 +599,7 @@ impl Worker {
                     ),
                 );
             }
-            Event::Log(_) => {}
+            Event::Log(s) => vlog!("  {s}"),
         };
         let result = match what {
             Batch::Clips(scope) => batch::render(&lib, me, profile, &work, scope, None, abort, &mut on),
@@ -649,7 +654,7 @@ fn latest_lowlights(lib: &Path, per_match: usize) -> Vec<(String, String)> {
 /// Why a demo wasn't imported, appended to `import.log` in the app's data folder.
 fn log_import(path: &Path, what: &str) {
     use std::io::Write as _;
-    eprintln!("import {}: {what}", path.display());
+    vlog!("import {}: {what}", path.display());
     let line = format!("{} {}: {what}\n", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"), path.display());
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(data_dir().join("import.log")) {
         let _ = f.write_all(line.as_bytes());

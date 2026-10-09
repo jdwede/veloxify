@@ -158,7 +158,7 @@ pub fn ensure_weapons(library: &Path) {
         Ok(_) => {
             let _ = std::fs::write(dir.join(".source"), stamp);
         }
-        Err(e) => eprintln!("weapon icons: {e}"),
+        Err(e) => vlog!("weapon icons: {e}"),
     }
 }
 
@@ -406,6 +406,6 @@ pub fn ensure(library: &Path, maps: &[String]) {
         Ok(_) => {
             let _ = std::fs::write(dir.join(".source"), stamp);
         }
-        Err(e) => eprintln!("map icons: {e}"),
+        Err(e) => vlog!("map icons: {e}"),
     }
 }
