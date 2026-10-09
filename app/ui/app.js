@@ -4244,6 +4244,10 @@ function faceitAccountRow() {
     <div class="lbl"><b>${esc(f.nickname)} · ${f.elo.toLocaleString("en-US")} ELO</b><span>Found from your Steam account${when ? ` · updated ${when}` : ""}</span></div>${right}</div>`;
 }
 
+// Veloxify's Ko-fi page ("https://ko-fi.com/<name>"): the Support button shows once it's set.
+const KOFI_URL = "";
+const KOFI_CUP = `<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M4 6h13a4 4 0 0 1 0 8h-1.1A6 6 0 0 1 10 19H9a5 5 0 0 1-5-5V6zm12 2v4h1a2 2 0 0 0 0-4h-1z"/><path fill="#ff5e5b" d="M10.1 9.2c.7-.8 2-.7 2.5.2.5.8.1 1.7-.6 2.4L10 13.6 8 11.8c-.7-.7-1.1-1.6-.6-2.4.5-.9 1.8-1 2.5-.2z"/></svg>`;
+
 async function renderSettings(view) {
   document.querySelector('[data-nav="settings"]').classList.add("active");
   settingsData = tauri ? await tauri.core.invoke("get_settings") : JSON.parse(JSON.stringify(PREVIEW_SETTINGS));
@@ -4255,7 +4259,8 @@ async function renderSettings(view) {
   const folders = s.watch_dirs.map((d, i) => `<div class="folder"><code title="${esc(d)}">${esc(d)}</code>${tauri ? `<button class="btn ghost" data-remove="${i}">Remove</button>` : ""}</div>`).join("")
     || `<div class="folder sub">No extra folders. Demos from Get demos are found automatically; add a folder here only if you keep other demos somewhere (e.g. Downloads).</div>`;
   view.innerHTML = `
-    <div class="profile-head"><div><div class="h2">Veloxify ${esc(settingsData.version)}</div><div class="h1">Settings</div></div><span class="saved" id="saved">Saved</span></div>
+    <div class="profile-head"><div><div class="h2">Veloxify ${esc(settingsData.version)}</div><div class="h1">Settings</div></div><span class="saved" id="saved">Saved</span>
+      ${KOFI_URL ? `<button class="kofi" id="kofi" title="Veloxify is free. If it helps you, you can buy me a coffee.">${KOFI_CUP}Support Veloxify on Ko-fi</button>` : ""}</div>
     ${tauri ? "" : `<div class="preview-note">Preview: settings can be changed in the desktop app.</div>`}
     <div class="settings">
       <section class="panel">
@@ -4297,6 +4302,7 @@ async function renderSettings(view) {
         ${row("Debug log", "Something not working? This saves a text file on your Desktop with what Veloxify did recently: its version, where it found Steam and CS2, and any errors. Send it to whoever is helping you. It has your Steam ID and match IDs, never passwords or cookies.", `<button class="btn" id="debug-log">Save debug log</button>`)}
       </section>
     </div>`;
+  view.querySelector("#kofi")?.addEventListener("click", () => (tauri ? tauri.core.invoke("open_link", { url: KOFI_URL }) : window.open(KOFI_URL, "_blank")));
   wireAppearance(view); // works in the preview too (saved in this browser)
   if (!tauri) return;
 

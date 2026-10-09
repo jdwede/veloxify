@@ -389,7 +389,9 @@ fn open_link(url: String) -> Result<(), String> {
     let steam_profile = url
         .strip_prefix("https://steamcommunity.com/profiles/")
         .is_some_and(|id| !id.is_empty() && id.len() <= 20 && id.chars().all(|c| c.is_ascii_digit()));
-    if !ALLOWED.iter().any(|a| url == *a) && !steam_profile {
+    // The Ko-fi page (Settings → Support Veloxify).
+    let kofi = url.strip_prefix("https://ko-fi.com/").is_some_and(|p| !p.is_empty() && p.len() <= 40 && p.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'));
+    if !ALLOWED.iter().any(|a| url == *a) && !steam_profile && !kofi {
         return Err("not a link Veloxify opens".into());
     }
     std::process::Command::new("rundll32").args(["url.dll,FileProtocolHandler", &url]).spawn().map_err(|e| e.to_string())?;

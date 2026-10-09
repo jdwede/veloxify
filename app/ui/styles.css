@@ -598,6 +598,10 @@ code { font-family: Consolas, monospace; font-size: 12px; background: var(--row)
 .folder code { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; color: #d4d4d4; background: var(--row); padding: 6px 9px; border-radius: var(--radius-sm); }
 .saved { color: var(--win); font-size: 13px; font-weight: 600; opacity: 0; transition: opacity 0.2s; }
 .saved.on { opacity: 1; }
+.profile-head .saved { margin-left: auto; align-self: center; }
+.kofi { display: inline-flex; align-items: center; gap: 8px; padding: 8px 14px; border: 0; border-radius: 999px; background: #29abe0; color: #fff;
+  font: inherit; font-size: 13.5px; font-weight: 700; cursor: pointer; align-self: center; }
+.kofi:hover { background: #1f9bcf; }
 .preview-note { background: var(--accent-soft); border: 1px solid var(--accent-line); border-radius: var(--radius-sm); padding: 10px 14px; margin-bottom: 16px; color: var(--accent-text); }
 .themes { display: grid; grid-template-columns: repeat(auto-fill, minmax(118px, 1fr)); gap: 10px; padding: 4px 20px 16px; }
 .theme { display: grid; gap: 8px; padding: 8px; border: 1px solid var(--line-2); border-radius: var(--radius-sm); background: transparent; cursor: pointer; text-align: left; }
