@@ -754,7 +754,21 @@ input[type=color] { width: 44px; height: 30px; padding: 2px; background: var(--r
 .hs-leader b { display: block; }
 .hs-leader span { font-size: 12.5px; color: var(--muted); }
 .hs-leader em { font-style: normal; font-size: 20px; font-weight: 800; }
-.hs-perf { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px 18px 12px; margin-bottom: 18px; }
+.hs-split { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 18px; margin-bottom: 18px; align-items: stretch; }
+.hs-perf { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px 18px 12px; }
+.hs-hl { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px 18px; display: flex; flex-direction: column; gap: 12px; }
+.hs-hl .hl-card { background: var(--row); }
+/* The thumbnail fills the box beside the rating chart (as tall as the chart); title over it. */
+.hs-hl-main { flex: 1; position: relative; display: flex; flex-direction: column; min-height: 220px; }
+.hs-hl-main .hl-thumb { flex: 1; aspect-ratio: auto; background-size: cover; }
+.hs-hl-main .hl-thumb .dur { top: 10px; bottom: auto; }
+.hs-hl-main .hl-info { position: absolute; left: 0; right: 0; bottom: 0; padding: 28px 14px 12px; background: linear-gradient(transparent, rgba(0, 0, 0, 0.85)); pointer-events: none; }
+.hs-hl-main .hl-meta { color: rgba(255, 255, 255, 0.75); }
+.hs-hl-more { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.hs-hl-more .play { width: 34px; height: 34px; font-size: 14px; }
+.hs-hl-more .dur { right: 5px; bottom: 5px; font-size: 11px; }
+.hs-hl-t { padding: 6px 8px; font-size: 12px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.hs-hl.empty-hl { justify-content: flex-start; }
 .hs-perf-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
 .hs-perf .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin: 0 5px 0 12px; vertical-align: -1px; }
 .hs-perf .legend i.mine { background: var(--accent); }
@@ -779,6 +793,7 @@ input[type=color] { width: 44px; height: 30px; padding: 2px; background: var(--r
 .hs-axis.words em:nth-child(1) { color: var(--loss); }
 .hs-axis.words em:nth-child(2) { color: var(--gold); }
 .hs-axis.words em:nth-child(3) { color: var(--win); }
+@media (max-width: 1100px) { .hs-split { grid-template-columns: 1fr; } }
 @media (max-width: 900px) {
   .hs-wrap, .cl-grid { grid-template-columns: 1fr; }
   .hs-chart { --label: 96px; }

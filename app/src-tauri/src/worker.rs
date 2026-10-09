@@ -10,6 +10,7 @@ use cs2hl_render::batch::{self, Event, Scope};
 use cs2hl_render::profile::Profile;
 use serde::Serialize;
 use std::cell::Cell;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
@@ -39,7 +40,14 @@ pub enum Job {
     /// Render these clips now (match id, highlight or lowlight id): Watch on a lowlight, or a
     /// clip removed for space.
     RenderClips(Vec<(String, String)>),
+    /// Import these demos (file names in Veloxify's demos folder) again even though they were
+    /// looked at before: Get demos found them downloaded but not in the library.
+    Import(Vec<String>),
 }
+
+/// An import that fails with an error (not a skip) is tried again on later passes, up to this
+/// many times, before the demo is left alone.
+const IMPORT_TRIES: u32 = 3;
 
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct Status {
@@ -55,6 +63,8 @@ pub struct Worker {
     settings: Arc<Mutex<Settings>>,
     status: Arc<Mutex<Status>>,
     seen: Seen,
+    /// Imports that failed this run: demo key -> attempts.
+    failed: HashMap<String, u32>,
     /// Set by "Stop rendering" (tray/window); the render stops at the next safe point.
     pub abort: Arc<AtomicBool>,
     stop_item: Option<MenuItem<Wry>>,
@@ -72,7 +82,7 @@ const TRAY_ICONS: [&[u8]; 3] = [
 
 impl Worker {
     pub fn new(app: AppHandle, settings: Arc<Mutex<Settings>>, status: Arc<Mutex<Status>>, abort: Arc<AtomicBool>, stop_item: Option<MenuItem<Wry>>) -> Self {
-        Self { app, settings, status, seen: Seen::load(), abort, stop_item, tray_icon: Cell::new(None) }
+        Self { app, settings, status, seen: Seen::load(), failed: HashMap::new(), abort, stop_item, tray_icon: Cell::new(None) }
     }
 
     fn set(&self, state: &str, message: impl Into<String>, done: usize, total: usize) {
@@ -149,6 +159,7 @@ impl Worker {
                     Ok(Job::Render(ids)) => pending_render.extend(ids),
                     Ok(Job::RenderClips(items)) => pending_clips.extend(items),
                     Ok(Job::Faceit) => last_faceit = None,
+                    Ok(Job::Import(files)) => self.forget(&files),
                     Err(RecvTimeoutError::Disconnected) => return,
                     _ => {}
                 }
@@ -160,6 +171,7 @@ impl Worker {
                     Ok(Job::Render(ids)) => pending_render.extend(ids),
                     Ok(Job::RenderClips(items)) => pending_clips.extend(items),
                     Ok(Job::Faceit) => last_faceit = None,
+                    Ok(Job::Import(files)) => self.forget(&files),
                     Err(RecvTimeoutError::Disconnected) => return,
                     _ => {}
                 }
@@ -239,6 +251,7 @@ impl Worker {
                 Ok(Job::Render(ids)) => pending_render.extend(ids),
                 Ok(Job::RenderClips(items)) => pending_clips.extend(items),
                 Ok(Job::Faceit) => last_faceit = None,
+                Ok(Job::Import(files)) => self.forget(&files),
                 Err(RecvTimeoutError::Disconnected) => return,
                 _ => {}
             }
@@ -388,6 +401,20 @@ impl Worker {
             .collect()
     }
 
+    /// Lets these demo files (names in the demos folder) be imported again.
+    fn forget(&mut self, files: &[String]) {
+        let before = self.seen.files.len();
+        self.seen.files.retain(|k| {
+            let path = k.split('|').next().unwrap_or_default();
+            let name = Path::new(path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            !files.contains(&name)
+        });
+        self.failed.retain(|k, _| !files.iter().any(|f| k.contains(f.as_str())));
+        if self.seen.files.len() != before {
+            self.seen.save();
+        }
+    }
+
     fn import(&mut self, settings: &Settings, me: u64) -> bool {
         let demos = self.new_demos(settings);
         if demos.is_empty() {
@@ -403,9 +430,19 @@ impl Worker {
             self.set("importing", format!("Analyzing match {} of {}", i + 1, total), i, total);
             match ingest::add_demo(&settings.library_dir, &path, me, &policy, false) {
                 Ok(Added::Added { .. }) => added += 1,
-                Ok(_) => {}
-                Err(e) => eprintln!("import {}: {e}", path.display()),
+                Ok(Added::Skipped { reason, .. }) => log_import(&path, &format!("skipped: {reason}")),
+                Ok(Added::Cached { .. }) => {}
+                Err(e) => {
+                    // Often passing (a file busy for a moment): try again on a later pass.
+                    let tries = self.failed.entry(key.clone()).or_default();
+                    *tries += 1;
+                    log_import(&path, &format!("failed (try {tries} of {IMPORT_TRIES}): {e:#}"));
+                    if *tries < IMPORT_TRIES {
+                        continue;
+                    }
+                }
             }
+            self.failed.remove(&key);
             self.seen.files.insert(key);
             self.seen.save();
             if added > 0 && (added % 5 == 0) {
@@ -555,4 +592,14 @@ fn latest_lowlights(lib: &Path, per_match: usize) -> Vec<(String, String)> {
         );
     }
     out
+}
+
+/// Why a demo wasn't imported, appended to `import.log` in the app's data folder.
+fn log_import(path: &Path, what: &str) {
+    use std::io::Write as _;
+    eprintln!("import {}: {what}", path.display());
+    let line = format!("{} {}: {what}\n", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"), path.display());
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(data_dir().join("import.log")) {
+        let _ = f.write_all(line.as_bytes());
+    }
 }

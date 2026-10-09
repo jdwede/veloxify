@@ -207,14 +207,16 @@ fn get_demos(app: tauri::AppHandle, state: State<AppState>, match_ids: Vec<Strin
         })
         .collect();
     let _ = settings;
-    // Demos already downloaded (e.g. by a run that was cut short) only need importing.
+    // Demos already downloaded (by a run that was cut short, or whose import failed) only need
+    // importing: again, even if the importer looked at them before.
     let have: Vec<String> = std::fs::read_dir(demos::demos_dir())
         .map(|d| d.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| !n.ends_with(".part")).collect())
         .unwrap_or_default();
     let (had, items): (Vec<demos::Item>, Vec<demos::Item>) =
         items.into_iter().partition(|i: &demos::Item| have.iter().any(|n| n.starts_with(&format!("{}-", i.match_id))));
     if !had.is_empty() {
-        let _ = state.jobs.lock().unwrap().send(Job::Now);
+        let files: Vec<String> = have.iter().filter(|n| had.iter().any(|i| n.starts_with(&format!("{}-", i.match_id)))).cloned().collect();
+        let _ = state.jobs.lock().unwrap().send(Job::Import(files));
     }
     demos::start(&app, items);
     Ok(())

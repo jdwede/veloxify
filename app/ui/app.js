@@ -615,8 +615,8 @@ async function renderMatchPage(view, id, tab) {
 // Both teams, Leetify's match-details columns (no Leetify rating), sortable by any column.
 function renderMatchScoreboard(body, m) {
   const me = state.index.me;
-  const COLS = [["rating", "HLTV 3.0"], ["swing", "Swing"], ["kills", "Kills"], ["assists", "Assists"], ["deaths", "Deaths"], ["kd", "K/D"],
-    ["adr", "ADR"], ["kast", "KAST"], ["k2", "2K"], ["k3", "3K"], ["k4", "4K"], ["k5", "5K"], ["rws", "RWS"]];
+  const COLS = [["rating", "HLTV 3.0"], ["rws", "RWS"], ["swing", "Swing"], ["kills", "Kills"], ["assists", "Assists"], ["deaths", "Deaths"], ["kd", "K/D"],
+    ["adr", "ADR"], ["kast", "KAST"], ["k2", "2K"], ["k3", "3K"], ["k4", "4K"], ["k5", "5K"]];
   const by = MATCH_SORTS[matchSort.key];
   const sorted = (side) => m.players.filter((p) => p.side === side).sort((a, b) => {
     const x = by(a), y = by(b);
@@ -1179,6 +1179,24 @@ async function renderMatchSummary(el, m, id) {
   };
   const players = [...m.players].sort((a, b) => r3(b.derived) - r3(a.derived));
   const top = Math.max(1.5, ...players.map((p) => r3(p.derived) + 0.1));
+  // The match's best highlight (rendered ones first) next to the rating chart, the rest below it.
+  const names = new Map(m.players.map((p) => [p.steamid, p.name]));
+  const hls = [...(m.highlights || [])].sort((a, b) => !!b.clip - !!a.clip || (b.tier || 0) - (a.tier || 0) || (b.hand || 0) - (a.hand || 0));
+  const best = hls[0];
+  const thumb = (h) => (h.thumb ? `background-image:url('${assetUrl(h.thumb)}')` : "");
+  const hlPanel = best ? `
+      <section class="hs-hl">
+        <div class="hs-perf-head"><div class="h3">Highlights</div>${hls.length > 1 ? `<a class="link" href="${matchHref(id, "highlights")}">All ${hls.length}</a>` : ""}</div>
+        <div class="hl-card hs-hl-main ${best.clip ? "" : "pending"}" data-hl="${esc(best.id)}">
+          <div class="hl-thumb" style="--map-bg:${mapColor(m.map)};${thumb(best)}">
+            ${best.clip ? `<span class="play">▶</span>` : `<span class="state">${best.render_error ? esc(best.render_error) : "Rendering…"}</span>`}
+            <span class="dur">${fmtClip(best.duration_s)}</span></div>
+          <div class="hl-info"><div class="hl-title">${esc(best.title)}</div>
+            <div class="hl-meta"><span>${esc(names.get(best.player) || "")}</span><span>round ${best.round}</span></div>
+            <div class="tags">${best.tags.map((t) => tagHtml(t)).join("")}</div></div>
+        </div>
+      </section>` : `
+      <section class="hs-hl empty-hl"><div class="h3">Highlights</div><div class="empty small">No highlights this match.</div></section>`;
   const x = (v) => `${(v / top) * 100}%`;
   el.innerHTML = `
     <div class="hs-wrap">
@@ -1199,6 +1217,7 @@ async function renderMatchSummary(el, m, id) {
         ${leader("Best rating 3.0", (p) => r3(p.derived), f2)}
       </section>
     </div>
+    <div class="hs-split">
     <section class="hs-perf">
       <div class="hs-perf-head"><div class="h3">Performance · Rating 3.0</div>
         <span class="legend"><i class="mine"></i>My Team <i class="enemy"></i>Enemy Team</span></div>
@@ -1209,7 +1228,15 @@ async function renderMatchSummary(el, m, id) {
         <div class="hs-axis"><span></span><div>${[0, 0.4, 0.85, 1.15, top].map((v) => `<em style="left:${x(v)}">${f2(v)}</em>`).join("")}</div></div>
         <div class="hs-axis words"><span></span><div><em style="left:${x(0.42)}">Bad</em><em style="left:${x(1.0)}">Average</em><em style="left:${x((1.15 + top) / 2)}">Good</em></div></div>
       </div>
-    </section>`;
+    </section>
+    ${hlPanel}
+    </div>`;
+  // Play from the match's rendered clips.
+  state.playlist = hls.filter((h) => h.clip).map((h) => ({ ...h, name: names.get(h.player), match: m }));
+  el.querySelectorAll("[data-hl]").forEach((c) => (c.onclick = () => {
+    const i = state.playlist.findIndex((h) => h.id === c.dataset.hl);
+    if (i >= 0) play(i);
+  }));
 }
 
 // ---- custom ratings, trends ----------------------------------------------------------------------
