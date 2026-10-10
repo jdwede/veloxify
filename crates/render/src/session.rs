@@ -197,6 +197,14 @@ pub fn silent_device(preferred: &str) -> Option<(String, String)> {
         .find_map(|want| devices.iter().find(|(_, name)| name.to_lowercase().contains(&want.to_lowercase())).cloned())
 }
 
+/// Asks Windows to keep the display (and the PC) awake from this thread, or lets it sleep again.
+fn keep_display_on(on: bool) {
+    use windows::Win32::System::Power::{SetThreadExecutionState, ES_CONTINUOUS, ES_DISPLAY_REQUIRED, ES_SYSTEM_REQUIRED};
+    unsafe {
+        SetThreadExecutionState(if on { ES_CONTINUOUS | ES_DISPLAY_REQUIRED | ES_SYSTEM_REQUIRED } else { ES_CONTINUOUS });
+    }
+}
+
 pub fn cs2_running() -> bool {
     cs2_pid().is_some()
 }
@@ -258,6 +266,8 @@ impl Renderer {
             closed: Arc::new(AtomicBool::new(false)),
             log,
         };
+        // The screen asleep stops CS2 drawing (the recording freezes): keep it on while filming.
+        keep_display_on(true);
         if let Err(e) = r.launch() {
             r.close_inner();
             return Err(e);
@@ -770,6 +780,7 @@ impl Renderer {
         if let Ok(true) = self.protector.restore_video() {
             (self.log)("restored your cs2_video.txt");
         }
+        keep_display_on(false);
     }
 }
 

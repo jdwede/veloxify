@@ -31,6 +31,13 @@ const LINED_STILL_S: f32 = 0.5;
 const LINED_JUMP_STILL_S: f32 = 0.2;
 const LINED_AIM: f32 = 1.0;
 const MIN_FLIGHT: f32 = 250.0;
+/// The same crosshair placement: aimed within this many degrees (pitch and yaw).
+const SAME_AIM: f32 = 0.5;
+/// The same lineup thrown a little higher or lower: from the same spot, aimed within this many
+/// degrees and landing within this many units of each other (joined, then the most common aim
+/// is picked out of them).
+const MERGE_AIM: f32 = 2.0;
+const MERGE_LANDING: f32 = 250.0;
 /// A smoke or molotov landing farther than this from anywhere a player has stood (in the
 /// library's kills) is off the map or on a roof: a miss.
 const OFF_MAP: f32 = 150.0;
@@ -42,7 +49,7 @@ const RARE_SHARE: f32 = 0.10;
 /// lineup, not a miss).
 const MISS_AIM: f32 = 5.0;
 /// Bumped when the rules above change: `lineups.json` from older rules is rebuilt.
-pub const VERSION: u32 = 3;
+pub const VERSION: u32 = 6;
 /// Spawn spots closer than this are one spot.
 const SPAWN_RADIUS: f32 = 48.0;
 /// Example throws kept per lineup.
@@ -101,6 +108,10 @@ pub struct MapLineups {
     /// callouts; the app shows the user's own names instead where they've renamed them.
     #[serde(default)]
     pub callouts: BTreeMap<String, String>,
+    /// Throws ("<match id>@<tick>") that are part of a lineup but not its most common crosshair
+    /// placement: a video of one of them is filmed again from the main one.
+    #[serde(default)]
+    pub off_aim: Vec<String>,
     /// Which lineup each of this map's throws belongs to: "<match id>@<tick>" -> lineup id.
     #[serde(default)]
     pub by_throw: BTreeMap<String, String>,
@@ -147,6 +158,12 @@ pub struct Lineup {
     pub technique: String,
     pub tags: BTreeMap<String, usize>,
     pub click: String,
+    /// Throws with the most common crosshair placement (the aim shown, and the one filmed), and
+    /// how many other placements were used at least twice.
+    #[serde(default)]
+    pub aim_count: usize,
+    #[serde(default)]
+    pub other_aims: usize,
     /// Average seconds into the round.
     pub t: f32,
     /// The throw to render as this lineup's video, and examples.
@@ -239,6 +256,19 @@ fn lined(t: &DThrow) -> bool {
         "jump" => t.still_s >= LINED_JUMP_STILL_S,
         _ => t.still_s >= LINED_STILL_S,
     }
+}
+
+/// A group's aim: its throws' average (yaw around the first one's, so it doesn't wrap).
+fn group_aim(members: &[(&str, &DThrow)]) -> (f32, f32) {
+    let y0 = members[0].1.yaw;
+    let n = members.len() as f32;
+    let pitch = members.iter().map(|(_, t)| t.pitch).sum::<f32>() / n;
+    let yaw = y0 + members.iter().map(|(_, t)| ((t.yaw - y0 + 540.0).rem_euclid(360.0)) - 180.0).sum::<f32>() / n;
+    (pitch, yaw)
+}
+
+fn aims_within(a: (f32, f32), b: (f32, f32), deg: f32) -> bool {
+    (a.0 - b.0).abs() < deg && ((a.1 - b.1 + 540.0).rem_euclid(360.0) - 180.0).abs() < deg
 }
 
 fn flight(t: &DThrow) -> f32 {
@@ -334,7 +364,39 @@ pub fn write(root: &Path) -> Result<()> {
 
     let mut out = Lineups::default();
     for (map, throws) in &by_map {
-        // Group the same lineup.
+        // Spawn spots per side, from where throwers stood when rounds went live.
+        let mut spawns: BTreeMap<String, Vec<([f32; 2], usize)>> = BTreeMap::new();
+        for (_, t) in throws {
+            let Some(s) = t.spawn else { continue };
+            let list = spawns.entry(t.side.clone()).or_default();
+            match list.iter_mut().find(|(p, _)| (p[0] - s[0]).hypot(p[1] - s[1]) < SPAWN_RADIUS) {
+                Some((p, n)) => {
+                    p[0] = (p[0] * *n as f32 + s[0]) / (*n as f32 + 1.0);
+                    p[1] = (p[1] * *n as f32 + s[1]) / (*n as f32 + 1.0);
+                    *n += 1;
+                }
+                None => list.push((s, 1)),
+            }
+        }
+        // Real spawn spots are where many rounds start; numbered left to right, top to bottom.
+        let mut spots: BTreeMap<String, Vec<[f32; 2]>> = BTreeMap::new();
+        for (side, list) in &spawns {
+            let mut keep: Vec<[f32; 2]> = list.iter().filter(|(_, n)| *n >= 3).map(|(p, _)| [p[0].round(), p[1].round()]).collect();
+            keep.sort_by(|a, b| (b[1] / 64.0).round().total_cmp(&(a[1] / 64.0).round()).then(a[0].total_cmp(&b[0])));
+            spots.insert(side.clone(), keep);
+        }
+        // The spawn spot a round started at (its centre), if it's one.
+        let spot_at = |side: &str, s: [f32; 2]| -> Option<[f32; 2]> {
+            spots.get(side)?.iter().filter(|p| (p[0] - s[0]).hypot(p[1] - s[1]) < SPAWN_RADIUS).min_by(|a, b| {
+                (a[0] - s[0]).hypot(a[1] - s[1]).total_cmp(&(b[0] - s[0]).hypot(b[1] - s[1]))
+            }).copied()
+        };
+        let spot_of = |side: &str, s: Option<[f32; 2]>| -> Option<usize> {
+            let c = spot_at(side, s?)?;
+            spots.get(side)?.iter().position(|p| *p == c).map(|i| i + 1)
+        };
+        // Group the same lineup: the same spot (for instant smokes, the same spawn spot) to the same
+        // landing.
         let mut groups: Vec<Group> = vec![];
         let mut sorted = throws.clone();
         sorted.sort_by(|a, b| a.0.cmp(b.0).then(a.1.round.cmp(&b.1.round)).then(a.1.t.total_cmp(&b.1.t)));
@@ -344,7 +406,11 @@ pub fn write(root: &Path) -> Result<()> {
                 continue;
             }
             let at = match (is_instant, t.spawn) {
-                (true, Some(s)) => [s[0], s[1], t.from[2]],
+                // Where it leaves the hand varies (a jump or a walk first); the spawn spot doesn't.
+                (true, Some(s)) => {
+                    let c = spot_at(&t.side, s).unwrap_or(s);
+                    [c[0], c[1], 0.0]
+                }
                 _ => t.from,
             };
             let found = groups.iter_mut().find(|g| {
@@ -369,31 +435,6 @@ pub fn write(root: &Path) -> Result<()> {
                 None => groups.push(Group { kind: t.kind.clone(), side: t.side.clone(), instant: is_instant, at, to: t.to, members: vec![(mid, t)] }),
             }
         }
-        // Spawn spots per side, from where throwers stood when rounds went live.
-        let mut spawns: BTreeMap<String, Vec<([f32; 2], usize)>> = BTreeMap::new();
-        for (_, t) in throws {
-            let Some(s) = t.spawn else { continue };
-            let list = spawns.entry(t.side.clone()).or_default();
-            match list.iter_mut().find(|(p, _)| (p[0] - s[0]).hypot(p[1] - s[1]) < SPAWN_RADIUS) {
-                Some((p, n)) => {
-                    p[0] = (p[0] * *n as f32 + s[0]) / (*n as f32 + 1.0);
-                    p[1] = (p[1] * *n as f32 + s[1]) / (*n as f32 + 1.0);
-                    *n += 1;
-                }
-                None => list.push((s, 1)),
-            }
-        }
-        // Real spawn spots are where many rounds start; numbered left to right, top to bottom.
-        let mut spots: BTreeMap<String, Vec<[f32; 2]>> = BTreeMap::new();
-        for (side, list) in &spawns {
-            let mut keep: Vec<[f32; 2]> = list.iter().filter(|(_, n)| *n >= 3).map(|(p, _)| [p[0].round(), p[1].round()]).collect();
-            keep.sort_by(|a, b| (b[1] / 64.0).round().total_cmp(&(a[1] / 64.0).round()).then(a[0].total_cmp(&b[0])));
-            spots.insert(side.clone(), keep);
-        }
-        let spot_of = |side: &str, s: Option<[f32; 2]>| -> Option<usize> {
-            let s = s?;
-            spots.get(side)?.iter().position(|p| (p[0] - s[0]).hypot(p[1] - s[1]) < SPAWN_RADIUS).map(|i| i + 1)
-        };
         let place_near = |xy: [f32; 2]| -> String {
             places
                 .get(map)
@@ -402,18 +443,34 @@ pub fn write(root: &Path) -> Result<()> {
                 .unwrap_or_default()
         };
 
+        // The same lineup thrown a little higher or lower lands along a strip, which the landing
+        // radius can cut in pieces: join them (each group, biggest first, takes in smaller ones
+        // from the same spot with nearly the same aim landing close by).
+        groups.sort_by(|a, b| b.members.len().cmp(&a.members.len()));
+        let mut joined: Vec<Group> = vec![];
+        for g in groups {
+            let aim = group_aim(&g.members);
+            let into = joined.iter_mut().find(|h| {
+                h.instant == g.instant
+                    && h.kind == g.kind
+                    && h.side == g.side
+                    && (h.at[0] - g.at[0]).hypot(h.at[1] - g.at[1]) < SAME_SPOT
+                    && (h.at[2] - g.at[2]).abs() < SAME_HEIGHT
+                    && (h.to[0] - g.to[0]).hypot(h.to[1] - g.to[1]) < MERGE_LANDING
+                    && aims_within(group_aim(&h.members), aim, MERGE_AIM)
+            });
+            match into {
+                Some(h) => h.members.extend(g.members),
+                None => joined.push(g),
+            }
+        }
+        let groups = joined;
+
         // Misses: smokes and molotovs landing where no player has stood (off the map, on a roof),
         // and rare landings from a spot whose lineup usually lands elsewhere.
         let stood: Vec<[f32; 2]> = places.get(map).map(|pl| pl.iter().map(|(p, _)| *p).collect()).unwrap_or_default();
         let off_map = |to: [f32; 2]| !stood.is_empty() && stood.iter().all(|p| (p[0] - to[0]).hypot(p[1] - to[1]) > OFF_MAP);
-        // A group's aim: its throws' average (yaw around the first one's, so it doesn't wrap).
-        let aim = |g: &Group| -> (f32, f32) {
-            let y0 = g.members[0].1.yaw;
-            let n = g.members.len() as f32;
-            let pitch = g.members.iter().map(|(_, t)| t.pitch).sum::<f32>() / n;
-            let yaw = y0 + g.members.iter().map(|(_, t)| ((t.yaw - y0 + 540.0).rem_euclid(360.0)) - 180.0).sum::<f32>() / n;
-            (pitch, yaw)
-        };
+        let aim = |g: &Group| group_aim(&g.members);
         let top_from_spot = |g: &Group| -> usize {
             let (p, y) = aim(g);
             groups
@@ -432,6 +489,7 @@ pub fn write(root: &Path) -> Result<()> {
             ((g.kind == "smoke" || g.kind == "molotov") && off_map(g.to)) || (n <= RARE_MAX && (n as f32) < RARE_SHARE * top_from_spot(g) as f32)
         };
         let mut misses = 0;
+        let mut off_aim: Vec<String> = vec![];
 
         let mut lineups: Vec<Lineup> = vec![];
         let mut used_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -463,9 +521,33 @@ pub fn write(root: &Path) -> Result<()> {
             // CS2 can still play them; old demos stop playing after CS2 updates).
             let mean = |f: &dyn Fn(&DThrow) -> f32| g.members.iter().map(|(_, t)| f(t)).sum::<f32>() / n as f32;
             let played = |mid: &str| entries.get(mid).map_or(0, |e| e.played_ts);
+            // The most common crosshair placement: the throw with the most others aimed within
+            // SAME_AIM of it, and those throws.
+            let same_aim = |a: &DThrow, b: &DThrow| (a.pitch - b.pitch).abs() < SAME_AIM && ((a.yaw - b.yaw + 540.0).rem_euclid(360.0) - 180.0).abs() < SAME_AIM;
+            let center = g.members.iter().max_by_key(|(_, a)| g.members.iter().filter(|(_, b)| same_aim(a, b)).count()).map(|(_, t)| *t).unwrap();
+            let in_main = |t: &DThrow| same_aim(center, t);
+            let aim_count = g.members.iter().filter(|(_, t)| in_main(t)).count();
+            off_aim.extend(g.members.iter().filter(|(_, t)| !in_main(t)).map(|(mid, t)| format!("{mid}@{}", t.tick)));
+            let mut rest: Vec<&DThrow> = g.members.iter().map(|(_, t)| *t).filter(|t| !in_main(t)).collect();
+            let mut other_aims = 0;
+            while let Some(first) = rest.first().copied() {
+                let n = rest.iter().filter(|t| same_aim(first, t)).count();
+                if n >= 2 {
+                    other_aims += 1;
+                }
+                rest.retain(|t| !same_aim(first, t));
+            }
+            // The video and the examples: the most common aim first, newest matches first (their
+            // demos are still on disk and CS2 can still play them; old demos stop playing).
             let mut newest: Vec<(&str, &DThrow)> = g.members.clone();
-            newest.sort_by_key(|(mid, t)| (std::cmp::Reverse(played(mid)), t.round, t.tick));
-            let rep = newest.iter().find(|(_, t)| t.tick > 0 && t.path.len() > 1).or(newest.first()).copied().unwrap();
+            newest.sort_by_key(|(mid, t)| (!in_main(t), std::cmp::Reverse(played(mid)), t.round, t.tick));
+            let rep = newest.iter().find(|(_, t)| in_main(t) && t.tick > 0 && t.path.len() > 1).or(newest.first()).copied().unwrap();
+            // How the most common aim is thrown.
+            let mut main_tags: BTreeMap<String, usize> = BTreeMap::new();
+            for (_, t) in g.members.iter().filter(|(_, t)| in_main(t)) {
+                *main_tags.entry(technique_tag(t)).or_default() += 1;
+            }
+            let technique = main_tags.into_iter().max_by_key(|(_, c)| *c).map(|(k, _)| k).unwrap_or(technique);
             let occ = |(mid, t): (&str, &DThrow)| Occurrence {
                 match_id: mid.to_string(),
                 round: t.round,
@@ -520,6 +602,8 @@ pub fn write(root: &Path) -> Result<()> {
                 technique,
                 tags,
                 click,
+                aim_count,
+                other_aims,
                 t: mean(&|t| t.t),
                 video: occ(rep),
                 examples: newest.iter().take(EXAMPLES).map(|m| occ(*m)).collect(),
@@ -577,6 +661,7 @@ pub fn write(root: &Path) -> Result<()> {
                     .collect(),
                 lineups,
                 misses,
+                off_aim,
                 by_throw,
             },
         );

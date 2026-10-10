@@ -270,6 +270,14 @@ pub fn render(
         } else {
             renderer.record(&segments, &lib.join(&rel), &eyes)
         };
+        // A frozen recording (CS2 stopped drawing, e.g. the screen went to sleep) isn't kept.
+        let recorded = recorded.and_then(|()| match crate::assemble::frozen_share(&lib.join(&rel)) {
+            Some(f) if f > crate::assemble::FROZEN_MAX_CLIP => {
+                let _ = std::fs::remove_file(lib.join(&rel));
+                Err(anyhow::anyhow!("CS2 stopped drawing while this was recorded ({:.0}% frozen); it's recorded again next time", f * 100.0))
+            }
+            _ => Ok(()),
+        });
         match recorded {
             Ok(()) => {
                 let thumb = format!("clips/{hid}.jpg");
@@ -457,8 +465,21 @@ pub fn migrate_lineup_clips(lib: &Path) -> Result<usize> {
     // Notes on why a lineup couldn't be filmed are checked again once its throws change.
     let counts: HashMap<&str, usize> = all.maps.values().flat_map(|m| m.lineups.iter().map(|l| (l.id.as_str(), l.count))).collect();
     let recheck: Vec<String> = clips.iter().filter(|(k, c)| c.clip.is_none() && counts.get(k.as_str()).is_some_and(|n| *n != c.count)).map(|(k, _)| k.clone()).collect();
+    // Videos of a less common crosshair placement: filmed again from the most common one.
+    let off_aim: std::collections::HashSet<&str> = all.maps.values().flat_map(|m| m.off_aim.iter().map(String::as_str)).collect();
+    let refilm: Vec<String> = clips.iter().filter(|(_, c)| c.clip.is_some() && off_aim.contains(format!("{}@{}", c.match_id, c.tick).as_str())).map(|(k, _)| k.clone()).collect();
+    for k in &refilm {
+        if let Some(c) = clips.remove(k) {
+            for f in [c.clip, c.thumb].into_iter().flatten() {
+                let _ = std::fs::remove_file(lib.join(f));
+            }
+        }
+    }
     let stale: Vec<String> = clips.keys().filter(|k| !ids.contains(k.as_str())).cloned().collect();
     if stale.is_empty() && recheck.is_empty() {
+        if !refilm.is_empty() {
+            save_lineup_clips(lib, &clips)?;
+        }
         return Ok(0);
     }
     for k in recheck {
@@ -775,7 +796,14 @@ pub fn render_lineups(
             let rel = format!("lineups/{}.mp4", job.id);
             let ts = Instant::now();
             on(Event::Filming { title: job.title.clone() });
-            match r.record_lineup(&shot, &lib.join(&rel)) {
+            let recorded = r.record_lineup(&shot, &lib.join(&rel)).and_then(|()| match crate::assemble::frozen_share(&lib.join(&rel)) {
+                Some(f) if f > crate::assemble::FROZEN_MAX => {
+                    let _ = std::fs::remove_file(lib.join(&rel));
+                    Err(anyhow::anyhow!("CS2 stopped drawing while it was filmed ({:.0}% frozen)", f * 100.0))
+                }
+                _ => Ok(()),
+            });
+            match recorded {
                 Ok(()) => {
                     // The thumbnail: the thrower lined up, just before the throw.
                     let thumb = format!("lineups/{}.jpg", job.id);

@@ -37,6 +37,38 @@ fn ffmpeg() -> Command {
     c
 }
 
+/// A recording with more of it frozen than this is thrown away: CS2 stopped drawing. Lineup
+/// videos' camera always moves; a highlight can hold still a while (an AWP holding an angle).
+pub const FROZEN_MAX: f64 = 0.3;
+pub const FROZEN_MAX_CLIP: f64 = 0.6;
+
+/// How much of a video is frozen (the picture not changing for 2 seconds or more), 0 to 1: CS2
+/// stops drawing when the screen goes to sleep, and the recording then repeats one frame. `None`
+/// if ffmpeg couldn't read it.
+pub fn frozen_share(video: &Path) -> Option<f64> {
+    let mut c = Command::new(ffmpeg_exe());
+    c.args(["-hide_banner", "-nostats", "-threads", "2", "-i"]).arg(video);
+    c.args(["-vf", "scale=320:-2,freezedetect=n=-50dB:d=2", "-an", "-f", "null", "-"]);
+    hide_console(&mut c);
+    let out = c.output().ok()?;
+    let log = String::from_utf8_lossy(&out.stderr);
+    let secs = |s: &str| -> Option<f64> {
+        let mut t = 0.0;
+        for part in s.split(':') {
+            t = t * 60.0 + part.trim().parse::<f64>().ok()?;
+        }
+        Some(t)
+    };
+    let total = log.lines().find_map(|l| l.trim().strip_prefix("Duration: ")).and_then(|d| secs(d.split(',').next()?))?;
+    let value = |key: &str| -> Vec<f64> { log.lines().filter_map(|l| l.split(key).nth(1)).filter_map(|v| v.trim().parse().ok()).collect() };
+    let mut frozen: f64 = value("freeze_duration:").iter().sum();
+    let (starts, ends) = (value("freeze_start:"), value("freeze_end:"));
+    if starts.len() > ends.len() {
+        frozen += total - starts.last().copied().unwrap_or(total);
+    }
+    (total > 0.0).then(|| (frozen / total).clamp(0.0, 1.0))
+}
+
 #[cfg(windows)]
 fn hide_console(c: &mut Command) {
     use std::os::windows::process::CommandExt;
