@@ -116,6 +116,17 @@ impl std::fmt::Display for DemoIncompatible {
 }
 impl std::error::Error for DemoIncompatible {}
 
+/// Recording after recording came out frozen: CS2 isn't drawing right now (the monitor switched
+/// off, the PC locked...). The batch stops instead of trying all night.
+#[derive(Debug)]
+pub struct NotDrawing;
+impl std::fmt::Display for NotDrawing {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("CS2 stopped drawing while Veloxify was filming (is the monitor off?). Filming carries on when you're back at the PC")
+    }
+}
+impl std::error::Error for NotDrawing {}
+
 /// CS2 stopped with an error box (its message); Veloxify closed it.
 #[derive(Debug)]
 pub struct Cs2Crashed(pub String);

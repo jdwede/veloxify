@@ -42,6 +42,16 @@ fn ffmpeg() -> Command {
 pub const FROZEN_MAX: f64 = 0.3;
 pub const FROZEN_MAX_CLIP: f64 = 0.6;
 
+/// A recording came out frozen (CS2 stopped drawing): `.0` is the frozen share.
+#[derive(Debug)]
+pub struct Frozen(pub f64);
+impl std::fmt::Display for Frozen {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "CS2 stopped drawing while it was recorded ({:.0}% frozen)", self.0 * 100.0)
+    }
+}
+impl std::error::Error for Frozen {}
+
 /// How much of a video is frozen (the picture not changing for 2 seconds or more), 0 to 1: CS2
 /// stops drawing when the screen goes to sleep, and the recording then repeats one frame. `None`
 /// if ffmpeg couldn't read it.

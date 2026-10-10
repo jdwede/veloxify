@@ -183,6 +183,9 @@ pub fn render(
     let mut broken: Vec<String> = vec![];
     let mut rendered = 0;
     let mut stopped = false;
+    // Frozen recordings in a row: CS2 isn't drawing (monitor off...), so stop rather than go on.
+    let mut frozen_streak = 0;
+    let mut not_drawing = false;
     // CS2 can't play demos from before its last update that changed how demos are recorded (it
     // says so, or stops with an error box): a match as old as one known not to play is skipped.
     let mut unplayable = load_unplayable(lib);
@@ -274,7 +277,7 @@ pub fn render(
         let recorded = recorded.and_then(|()| match crate::assemble::frozen_share(&lib.join(&rel)) {
             Some(f) if f > crate::assemble::FROZEN_MAX_CLIP => {
                 let _ = std::fs::remove_file(lib.join(&rel));
-                Err(anyhow::anyhow!("CS2 stopped drawing while this was recorded ({:.0}% frozen); it's recorded again next time", f * 100.0))
+                Err(crate::assemble::Frozen(f).into())
             }
             _ => Ok(()),
         });
@@ -302,11 +305,21 @@ pub fn render(
                     let _ = curation.save(lib);
                 }
                 rendered += 1;
+                frozen_streak = 0;
                 on(Event::Rendered { match_id: mid.clone(), title, clip_s: duration, took_s: ts.elapsed().as_secs_f64() });
             }
             Err(e) if e.downcast_ref::<Aborted>().is_some() => {
                 stopped = true;
                 break;
+            }
+            Err(e) if e.downcast_ref::<crate::assemble::Frozen>().is_some() => {
+                // Not a failure of this clip: it's recorded again next time.
+                on(Event::Log(format!("{title}: {e}")));
+                frozen_streak += 1;
+                if frozen_streak >= 2 {
+                    not_drawing = true;
+                    break;
+                }
             }
             Err(e) => {
                 match (hi, li) {
@@ -329,6 +342,9 @@ pub fn render(
     renderer.close();
     drain(on);
     let _ = std::fs::remove_dir_all(&demos);
+    if not_drawing {
+        return Err(crate::session::NotDrawing.into());
+    }
     if stopped {
         on(Event::Stopped { rendered, wants_cs2 });
     } else {
@@ -666,6 +682,8 @@ pub fn render_lineups(
     // Pass by pass, in list order: each lineup's next throw to try. A lineup that fails is tried
     // from its next throw in a later pass, so none is left out because one throw didn't work.
     let mut queue: Vec<(Job, usize, String)> = jobs.into_iter().map(|j| (j, 0, String::new())).collect();
+    let mut frozen_streak = 0;
+    let mut not_drawing = false;
     'passes: for _pass in 0..4 {
     if queue.is_empty() {
         break;
@@ -799,7 +817,7 @@ pub fn render_lineups(
             let recorded = r.record_lineup(&shot, &lib.join(&rel)).and_then(|()| match crate::assemble::frozen_share(&lib.join(&rel)) {
                 Some(f) if f > crate::assemble::FROZEN_MAX => {
                     let _ = std::fs::remove_file(lib.join(&rel));
-                    Err(anyhow::anyhow!("CS2 stopped drawing while it was filmed ({:.0}% frozen)", f * 100.0))
+                    Err(crate::assemble::Frozen(f).into())
                 }
                 _ => Ok(()),
             });
@@ -811,6 +829,7 @@ pub fn render_lineups(
                     clips.insert(job.id.clone(), LineupClip { clip: Some(rel), thumb, match_id: o.match_id.clone(), tick: o.tick, ..Default::default() });
                     save_lineup_clips(lib, &clips)?;
                     rendered += 1;
+                    frozen_streak = 0;
                     on(Event::Rendered { match_id: o.match_id.clone(), title: job.title.clone(), clip_s: lead + hold, took_s: ts.elapsed().as_secs_f64() });
                     drain(on);
                     continue 'jobs;
@@ -822,6 +841,13 @@ pub fn render_lineups(
                 Err(e) => {
                     last_error = if e.downcast_ref::<WrongPov>().is_some() { "CS2's camera wouldn't stay on the thrower.".into() } else { e.to_string() };
                     on(Event::Log(format!("{} from {}: {last_error}; trying another throw", job.title, o.match_id)));
+                    if e.downcast_ref::<crate::assemble::Frozen>().is_some() {
+                        frozen_streak += 1;
+                        if frozen_streak >= 3 {
+                            not_drawing = true;
+                            break 'passes;
+                        }
+                    }
                 }
             }
         }
@@ -842,6 +868,9 @@ pub fn render_lineups(
     }
     drain(on);
     let _ = std::fs::remove_dir_all(&demos);
+    if not_drawing {
+        return Err(crate::session::NotDrawing.into());
+    }
     if stopped {
         on(Event::Stopped { rendered, wants_cs2 });
     } else {

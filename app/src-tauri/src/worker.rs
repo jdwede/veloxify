@@ -96,6 +96,8 @@ pub struct Worker {
     stop_item: Option<MenuItem<Wry>>,
     /// Which of `TRAY_ICONS` the tray shows now.
     tray_icon: Cell<Option<usize>>,
+    /// When filming last stopped because CS2 stopped drawing: no filming until there's input.
+    not_drawing: Cell<Option<Instant>>,
 }
 
 /// The tray icon tells at a glance what CS2 is up to: green = CS2 closed (Veloxify is free to
@@ -108,7 +110,7 @@ const TRAY_ICONS: [&[u8]; 3] = [
 
 impl Worker {
     pub fn new(app: AppHandle, settings: Arc<Mutex<Settings>>, status: Arc<Mutex<Status>>, abort: Arc<AtomicBool>, stop_item: Option<MenuItem<Wry>>) -> Self {
-        Self { app, settings, status, seen: Seen::load(), failed: HashMap::new(), abort, stop_item, tray_icon: Cell::new(None) }
+        Self { app, settings, status, seen: Seen::load(), failed: HashMap::new(), abort, stop_item, tray_icon: Cell::new(None), not_drawing: Cell::new(None) }
     }
 
     fn set(&self, state: &str, message: impl Into<String>, done: usize, total: usize) {
@@ -268,14 +270,23 @@ impl Worker {
                 last_faceit = Some(Instant::now());
             }
             was_playing = false;
+            // CS2 stopped drawing last time (monitor off...): film again once someone's at the PC
+            // (keyboard or mouse input since then, or something asked for).
+            if let Some(since) = self.not_drawing.get() {
+                let asked = !pending_clips.is_empty() || !pending_lineups.is_empty() || !pending_render.is_empty();
+                if asked || (cs2hl_render::window::idle_ms() as u128) < since.elapsed().as_millis() {
+                    self.not_drawing.set(None);
+                }
+            }
+            let can_film = self.not_drawing.get().is_none();
             // Clips and lineup videos you asked for come first.
-            if !pending_clips.is_empty() {
+            if can_film && !pending_clips.is_empty() {
                 self.render(&settings, me, Scope::Items(std::mem::take(&mut pending_clips)));
             }
-            if !pending_lineups.is_empty() && !system::cs2_running() {
+            if can_film && !pending_lineups.is_empty() && !system::cs2_running() {
                 self.render_lineups(&settings, me, Some(std::mem::take(&mut pending_lineups)));
             }
-            if settings.auto_render || !pending_render.is_empty() {
+            if can_film && (settings.auto_render || !pending_render.is_empty()) {
                 let scope =
                     if pending_render.is_empty() { Scope::LatestSession } else { Scope::Matches(std::mem::take(&mut pending_render)) };
                 self.render(&settings, me, scope);
@@ -650,8 +661,14 @@ impl Worker {
             }
         };
         rendering.store(false, Ordering::SeqCst);
-        if let Err(e) = result {
-            self.set("error", format!("Rendering stopped: {e:#}"), done, total);
+        match result {
+            Err(e) if e.downcast_ref::<cs2hl_render::session::NotDrawing>().is_some() => {
+                vlog!("{noun}: {e}");
+                self.not_drawing.set(Some(Instant::now()));
+                self.set("waiting", e.to_string(), 0, 0);
+            }
+            Err(e) => self.set("error", format!("Rendering stopped: {e:#}"), done, total),
+            Ok(_) => {}
         }
     }
 }
