@@ -1359,3 +1359,15 @@ a.lg-match:hover { background: var(--row-hi); }
 [data-nav][hidden] { display: none !important; }
 
 .silent-note { display: flex; align-items: center; gap: 16px; justify-content: space-between; flex-wrap: wrap; margin-bottom: 14px; }
+
+.gn-callouts { margin: 0 0 14px; }
+.gn-callout-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px 14px; padding: 4px 20px 18px; }
+.gn-callout { display: grid; gap: 4px; }
+.gn-callout input, .gn-rename-in { background: var(--row); border: 1px solid var(--line-2); border-radius: var(--radius-sm); color: var(--text); font: inherit; padding: 6px 9px; }
+.gn-rename-in { font-weight: 700; min-width: 0; flex: 1; }
+.btn.small { padding: 3px 9px; font-size: 12px; }
+
+.gn-from-g { cursor: pointer; }
+.gn-from-g.dim { opacity: 0.35; }
+.gn-hit { fill: transparent; stroke: none; }
+.gn-spawn { cursor: pointer; }

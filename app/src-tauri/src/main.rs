@@ -272,6 +272,13 @@ fn render_clips(state: State<AppState>, items: Vec<(String, String)>) {
     let _ = state.jobs.lock().unwrap().send(Job::RenderClips(items));
 }
 
+/// Saves the user's names for map areas and lineups (`callouts.json` in the library).
+#[tauri::command]
+fn save_callouts(state: State<AppState>, callouts: serde_json::Value) -> Result<(), String> {
+    let lib = state.settings.lock().unwrap().library_dir.clone();
+    std::fs::write(lib.join("callouts.json"), serde_json::to_string_pretty(&callouts).map_err(|e| e.to_string())?).map_err(|e| e.to_string())
+}
+
 /// The silent output device CS2's sound is recorded through, if this PC has one.
 #[tauri::command]
 fn silent_audio_device(state: State<AppState>) -> Option<String> {
@@ -565,7 +572,8 @@ fn main() {
             save_debug_log,
             league_division,
             silent_audio_device,
-            rerender_silent_clips
+            rerender_silent_clips,
+            save_callouts
         ])
         .setup(move |app| {
             // Clips, thumbnails and match data are served from the library folder only.

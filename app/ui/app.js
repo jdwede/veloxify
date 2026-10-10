@@ -3020,6 +3020,42 @@ function renderProfile(view) {
 
 // lineups.json (each map's totals; built from every match's throws, the same lineup grouped and
 // counted), each map's lineups (lineups/<map>.json, loaded when needed) and the videos made so far.
+// Your names for map areas and lineups (callouts.json in the library): { maps: { de_ancient:
+// { places: { Outside: "Elbow" }, names: { <lineup id>: "CT Instant Elbow Smoke" } } } }.
+async function loadCallouts() {
+  if (!state.callouts) {
+    try { state.callouts = await (await fetch(assetUrl("callouts.json"), { cache: "no-store" })).json(); } catch (e) { state.callouts = null; }
+    state.callouts = state.callouts && state.callouts.maps ? state.callouts : { maps: {} };
+  }
+  return state.callouts;
+}
+function mapCallouts(map) {
+  const c = state.callouts || { maps: {} };
+  return (c.maps[map] = c.maps[map] || { places: {}, names: {} });
+}
+async function saveCallouts() {
+  if (tauri) await tauri.core.invoke("save_callouts", { callouts: state.callouts });
+}
+// An area's name: yours, else the default (NA) callout, else CS2's own name spaced out.
+const areaName = (d, map, place) => (place ? mapCallouts(map).places[place] || d.callouts?.[place] || placeName2(place) : "");
+// Every lineup's name on a map: yours, else "CT Instant Elbow Smoke" / "T Window Smoke", with
+// the spawn or where it's thrown from when two would read the same.
+function lineupNames(d, map) {
+  const KIND = { smoke: "Smoke", molotov: "Molotov", flash: "Flash", he: "HE" };
+  const base = (l) => `${l.side} ${l.category === "instant" ? "Instant " : ""}${l.to_place ? `${areaName(d, map, l.to_place)} ` : ""}${KIND[l.kind] || "HE"}`;
+  const seen = new Map();
+  for (const l of d.lineups) seen.set(base(l), (seen.get(base(l)) || 0) + 1);
+  const taken = new Map(), out = new Map(), mine = mapCallouts(map).names;
+  for (const l of d.lineups) {
+    let name = base(l);
+    if (seen.get(name) > 1) name = l.category === "instant" && l.spawn ? `${name} · Spawn ${l.spawn}` : l.from_place ? `${name} from ${areaName(d, map, l.from_place)}` : name;
+    const n = (taken.get(name) || 0) + 1;
+    taken.set(name, n);
+    out.set(l.id, mine[l.id] || (n > 1 ? `${name} #${n}` : name));
+  }
+  return out;
+}
+
 async function loadMapLineups(map) {
   state.mapLineups = state.mapLineups || new Map();
   if (!state.mapLineups.has(map)) {
@@ -3040,7 +3076,7 @@ async function loadLineups(force = false) {
   return state.lineups;
 }
 const NADE_KINDS = [["smoke", "Smokes", "smokegrenade"], ["molotov", "Molotovs", "molotov"], ["flash", "Flashes", "flashbang"], ["he", "HEs", "hegrenade"]];
-const grenades = { kinds: new Set(["smoke", "molotov", "flash", "he"]), category: "instant", side: "all", min: 2, videoOnly: false, sel: null, zoom: 1, pan: [0, 0], map: null };
+const grenades = { kinds: new Set(["smoke", "molotov", "flash", "he"]), category: "instant", side: "all", min: 2, spawn: null, videoOnly: false, sel: null, zoom: 1, pan: [0, 0], map: null };
 const placeName2 = (s) => (s || "").replace(/([a-z])([A-Z])/g, "$1 $2").replace("Bombsite", "Site ");
 const lineupClip = (id) => state.lineupClips?.[id];
 // A lineup's thumbnail: its video's frame (plays on hover) or a placeholder.
@@ -3057,7 +3093,7 @@ async function renderGrenades(view, map) {
     return;
   }
   if (map && L.maps[map]) {
-    const d = await loadMapLineups(map);
+    const [d] = await Promise.all([loadMapLineups(map), loadCallouts()]);
     if (d) return renderGrenadeMap(view, d, map);
   }
   // Every map: its picture, how many lineups of each grenade, videos ready.
@@ -3079,9 +3115,12 @@ function renderGrenadeMap(view, d, map) {
   // A map without instant smokes opens on its set lineups.
   if (grenades.category === "instant" && !d.lineups.some((l) => l.category === "instant")) grenades.category = "set";
   const instantView = grenades.category === "instant";
-  const shown = d.lineups.filter((l) => l.category === grenades.category && (instantView || grenades.kinds.has(l.kind))
+  const fromSpawn = (l) => !grenades.spawn || (l.category === "instant" && `${l.side}:${l.spawn}` === grenades.spawn);
+  const shown = d.lineups.filter((l) => l.category === grenades.category && (instantView || grenades.kinds.has(l.kind)) && fromSpawn(l)
     && (grenades.side === "all" || l.side === grenades.side) && l.count >= grenades.min && (!grenades.videoOnly || lineupClip(l.id)?.clip));
   const sel = shown.find((l) => l.id === grenades.sel) || null;
+  const names = lineupNames(d, map);
+  const nm = (l) => names.get(l.id) || l.name;
   loadRadar(map).then((radar) => {
     const size = radar?.size || 1024;
     const at = (x, y) => (radar ? [(x - radar.pos_x) / radar.scale, (radar.pos_y - y) / radar.scale] : [0, 0]);
@@ -3095,19 +3134,36 @@ function renderGrenadeMap(view, d, map) {
       return `<g class="gn-ln ${l.kind} ${on ? "on" : ""} ${dim ? "dim" : ""}" data-gl="${esc(l.id)}">
         <polyline points="${pts.map((p) => p.join(",")).join(" ")}" class="gn-arc" style="stroke-width:${on ? 3.5 : wdt}"/>
         <circle cx="${tx}" cy="${ty}" r="${R[l.kind] / (radar?.scale || 5)}" class="gn-land"/>
-        <circle cx="${fx}" cy="${fy}" r="${on ? 8 : 5}" class="gn-from ${l.side === "T" ? "t" : "ct"}"/>
         ${l.count > 1 ? `<text x="${tx}" y="${ty + 4}" text-anchor="middle" class="gn-count">${l.count}</text>` : ""}
-        <title>${esc(l.name)} · ${l.count}× · ${esc(placeName2(l.from_place))} → ${esc(placeName2(l.to_place))}</title></g>`;
+        <title>${esc(nm(l))} · ${l.count}× · ${esc(areaName(d, map, l.from_place))} → ${esc(areaName(d, map, l.to_place))}</title></g>`;
+    }).join("");
+    // Where each is thrown from, on top of the arcs so it can be clicked too (a wider ring than it looks).
+    const froms = shown.map((l) => {
+      const [fx, fy] = at(l.from[0], l.from[1]);
+      const on = sel?.id === l.id, dim = sel && !on;
+      return `<g class="gn-from-g ${on ? "on" : ""} ${dim ? "dim" : ""}" data-gl="${esc(l.id)}"><circle cx="${fx}" cy="${fy}" r="12" class="gn-hit"/>
+        <circle cx="${fx}" cy="${fy}" r="${on ? 8 : 5}" class="gn-from ${l.side === "T" ? "t" : "ct"}"/><title>${esc(nm(l))} · thrown from ${esc(areaName(d, map, l.from_place) || "here")}</title></g>`;
     }).join("");
     // Spawn spots (instant lineups start from them).
     const spawns = grenades.category === "instant" || sel?.category === "instant" ? Object.entries(d.spawns || {}).flatMap(([side, list]) => (grenades.side === "all" || grenades.side === side ? list.map((p, i) => {
       const [x, y] = at(p[0], p[1]);
-      return `<g class="gn-spawn ${side === "T" ? "t" : "ct"} ${sel?.spawn === i + 1 && sel?.side === side ? "on" : ""}"><circle cx="${x}" cy="${y}" r="9"/><text x="${x}" y="${y + 3.5}" text-anchor="middle">${i + 1}</text></g>`;
+      const n = d.lineups.filter((l) => l.category === "instant" && l.side === side && l.spawn === i + 1).length;
+      return `<g class="gn-spawn ${side === "T" ? "t" : "ct"} ${(sel?.spawn === i + 1 && sel?.side === side) || grenades.spawn === `${side}:${i + 1}` ? "on" : ""}" data-spawn="${side}:${i + 1}"><circle cx="${x}" cy="${y}" r="9"/><text x="${x}" y="${y + 3.5}" text-anchor="middle">${i + 1}</text>
+        <title>${side} spawn ${i + 1}: ${n ? `${n} instant smoke${n === 1 ? "" : "s"} from here` : "no instant smokes from here yet"}</title></g>`;
     }) : [])).join("") : "";
     const svg = view.querySelector("#gn-svg");
-    if (svg) svg.innerHTML = arcs + spawns;
+    if (svg) svg.innerHTML = arcs + froms + spawns;
     if (svg) svg.setAttribute("viewBox", `0 0 ${size} ${size}`);
     view.querySelectorAll("[data-gl]").forEach((g) => (g.onclick = () => { grenades.sel = g.dataset.gl; renderGrenadeMap(view, d, map); }));
+    // A spawn spot: its instant smokes (the most thrown one open).
+    view.querySelectorAll("[data-spawn]").forEach((g) => (g.onclick = () => {
+      const key = g.dataset.spawn;
+      grenades.spawn = grenades.spawn === key ? null : key;
+      grenades.category = "instant";
+      const top = d.lineups.filter((l) => l.category === "instant" && `${l.side}:${l.spawn}` === key).sort((a, b) => b.count - a.count)[0];
+      grenades.sel = grenades.spawn && top ? top.id : null;
+      renderGrenadeMap(view, d, map);
+    }));
   });
 
   const tagList = (l) => Object.entries(l.tags || {}).sort((a, b) => b[1] - a[1]);
@@ -3116,7 +3172,7 @@ function renderGrenadeMap(view, d, map) {
   const counts = Object.fromEntries(NADE_KINDS.map(([k]) => [k, d.lineups.filter((l) => l.kind === k && l.category === "set").length]));
   const nInstant = d.lineups.filter((l) => l.category === "instant").length;
   const kindIcon = (k) => weaponIcon(NADE_KINDS.find((x) => x[0] === k)?.[2] || "smokegrenade");
-  const sub = (l) => `${esc(placeName2(l.from_place) || "?")} → ${esc(placeName2(l.to_place) || "?")}`;
+  const sub = (l) => `${esc(areaName(d, map, l.from_place) || "?")} → ${esc(areaName(d, map, l.to_place) || "?")}`;
   view.innerHTML = `
     <a class="day-back" href="#/grenades">◀ All maps</a>
     <div class="gn-maphead" style="--shot:url('${assetUrl(`mapshots/${map}.png`)}')">${mapIcon(map)}<div><div class="h1">${esc(mapName(map))} lineups</div>
@@ -3126,8 +3182,12 @@ function renderGrenadeMap(view, d, map) {
       ${instantView ? "" : `<div class="chips">${NADE_KINDS.map(([k, label, icon]) => `<button class="chip ${grenades.kinds.has(k) ? "on" : ""}" data-kind="${k}">${weaponIcon(icon)} ${label} <span class="sub">${counts[k]}</span></button>`).join("")}</div>`}
       <div class="seg" id="gn-side">${[["all", "Both"], ["T", "T"], ["CT", "CT"]].map(([k, l]) => `<button data-side="${k}" class="${grenades.side === k ? "on" : ""}">${l}</button>`).join("")}</div>
       <label class="gn-min">Thrown at least <select id="gn-min">${[2, 3, 5, 10].map((n) => `<option value="${n}" ${grenades.min === n ? "selected" : ""}>${n}×</option>`).join("")}</select></label>
+      ${grenades.spawn ? `<button class="chip on" id="gn-spawn-clear" title="Show every spawn">${esc(grenades.spawn.replace(":", " spawn "))} ✕</button>` : ""}
       <label class="gn-min"><input type="checkbox" id="gn-vid" ${grenades.videoOnly ? "checked" : ""}> Only with video</label>
+      ${tauri ? `<button class="btn ghost" id="gn-callouts">${grenades.calloutsOpen ? "Done" : "Callouts"}</button>` : ""}
     </div>
+    ${grenades.calloutsOpen ? `<section class="panel gn-callouts"><div class="panel-head"><div class="h3">${esc(mapName(map))} callouts</div><span class="grow"></span><span class="sub">Rename an area and every lineup thrown from or landing there uses your name</span></div>
+      <div class="gn-callout-list">${Object.keys(d.callouts || {}).sort().map((place) => `<label class="gn-callout"><span class="sub">${esc(placeName2(place))}</span><input data-place="${esc(place)}" value="${esc(areaName(d, map, place))}" maxlength="40"></label>`).join("")}</div></section>` : ""}
     <div class="gn-main">
       <section class="tl-map"><div class="tl-viewport"><div class="tl-canvas" style="transform:translate(${grenades.pan[0]}px,${grenades.pan[1]}px) scale(${grenades.zoom})">
         <img src="${assetUrl(`radars/${map}.png`)}" alt="${esc(mapName(map))} radar" draggable="false"><svg id="gn-svg" viewBox="0 0 1024 1024"></svg></div></div>
@@ -3137,7 +3197,8 @@ function renderGrenadeMap(view, d, map) {
           <div class="gn-video">${clip?.clip ? `<video id="gn-video" src="${assetUrl(clip.clip)}" controls autoplay muted loop playsinline></video>`
             : clip?.too_old ? `<div class="gn-novideo"><b>No video</b><span>Every time this was thrown, it was in a demo from before a CS2 update, and CS2 can't play those demos any more. It gets a video the next time it's thrown in one of your matches.</span></div>`
             : `<div class="gn-novideo">${clip?.error ? `<b>No video</b><span>${esc(clip.error)}</span>` : `<b>No video yet</b><span>Veloxify films lineups in the background after your highlights, most thrown first.</span>`}${tauri ? `<button class="btn primary" id="gn-render">Film this lineup now</button>` : ""}</div>`}</div>
-          <div class="gn-title">${kindIcon(sel.kind)}<b>${esc(sel.name)}</b>${sel.spawn ? `<span class="gn-spawnchip">Spawn #${sel.spawn}</span>` : ""}<span class="gn-x">×${sel.count}</span></div>
+          <div class="gn-title">${kindIcon(sel.kind)}${grenades.renaming ? `<input class="gn-rename-in" id="gn-rename-in" value="${esc(nm(sel))}" maxlength="60" aria-label="Lineup name">` : `<b>${esc(nm(sel))}</b>`}${sel.spawn ? `<span class="gn-spawnchip">Spawn #${sel.spawn}</span>` : ""}<span class="gn-x">×${sel.count}</span>
+            ${tauri ? `<button class="btn ghost small" id="gn-rename">${grenades.renaming ? "Save" : "Rename"}</button>${mapCallouts(map).names[sel.id] && !grenades.renaming ? `<button class="btn ghost small" id="gn-rename-reset" title="Back to the automatic name">Reset</button>` : ""}` : ""}</div>
           <div class="sub">${sub(sel)} · ${sel.side} · thrown ${sel.count} time${sel.count === 1 ? "" : "s"} in ${sel.matches} match${sel.matches === 1 ? "" : "es"} by ${sel.throwers} player${sel.throwers === 1 ? "" : "s"} · about ${Math.round(sel.t)} seconds into the round</div>
           <div class="gn-tags">${tagList(sel).map(([t, n]) => `<span class="tag ${t === sel.technique ? "main" : ""}">${esc(t)}${n < sel.count ? ` ${n}×` : ""}</span>`).join("")}<span class="tag">${esc(({ left: "Left click", right: "Right click", both: "Left + right click" })[sel.click] || sel.click)}</span></div>
           <div class="ln-cmd"><code>${esc(setpos)}</code><button class="btn" id="gn-copy">Copy</button></div>
@@ -3146,18 +3207,38 @@ function renderGrenadeMap(view, d, map) {
           <button class="btn ghost" id="gn-back">◀ All lineups</button></div>` : ""}
         <div class="gn-list">${shown.map((l) => `<button class="gn-item ${sel?.id === l.id ? "on" : ""}" data-gl="${esc(l.id)}">
           ${lineupThumb(l)}
-          <div class="gn-item-body"><div class="gn-item-title">${kindIcon(l.kind)}<b>${esc(l.name)}</b>${l.spawn ? `<span class="gn-spawnchip">Spawn #${l.spawn}</span>` : ""}<span class="gn-x">×${l.count}</span></div>
+          <div class="gn-item-body"><div class="gn-item-title">${kindIcon(l.kind)}<b>${esc(nm(l))}</b>${l.spawn ? `<span class="gn-spawnchip">Spawn #${l.spawn}</span>` : ""}<span class="gn-x">×${l.count}</span></div>
             <div class="sub">${sub(l)} · ${l.side}</div><div class="gn-item-tag">${esc(l.technique)}</div></div></button>`).join("") || `<div class="empty small">No lineups with these filters.</div>`}</div>
       </section>
     </div>
+    ${d.misses ? `<div class="note">${d.misses} throw${d.misses === 1 ? "" : "s"} that missed (landed off the map, or somewhere a lineup from that spot rarely lands) ${d.misses === 1 ? "is" : "are"} left out.</div>` : ""}
     <div class="note">Instant smokes: smokes thrown in the first two seconds of the round from where the thrower spawned; spawn numbers are the spawn spots on that side of the map. Set lineups: lined up first (standing still with the crosshair held, or a run from a standstill into a jump throw), then thrown. A lineup counts when it was thrown at least twice from the same spot to the same place, whoever threw it.</div>`;
 
   const rerender = () => renderGrenadeMap(view, d, map);
   view.querySelectorAll("[data-kind]").forEach((b) => (b.onclick = () => { const k = b.dataset.kind; if (grenades.kinds.has(k)) grenades.kinds.delete(k); else grenades.kinds.add(k); grenades.sel = null; rerender(); }));
-  view.querySelectorAll("[data-cat]").forEach((b) => (b.onclick = () => { grenades.category = b.dataset.cat; grenades.sel = null; rerender(); }));
-  view.querySelectorAll("[data-side]").forEach((b) => (b.onclick = () => { grenades.side = b.dataset.side; grenades.sel = null; rerender(); }));
+  view.querySelectorAll("[data-cat]").forEach((b) => (b.onclick = () => { grenades.category = b.dataset.cat; grenades.spawn = null; grenades.sel = null; rerender(); }));
+  view.querySelectorAll("[data-side]").forEach((b) => (b.onclick = () => { grenades.side = b.dataset.side; grenades.spawn = null; grenades.sel = null; rerender(); }));
+  view.querySelector("#gn-spawn-clear")?.addEventListener("click", () => { grenades.spawn = null; grenades.sel = null; rerender(); });
   view.querySelector("#gn-min").onchange = (e) => { grenades.min = Number(e.target.value); grenades.sel = null; rerender(); };
   view.querySelector("#gn-vid").onchange = (e) => { grenades.videoOnly = e.target.checked; grenades.sel = null; rerender(); };
+  view.querySelector("#gn-callouts")?.addEventListener("click", () => { grenades.calloutsOpen = !grenades.calloutsOpen; rerender(); });
+  view.querySelectorAll("[data-place]").forEach((i) => (i.onchange = async () => {
+    const v = i.value.trim(), place = i.dataset.place, places = mapCallouts(map).places;
+    if (!v || v === (d.callouts?.[place] || placeName2(place))) delete places[place]; else places[place] = v;
+    await saveCallouts();
+    rerender();
+  }));
+  const saveName = async () => {
+    const input = view.querySelector("#gn-rename-in");
+    const v = input?.value.trim(), mine = mapCallouts(map).names;
+    grenades.renaming = false;
+    if (v) mine[sel.id] = v; else delete mine[sel.id];
+    await saveCallouts();
+    rerender();
+  };
+  view.querySelector("#gn-rename")?.addEventListener("click", () => { if (grenades.renaming) saveName(); else { grenades.renaming = true; rerender(); view.querySelector("#gn-rename-in")?.select(); } });
+  view.querySelector("#gn-rename-in")?.addEventListener("keydown", (e) => { if (e.key === "Enter") saveName(); if (e.key === "Escape") { grenades.renaming = false; rerender(); } });
+  view.querySelector("#gn-rename-reset")?.addEventListener("click", async () => { delete mapCallouts(map).names[sel.id]; await saveCallouts(); rerender(); });
   view.querySelectorAll(".gn-item[data-gl]").forEach((b) => (b.onclick = (e) => { if (e.target.closest(".hl-card")) return; grenades.sel = b.dataset.gl; rerender(); }));
   view.querySelectorAll(".gn-item .hl-card").forEach((c) => (c.onclick = (e) => { e.stopPropagation(); grenades.sel = c.dataset.lineup; rerender(); }));
   view.querySelector("#gn-back")?.addEventListener("click", () => { grenades.sel = null; rerender(); });
@@ -3170,7 +3251,7 @@ function renderGrenadeMap(view, d, map) {
   zoom.oninput = () => { grenades.zoom = Number(zoom.value); if (grenades.zoom === 1) grenades.pan = [0, 0]; apply(); };
   vp.onwheel = (e) => { e.preventDefault(); grenades.zoom = Math.max(1, Math.min(3, grenades.zoom - Math.sign(e.deltaY) * 0.2)); if (grenades.zoom === 1) grenades.pan = [0, 0]; apply(); };
   vp.onpointerdown = (e) => {
-    if (grenades.zoom === 1 || e.target.closest("[data-gl]")) return;
+    if (grenades.zoom === 1 || e.target.closest("[data-gl],[data-spawn]")) return;
     const start = [e.clientX - grenades.pan[0], e.clientY - grenades.pan[1]];
     vp.setPointerCapture(e.pointerId);
     vp.onpointermove = (ev) => { grenades.pan = [ev.clientX - start[0], ev.clientY - start[1]]; apply(); };

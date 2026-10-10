@@ -31,8 +31,18 @@ const LINED_STILL_S: f32 = 0.5;
 const LINED_JUMP_STILL_S: f32 = 0.2;
 const LINED_AIM: f32 = 1.0;
 const MIN_FLIGHT: f32 = 250.0;
+/// A smoke or molotov landing farther than this from anywhere a player has stood (in the
+/// library's kills) is off the map or on a roof: a miss.
+const OFF_MAP: f32 = 150.0;
+/// From the same spot, a landing thrown at most this many times and under this share of that
+/// spot's most thrown landing is a miss of it (players hit their lineups far more often than not).
+const RARE_MAX: usize = 4;
+const RARE_SHARE: f32 = 0.10;
+/// ... aimed within this many degrees of it (a different aim from the same spot is a different
+/// lineup, not a miss).
+const MISS_AIM: f32 = 5.0;
 /// Bumped when the rules above change: `lineups.json` from older rules is rebuilt.
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
 /// Spawn spots closer than this are one spot.
 const SPAWN_RADIUS: f32 = 48.0;
 /// Example throws kept per lineup.
@@ -84,6 +94,13 @@ pub struct MapLineups {
     /// Spawn spots per side: [x, y] by number (Spawn #1 is the first).
     pub spawns: BTreeMap<String, Vec<[f32; 2]>>,
     pub lineups: Vec<Lineup>,
+    /// Throw groups left out as misses (off the map, or a rare landing from a lineup's spot).
+    #[serde(default)]
+    pub misses: usize,
+    /// The CS2 areas this map's lineups are thrown from and land in, with their default (NA)
+    /// callouts; the app shows the user's own names instead where they've renamed them.
+    #[serde(default)]
+    pub callouts: BTreeMap<String, String>,
     /// Which lineup each of this map's throws belongs to: "<match id>@<tick>" -> lineup id.
     #[serde(default)]
     pub by_throw: BTreeMap<String, String>,
@@ -161,6 +178,48 @@ pub fn technique_tag(t: &DThrow) -> String {
         "walk" | "run" => "Moving throw".into(),
         _ => "Standing throw".into(),
     }
+}
+
+/// A CS2 area name ("TopofMid", "SnipersNest") the way NA players say it ("Top Mid", "Window").
+/// People rename them in the app (the Grenades page); this is the starting point.
+pub fn callout(map: &str, place: &str) -> String {
+    let named = match (map, place) {
+        (_, "BombsiteA") => "A Site",
+        (_, "BombsiteB") => "B Site",
+        (_, "CTSpawn") => "CT Spawn",
+        (_, "TSpawn") => "T Spawn",
+        (_, "TopofMid") => "Top Mid",
+        (_, "Middle") | (_, "Mid") => "Mid",
+        ("de_mirage", "SnipersNest") => "Window",
+        ("de_mirage", "Apartments") | ("de_inferno", "Apartments") => "Apps",
+        ("de_mirage", "PalaceInterior") => "Palace",
+        ("de_mirage", "Shop") => "Market",
+        ("de_mirage", "Catwalk") => "Short",
+        ("de_dust2", "LongA") => "Long",
+        ("de_dust2", "Catwalk") => "Short",
+        ("de_dust2", "UpperTunnel") => "Upper Tunnels",
+        ("de_dust2", "LowerTunnel") => "Lower Tunnels",
+        ("de_dust2", "OutsideTunnel") => "Outside Tunnels",
+        ("de_dust2", "ExtendedA") => "A Plat",
+        _ => "",
+    };
+    if !named.is_empty() {
+        return named.into();
+    }
+    // "LongDoors" -> "Long Doors", "TRamp" -> "T Ramp", "BackofB" -> "Back of B".
+    let mut out = String::new();
+    let chars: Vec<char> = place.chars().collect();
+    for (i, c) in chars.iter().enumerate() {
+        let next_lower = chars.get(i + 1).is_some_and(|n| n.is_lowercase());
+        if i > 0 && c.is_uppercase() && (chars[i - 1].is_lowercase() || next_lower) {
+            out.push(' ');
+        }
+        if i > 0 && *c == 'o' && chars.get(i + 1) == Some(&'f') && chars.get(i + 2).is_some_and(|n| n.is_uppercase()) && chars[i - 1].is_lowercase() {
+            out.push(' ');
+        }
+        out.push(*c);
+    }
+    out.trim().to_string()
 }
 
 /// A smoke thrown in the first moments of the round from where the thrower spawned.
@@ -343,10 +402,45 @@ pub fn write(root: &Path) -> Result<()> {
                 .unwrap_or_default()
         };
 
+        // Misses: smokes and molotovs landing where no player has stood (off the map, on a roof),
+        // and rare landings from a spot whose lineup usually lands elsewhere.
+        let stood: Vec<[f32; 2]> = places.get(map).map(|pl| pl.iter().map(|(p, _)| *p).collect()).unwrap_or_default();
+        let off_map = |to: [f32; 2]| !stood.is_empty() && stood.iter().all(|p| (p[0] - to[0]).hypot(p[1] - to[1]) > OFF_MAP);
+        // A group's aim: its throws' average (yaw around the first one's, so it doesn't wrap).
+        let aim = |g: &Group| -> (f32, f32) {
+            let y0 = g.members[0].1.yaw;
+            let n = g.members.len() as f32;
+            let pitch = g.members.iter().map(|(_, t)| t.pitch).sum::<f32>() / n;
+            let yaw = y0 + g.members.iter().map(|(_, t)| ((t.yaw - y0 + 540.0).rem_euclid(360.0)) - 180.0).sum::<f32>() / n;
+            (pitch, yaw)
+        };
+        let top_from_spot = |g: &Group| -> usize {
+            let (p, y) = aim(g);
+            groups
+                .iter()
+                .filter(|h| h.instant == g.instant && h.kind == g.kind && h.side == g.side && (h.at[0] - g.at[0]).hypot(h.at[1] - g.at[1]) < SAME_SPOT)
+                .filter(|h| {
+                    let (hp, hy) = aim(h);
+                    (hp - p).abs() < MISS_AIM && ((hy - y + 540.0).rem_euclid(360.0) - 180.0).abs() < MISS_AIM
+                })
+                .map(|h| h.members.len())
+                .max()
+                .unwrap_or(0)
+        };
+        let missed = |g: &Group| -> bool {
+            let n = g.members.len();
+            ((g.kind == "smoke" || g.kind == "molotov") && off_map(g.to)) || (n <= RARE_MAX && (n as f32) < RARE_SHARE * top_from_spot(g) as f32)
+        };
+        let mut misses = 0;
+
         let mut lineups: Vec<Lineup> = vec![];
         let mut used_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
         for g in &groups {
             let n = g.members.len();
+            if missed(g) {
+                misses += 1;
+                continue;
+            }
             // A lineup is thrown again: in at least two different rounds.
             let mut rounds: Vec<(&str, u32)> = g.members.iter().map(|(m, t)| (*m, t.round)).collect();
             rounds.sort_unstable();
@@ -431,20 +525,36 @@ pub fn write(root: &Path) -> Result<()> {
                 examples: newest.iter().take(EXAMPLES).map(|m| occ(*m)).collect(),
             });
         }
-        // Names: the most thrown first within each category and kind.
+        // Names, the way you'd call them: "CT Instant Elbow Smoke", "T Window Smoke"; where it's
+        // thrown from when two would read the same, then a number. Most thrown first.
         lineups.sort_by(|a, b| b.count.cmp(&a.count).then(b.matches.cmp(&a.matches)).then(a.id.cmp(&b.id)));
-        let mut rank: HashMap<(String, String), usize> = HashMap::new();
-        for l in lineups.iter_mut() {
-            let n = rank.entry((l.category.clone(), l.kind.clone())).or_default();
-            *n += 1;
+        let base = |l: &Lineup| {
             let kind = match l.kind.as_str() {
                 "smoke" => "Smoke",
                 "molotov" => "Molotov",
                 "flash" => "Flash",
                 _ => "HE",
             };
-            let cat = if l.category == "instant" { "Instant" } else { "Set" };
-            l.name = format!("{cat} {kind} #{n}");
+            let to = if l.to_place.is_empty() { String::new() } else { format!("{} ", callout(map, &l.to_place)) };
+            format!("{} {}{to}{kind}", l.side, if l.category == "instant" { "Instant " } else { "" })
+        };
+        let mut seen: HashMap<String, usize> = HashMap::new();
+        for l in &lineups {
+            *seen.entry(base(l)).or_default() += 1;
+        }
+        let mut taken: HashMap<String, usize> = HashMap::new();
+        for l in lineups.iter_mut() {
+            let mut name = base(l);
+            if seen[&name] > 1 {
+                name = match (l.category.as_str(), l.spawn) {
+                    ("instant", Some(s)) => format!("{name} · Spawn {s}"),
+                    _ if !l.from_place.is_empty() => format!("{name} from {}", callout(map, &l.from_place)),
+                    _ => name,
+                };
+            }
+            let n = taken.entry(name.clone()).or_default();
+            *n += 1;
+            l.name = if *n > 1 { format!("{name} #{n}") } else { name };
         }
         let mut counts: BTreeMap<String, usize> = BTreeMap::new();
         for l in &lineups {
@@ -454,7 +564,21 @@ pub fn write(root: &Path) -> Result<()> {
         let by_throw: BTreeMap<String, String> = out.by_throw.iter().filter(|(_, id)| ids.contains(id.as_str())).map(|(k, v)| (k.clone(), v.clone())).collect();
         out.maps.insert(
             map.clone(),
-            MapLineups { counts, throws: throws.len(), matches: matches_on.get(map).copied().unwrap_or(0), spawns: spots, lineups, by_throw },
+            MapLineups {
+                counts,
+                throws: throws.len(),
+                matches: matches_on.get(map).copied().unwrap_or(0),
+                spawns: spots,
+                callouts: lineups
+                    .iter()
+                    .flat_map(|l| [&l.from_place, &l.to_place])
+                    .filter(|p| !p.is_empty())
+                    .map(|p| (p.clone(), callout(map, p)))
+                    .collect(),
+                lineups,
+                misses,
+                by_throw,
+            },
         );
     }
     // A small index for the map list, and a file per map.
