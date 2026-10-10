@@ -98,6 +98,9 @@ pub struct Lowlight {
     pub clip: Option<String>,
     pub thumb: Option<String>,
     pub render_error: Option<String>,
+    /// The clip was recorded without sound.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub no_audio: bool,
 }
 
 /// Your aim and movement every tick of a whiff (64 per second), against the player who killed you.

@@ -27,6 +27,38 @@ fn get(agent: &ureq::Agent, url: &str) -> Result<Value> {
     Ok(v.get("payload").cloned().unwrap_or(v))
 }
 
+/// FACEIT said "too many requests" and kept saying it: stop for now, carry on next time.
+#[derive(Debug)]
+struct Busy;
+impl std::fmt::Display for Busy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("FACEIT is busy (too many requests); the rest is read next time")
+    }
+}
+impl std::error::Error for Busy {}
+
+/// Like `get`, waiting when FACEIT says "too many requests" (as long as it asks, else 10, 30,
+/// then 60 seconds) before giving up with `Busy`.
+fn get_patient(agent: &ureq::Agent, url: &str) -> Result<Value> {
+    for backoff in [10u64, 30, 60, 0] {
+        match agent.get(url).call() {
+            Ok(r) => {
+                let v: Value = r.into_json()?;
+                return Ok(v.get("payload").cloned().unwrap_or(v));
+            }
+            Err(ureq::Error::Status(429, r)) => {
+                if backoff == 0 {
+                    break;
+                }
+                let wait = r.header("retry-after").and_then(|s| s.trim().parse::<u64>().ok()).unwrap_or(backoff).min(120);
+                std::thread::sleep(Duration::from_secs(wait));
+            }
+            Err(e) => return Err(anyhow::Error::new(e).context(format!("FACEIT: {url}"))),
+        }
+    }
+    Err(Busy.into())
+}
+
 /// A league game's competition, as FACEIT names it: "S59 NA Open9-10 East A - Regular Season".
 pub fn is_league(competition: &str) -> bool {
     let c = competition.trim();
@@ -149,6 +181,249 @@ fn fetch(lib: &Path) -> Result<Value> {
         "finished": finished,
         "scheduled": scheduled,
     }))
+}
+
+/// To be ranked, a player needs this share of the games played so far this season.
+const MIN_SHARE: f64 = 0.7;
+/// The per-player numbers kept from FACEIT's match stats (summed over a player's maps).
+const SUMS: &[(&str, &str)] = &[
+    ("i6", "kills"),
+    ("i7", "assists"),
+    ("i8", "deaths"),
+    ("i9", "mvps"),
+    ("i13", "headshots"),
+    ("i40", "k2"),
+    ("i14", "k3"),
+    ("i15", "k4"),
+    ("i16", "k5"),
+    ("i20", "damage"),
+    ("i21", "entry_tries"),
+    ("i22", "entry_wins"),
+    ("i23", "v1_tries"),
+    ("i24", "v1_wins"),
+    ("i25", "v2_tries"),
+    ("i26", "v2_wins"),
+    ("i27", "flashed"),
+    ("i30", "utility_damage"),
+    ("i34", "clutch_kills"),
+    ("i35", "first_kills"),
+    ("i38", "pistol_kills"),
+    ("i39", "sniper_kills"),
+];
+
+/// Every player in your conference this season, from each league match's FACEIT stats (cached
+/// in `league_matches.json`: finished matches never change, so each is fetched once): totals,
+/// K/R, ADR, HLTV Rating 1.0, and whether they've played enough games to be ranked.
+pub fn division(lib: &Path) -> Result<Value> {
+    let lg = league(lib, false)?;
+    let championship = lg["championship_id"].as_str().unwrap_or_default().to_string();
+    if championship.is_empty() {
+        bail!("no league season found");
+    }
+    let standings = lg["standings"].as_array().cloned().unwrap_or_default();
+    let teams: Vec<String> = standings.iter().filter_map(|t| t["premade_team_id"].as_str().map(String::from)).collect();
+    let path = lib.join("league_matches.json");
+    let mut cache: Value = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+        .filter(|c| c["championship"].as_str() == Some(championship.as_str()))
+        .unwrap_or_else(|| json!({ "championship": championship, "teams": {}, "stats": {} }));
+    let agent = agent();
+    let now = chrono::Utc::now().timestamp();
+    // FACEIT allows a request every so often: keep well under it.
+    let pause = || std::thread::sleep(Duration::from_millis(1000));
+    let mut changed = false;
+    let mut busy = false;
+    // Each team's finished league matches, read again once the standings say it played more.
+    let played_by: std::collections::HashMap<&str, usize> =
+        standings.iter().filter_map(|t| Some((t["premade_team_id"].as_str()?, t["matches"].as_u64().unwrap_or(0) as usize))).collect();
+    for t in &teams {
+        let known = cache["teams"][t]["matches"].as_array().map(|a| a.len());
+        if known.is_some_and(|k| k >= played_by.get(t.as_str()).copied().unwrap_or(0)) {
+            continue;
+        }
+        let url = format!(
+            "https://api.faceit.com/team-leagues/v2/matches?championship_ids={championship}&entityId={t}&entityType=PREMADE_TEAM&status=MATCH_STATUS_FINISHED&offset=0&limit=40"
+        );
+        match get_patient(&agent, &url) {
+            Ok(v) => {
+                // Each match lists both teams: the opponent's games are known too.
+                let items = v.as_array().or_else(|| v["items"].as_array()).cloned().unwrap_or_default();
+                for m in &items {
+                    let Some(id) = m["id"].as_str() else { continue };
+                    let sides: Vec<String> = m["factions"].as_array().into_iter().flatten().filter_map(|f| f["premade_team_id"].as_str().map(String::from)).collect();
+                    for side in sides.iter().chain(std::iter::once(t)) {
+                        if cache["teams"][side.as_str()].is_null() {
+                            cache["teams"][side.as_str()] = json!({ "matches": [] });
+                        }
+                        let list = cache["teams"][side.as_str()]["matches"].as_array_mut().expect("matches is a list");
+                        if !list.iter().any(|x| x.as_str() == Some(id)) {
+                            list.push(json!(id));
+                        }
+                    }
+                }
+                cache["teams"][t.as_str()]["checked"] = json!(now);
+                changed = true;
+            }
+            Err(e) if e.downcast_ref::<Busy>().is_some() => {
+                busy = true;
+                break;
+            }
+            Err(_) => {}
+        }
+        pause();
+    }
+    // Each match's stats, once.
+    let ids: std::collections::BTreeSet<String> = cache["teams"]
+        .as_object()
+        .into_iter()
+        .flat_map(|o| o.values())
+        .flat_map(|t| t["matches"].as_array().cloned().unwrap_or_default())
+        .filter_map(|v| v.as_str().map(String::from))
+        .collect();
+    for id in &ids {
+        if busy || cache["stats"].get(id).is_some() {
+            continue;
+        }
+        match get_patient(&agent, &format!("https://api.faceit.com/stats/v1/stats/matches/{id}")) {
+            Ok(v) if v.as_array().is_some_and(|maps| !maps.is_empty()) => {
+                cache["stats"][id.as_str()] = slim(&v);
+                changed = true;
+            }
+            Err(e) if e.downcast_ref::<Busy>().is_some() => busy = true,
+            _ => {}
+        }
+        pause();
+    }
+    if changed {
+        let _ = std::fs::write(&path, serde_json::to_string(&cache)?);
+    }
+
+    // Games played so far this season: the typical team's count.
+    let mut played: Vec<i64> = standings.iter().filter_map(|t| t["matches"].as_i64()).filter(|n| *n > 0).collect();
+    played.sort_unstable();
+    let season_games = played.get(played.len() / 2).copied().unwrap_or(0);
+    let min_games = ((season_games as f64 * MIN_SHARE).ceil() as i64).max(1);
+
+    struct P {
+        nickname: String,
+        team: String,
+        matches: std::collections::BTreeSet<String>,
+        maps: u32,
+        rounds: f64,
+        sums: std::collections::HashMap<&'static str, f64>,
+    }
+    let mut players: std::collections::BTreeMap<String, P> = Default::default();
+    let n = |v: &Value| v.as_str().and_then(|s| s.parse::<f64>().ok()).or_else(|| v.as_f64()).unwrap_or(0.0);
+    for (mid, maps) in cache["stats"].as_object().into_iter().flatten() {
+        for m in maps.as_array().into_iter().flatten() {
+            let rounds = n(&m["rounds"]);
+            for team in m["teams"].as_array().into_iter().flatten() {
+                for pl in team["players"].as_array().into_iter().flatten() {
+                    let Some(id) = pl["playerId"].as_str() else { continue };
+                    let p = players.entry(id.to_string()).or_insert_with(|| P {
+                        nickname: String::new(),
+                        team: String::new(),
+                        matches: Default::default(),
+                        maps: 0,
+                        rounds: 0.0,
+                        sums: Default::default(),
+                    });
+                    p.nickname = pl["nickname"].as_str().unwrap_or_default().to_string();
+                    p.team = team["name"].as_str().unwrap_or_default().to_string();
+                    p.matches.insert(mid.clone());
+                    p.maps += 1;
+                    p.rounds += rounds;
+                    for (k, name) in SUMS {
+                        *p.sums.entry(name).or_default() += n(&pl[*k]);
+                    }
+                }
+            }
+        }
+    }
+    let out: Vec<Value> = players
+        .into_iter()
+        .filter(|(_, p)| p.rounds > 0.0)
+        .map(|(id, p)| {
+            let g = |k: &str| p.sums.get(k).copied().unwrap_or(0.0);
+            let (k, d, r) = (g("kills"), g("deaths"), p.rounds);
+            let (k2, k3, k4, k5) = (g("k2"), g("k3"), g("k4"), g("k5"));
+            // HLTV Rating 1.0: kills, survival and multi-kill rounds per round against the averages.
+            let k1 = (k - 2.0 * k2 - 3.0 * k3 - 4.0 * k4 - 5.0 * k5).max(0.0);
+            let rating1 = (k / r / 0.679 + 0.7 * ((r - d).max(0.0) / r) / 0.317 + (k1 + 4.0 * k2 + 9.0 * k3 + 16.0 * k4 + 25.0 * k5) / r / 1.277) / 2.7;
+            let games = p.matches.len() as i64;
+            let mut v = json!({
+                "id": id,
+                "nickname": p.nickname,
+                "team": p.team,
+                "matches": games,
+                "maps": p.maps,
+                "rounds": r,
+                "kr": k / r,
+                "kd": k / d.max(1.0),
+                "adr": g("damage") / r,
+                "hs": if k > 0.0 { g("headshots") / k * 100.0 } else { 0.0 },
+                "rating1": rating1,
+                "multi": k3 + k4 + k5,
+                "eligible": games >= min_games,
+            });
+            for (_, name) in SUMS {
+                v[*name] = json!(g(name));
+            }
+            v
+        })
+        .collect();
+    Ok(json!({
+        "fetched_at": now,
+        "season_games": season_games,
+        "min_games": min_games,
+        "min_share": MIN_SHARE,
+        "matches_read": cache["stats"].as_object().map_or(0, |o| o.len()),
+        "matches_known": ids.len(),
+        "teams_read": teams
+            .iter()
+            .filter(|t| cache["teams"][t.as_str()]["matches"].as_array().map_or(0, |a| a.len()) >= played_by.get(t.as_str()).copied().unwrap_or(0))
+            .count(),
+        "teams": teams.len(),
+        "busy": busy,
+        "players": out,
+    }))
+}
+
+/// A match's stats, only what the division table uses: per map, its rounds, and each team's name
+/// and players' numbers.
+fn slim(v: &Value) -> Value {
+    let maps: Vec<Value> = v
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|m| {
+            let teams: Vec<Value> = m["teams"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|t| {
+                    let players: Vec<Value> = t["players"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .map(|p| {
+                            let mut o = serde_json::Map::new();
+                            for k in ["playerId", "nickname"].into_iter().chain(SUMS.iter().map(|(k, _)| *k)) {
+                                if let Some(x) = p.get(k) {
+                                    o.insert(k.to_string(), x.clone());
+                                }
+                            }
+                            Value::Object(o)
+                        })
+                        .collect();
+                    json!({ "name": t["i5"], "id": t["teamId"], "players": players })
+                })
+                .collect();
+            json!({ "rounds": m["i12"], "map": m["i1"], "teams": teams })
+        })
+        .collect();
+    Value::Array(maps)
 }
 
 #[cfg(test)]

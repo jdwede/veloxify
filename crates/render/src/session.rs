@@ -184,6 +184,19 @@ pub fn repair_cut_short_render(steamid64: u64) -> bool {
     Protector::new(steam::user_cfg_dir(steamid64), PathBuf::new()).restore_video().unwrap_or(false)
 }
 
+/// Output devices that play to nothing, for CS2's sound while it records (so it's captured but
+/// nobody hears it): the profile's, else Steam's (installed with Remote Play), else VB-CABLE.
+const SILENT_DEVICES: &[&str] = &["Steam Streaming Speakers", "CABLE Input", "VB-Audio Virtual Cable"];
+
+/// The silent output device to record CS2's sound through (id, name), if this PC has one.
+pub fn silent_device(preferred: &str) -> Option<(String, String)> {
+    let devices = cs2hl_capture::audio::output_devices().ok()?;
+    std::iter::once(preferred)
+        .chain(SILENT_DEVICES.iter().copied())
+        .filter(|want| !want.trim().is_empty())
+        .find_map(|want| devices.iter().find(|(_, name)| name.to_lowercase().contains(&want.to_lowercase())).cloned())
+}
+
 pub fn cs2_running() -> bool {
     cs2_pid().is_some()
 }
@@ -201,16 +214,14 @@ impl Renderer {
         let mut console: Vec<(String, String)> = vec![];
         let mut audio = None;
         if profile.audio.enabled {
-            let silent = cs2hl_capture::audio::output_devices()?
-                .into_iter()
-                .find(|(_, name)| name.to_lowercase().contains(&profile.audio.silent_device.to_lowercase()));
+            let silent = silent_device(&profile.audio.silent_device);
             match silent {
                 Some((id, _)) => {
                     console.push(("sound_device_override".into(), id));
                     console.push(("volume".into(), profile.audio.game_volume.to_string()));
                     audio = Some(profile.audio.clone());
                 }
-                None => log(&format!("no '{}' output device; rendering without audio", profile.audio.silent_device)),
+                None => log(&format!("no silent audio device ('{}', VB-CABLE); recording without sound", profile.audio.silent_device)),
             }
         }
         console.extend(profile.console.iter().map(|(k, v)| (k.clone(), v.clone())));
@@ -704,6 +715,11 @@ impl Renderer {
         })();
         let _ = std::fs::remove_dir_all(&tmp);
         result
+    }
+
+    /// Whether CS2's sound is being recorded (a silent output device was found).
+    pub fn records_audio(&self) -> bool {
+        self.audio.is_some()
     }
 
     /// Whether the session was stopped because someone tried to use CS2.

@@ -274,14 +274,17 @@ pub fn render(
             Ok(()) => {
                 let thumb = format!("clips/{hid}.jpg");
                 let thumb = make_thumb(&lib.join(&rel), &lib.join(&thumb)).is_ok().then_some(thumb);
+                let no_audio = !renderer.records_audio();
                 match (hi, li) {
                     (Some(i), _) => {
                         m.highlights[i].clip = Some(rel);
                         m.highlights[i].thumb = thumb;
+                        m.highlights[i].no_audio = no_audio;
                     }
                     (None, Some(i)) => {
                         m.lowlights[i].clip = Some(rel);
                         m.lowlights[i].thumb = thumb;
+                        m.lowlights[i].no_audio = no_audio;
                     }
                     _ => {}
                 }
@@ -324,6 +327,101 @@ pub fn render(
         on(Event::Done { rendered, minutes: t0.elapsed().as_secs_f64() / 60.0 });
     }
     Ok(rendered)
+}
+
+/// Whether an MP4 has a sound track: its track list (moov) is at the start of clips Veloxify
+/// makes (or the end of other MP4s), so only those parts are read. `None` if it can't be read.
+pub fn has_audio(path: &Path) -> Option<bool> {
+    use std::io::{Read, Seek, SeekFrom};
+    const PART: u64 = 1 << 20;
+    let mut f = std::fs::File::open(path).ok()?;
+    let len = f.metadata().ok()?.len();
+    let mut buf = vec![];
+    f.by_ref().take(PART).read_to_end(&mut buf).ok()?;
+    if len > PART {
+        f.seek(SeekFrom::Start(len.saturating_sub(PART).max(PART))).ok()?;
+        f.read_to_end(&mut buf).ok()?;
+    }
+    // A track's handler box: "hdlr", 8 more bytes, then its type ("soun" for sound).
+    Some(buf.windows(16).any(|w| &w[..4] == b"hdlr" && &w[12..16] == b"soun"))
+}
+
+/// Marks clips recorded without sound (`no_audio`), checking each clip file once (the ones
+/// checked are kept in `clip_audio_checked.json`). Returns how many it marked.
+pub fn mark_silent_clips(lib: &Path, steamid64: u64) -> usize {
+    let checked_path = lib.join("clip_audio_checked.json");
+    let mut checked: std::collections::BTreeSet<String> =
+        std::fs::read_to_string(&checked_path).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+    let Ok(index) = std::fs::read_to_string(lib.join("index.json")).map_err(anyhow::Error::from).and_then(|t| Ok(serde_json::from_str::<Index>(&t)?)) else {
+        return 0;
+    };
+    let before = checked.len();
+    let mut marked = 0;
+    for summary in &index.matches {
+        let path = lib.join("matches").join(format!("{}.json", summary.id));
+        let Ok(mut m) = load(&path) else { continue };
+        let mut changed = false;
+        let mut check = |clip: &Option<String>, no_audio: &mut bool| {
+            let Some(rel) = clip else { return };
+            if *no_audio || !checked.insert(rel.clone()) {
+                return;
+            }
+            if has_audio(&lib.join(rel)) == Some(false) {
+                *no_audio = true;
+                changed = true;
+                marked += 1;
+            }
+        };
+        for h in m.highlights.iter_mut() {
+            check(&h.clip, &mut h.no_audio);
+        }
+        for l in m.lowlights.iter_mut() {
+            check(&l.clip, &mut l.no_audio);
+        }
+        if changed {
+            let _ = save(&path, &m);
+        }
+    }
+    if checked.len() != before {
+        let _ = std::fs::write(&checked_path, serde_json::to_string(&checked).unwrap_or_default());
+    }
+    if marked > 0 {
+        let _ = cs2hl_core::ingest::rebuild_index(lib, steamid64);
+    }
+    marked
+}
+
+/// The clips recorded without sound, made ready to record again (their clip is cleared; the new
+/// one replaces the file). Returns them, to queue for rendering.
+pub fn reset_silent_clips(lib: &Path, steamid64: u64) -> Vec<(String, String)> {
+    let mut items = vec![];
+    let Ok(index) = std::fs::read_to_string(lib.join("index.json")).map_err(anyhow::Error::from).and_then(|t| Ok(serde_json::from_str::<Index>(&t)?)) else {
+        return items;
+    };
+    for summary in &index.matches {
+        let path = lib.join("matches").join(format!("{}.json", summary.id));
+        let Ok(mut m) = load(&path) else { continue };
+        let mut changed = false;
+        for h in m.highlights.iter_mut().filter(|h| h.no_audio && h.clip.is_some()) {
+            h.clip = None;
+            h.no_audio = false;
+            items.push((summary.id.clone(), h.id.clone()));
+            changed = true;
+        }
+        for l in m.lowlights.iter_mut().filter(|l| l.no_audio && l.clip.is_some()) {
+            l.clip = None;
+            l.no_audio = false;
+            items.push((summary.id.clone(), l.id.clone()));
+            changed = true;
+        }
+        if changed {
+            let _ = save(&path, &m);
+        }
+    }
+    if !items.is_empty() {
+        let _ = cs2hl_core::ingest::rebuild_index(lib, steamid64);
+    }
+    items
 }
 
 /// A rendered lineup video (`lineup_clips.json`, by lineup id).

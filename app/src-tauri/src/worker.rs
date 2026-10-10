@@ -172,6 +172,8 @@ impl Worker {
         // FACEIT data the index hasn't caught up with (changed while CS2 was open). Starts true so
         // the index is rebuilt once per launch, e.g. after an update changed how it's built.
         let mut faceit_dirty = true;
+        // Clips recorded without sound are found once per launch.
+        let mut clips_audio_checked = false;
         // Right tray color from the start (the first import can take a while).
         self.set(if system::cs2_running() { "waiting" } else { "idle" }, "Starting", 0, 0);
         loop {
@@ -228,6 +230,14 @@ impl Worker {
             }
             // CS2 is closed and nothing's rendering: if a render was cut short, put the user's
             // own video settings back before they next start CS2.
+            if !clips_audio_checked {
+                clips_audio_checked = true;
+                let n = batch::mark_silent_clips(&settings.library_dir, me);
+                if n > 0 {
+                    vlog!("{n} clips have no sound");
+                    self.library_changed();
+                }
+            }
             if cs2hl_render::session::repair_cut_short_render(me) {
                 vlog!("put back your CS2 video settings after a render was cut short");
             }

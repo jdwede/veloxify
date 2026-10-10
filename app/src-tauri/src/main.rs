@@ -272,6 +272,28 @@ fn render_clips(state: State<AppState>, items: Vec<(String, String)>) {
     let _ = state.jobs.lock().unwrap().send(Job::RenderClips(items));
 }
 
+/// The silent output device CS2's sound is recorded through, if this PC has one.
+#[tauri::command]
+fn silent_audio_device(state: State<AppState>) -> Option<String> {
+    let profile = cs2hl_render::profile::Profile::load(&state.settings.lock().unwrap().profile).ok();
+    let preferred = profile.map(|p| p.audio.silent_device).unwrap_or_default();
+    cs2hl_render::session::silent_device(&preferred).map(|(_, name)| name)
+}
+
+/// Records the clips that have no sound again (with sound, now that there's a silent device).
+#[tauri::command]
+fn rerender_silent_clips(app: tauri::AppHandle, state: State<AppState>) -> usize {
+    let (lib, me) = library_and_me(&state);
+    let Some(id) = me else { return 0 };
+    let items = cs2hl_render::batch::reset_silent_clips(&lib, id);
+    let n = items.len();
+    if n > 0 {
+        library_changed(&app, &lib, me, true);
+        let _ = state.jobs.lock().unwrap().send(Job::RenderClips(items));
+    }
+    n
+}
+
 #[tauri::command]
 fn delete_clips(app: tauri::AppHandle, state: State<AppState>, ids: Vec<String>) -> Result<usize, String> {
     let (lib, me) = library_and_me(&state);
@@ -442,6 +464,13 @@ async fn league_info(state: State<'_, AppState>, force: bool) -> Result<serde_js
     tauri::async_runtime::spawn_blocking(move || league::league(&lib, force)).await.map_err(|e| e.to_string())?.map_err(|e| e.to_string())
 }
 
+/// Every player in your league conference this season (FACEIT's per-match stats, cached).
+#[tauri::command]
+async fn league_division(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+    let lib = state.settings.lock().unwrap().library_dir.clone();
+    tauri::async_runtime::spawn_blocking(move || league::division(&lib)).await.map_err(|e| e.to_string())?.map_err(|e| e.to_string())
+}
+
 /// Everyone's FACEIT ELO and level in a FACEIT match (cached).
 #[tauri::command]
 async fn faceit_roster(state: State<'_, AppState>, match_id: String) -> Result<std::collections::HashMap<String, players::FaceitPlayer>, String> {
@@ -533,7 +562,10 @@ fn main() {
             lineup_clips,
             save_practice,
             open_link,
-            save_debug_log
+            save_debug_log,
+            league_division,
+            silent_audio_device,
+            rerender_silent_clips
         ])
         .setup(move |app| {
             // Clips, thumbnails and match data are served from the library folder only.

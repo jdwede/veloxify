@@ -3214,8 +3214,91 @@ async function loadLeague(force = false) {
   return state.league;
 }
 
-const leagueView = { sort: "m2", desc: true, shown: 50, teamSort: "rating3", teamDesc: true };
-const LEADER_COLS = [["m2", "Wins"], ["m3", "Kills"], ["m5", "Assists"], ["m4", "Deaths"], ["m10", "3K"], ["m11", "4K"], ["m12", "5K"], ["m13", "HS%"], ["m8", "Rounds"], ["k17", "ADR"], ["m14", "K/R"], ["m1", "Matches"]];
+const leagueView = { sort: "kr", desc: true, shown: 25, allStandings: false, everyone: false, teamSort: "rating3", teamDesc: true };
+const STANDINGS_TOP = 10;
+const LEADERS_TOP = 25;
+// The conference table: [key, header, format, tooltip].
+const DIV_COLS = [
+  ["matches", "Games", (v) => v, "League matches played"],
+  ["rating1", "Rating 1.0", (v) => v.toFixed(2), "HLTV Rating 1.0 from FACEIT's numbers (kills, survival and multi-kill rounds per round; 1.00 is average)"],
+  ["kr", "K/R", (v) => v.toFixed(2), "Kills per round"],
+  ["kd", "K/D", (v) => v.toFixed(2), "Kills per death"],
+  ["adr", "ADR", (v) => v.toFixed(1), "Damage per round"],
+  ["hs", "HS%", (v) => `${Math.round(v)}%`, "Kills that were headshots"],
+  ["kills", "K", (v) => v, "Kills"],
+  ["deaths", "D", (v) => v, "Deaths"],
+  ["multi", "3K+", (v) => v, "Rounds with 3 kills or more"],
+  ["first_kills", "Openers", (v) => v, "First kill of the round"],
+  ["clutches", "Clutches", (v) => v, "1v1 and 1v2 won"],
+  ["sniper_kills", "Sniper", (v) => v, "Kills with the AWP or Scout"],
+  ["pistol_kills", "Pistol", (v) => v, "Kills with pistols"],
+];
+// Season leaders: [title, value of a player, format, what it means]. Qualified players only.
+const AWARDS = [
+  ["Best rating", (p) => p.rating1, (v) => v.toFixed(2), "HLTV Rating 1.0"],
+  ["Most kills", (p) => p.kills, (v) => `${v} kills`, "Season total"],
+  ["Best K/R", (p) => p.kr, (v) => v.toFixed(2), "Kills per round"],
+  ["Highest ADR", (p) => p.adr, (v) => v.toFixed(1), "Damage per round"],
+  ["Best AWPer", (p) => p.sniper_kills, (v) => `${v} kills`, "Most kills with the AWP or Scout"],
+  ["Best rifler", (p) => (p.sniper_kills / Math.max(1, p.kills) < 0.15 ? p.rating1 : -1), (v) => v.toFixed(2), "Best rating among players with under 15% of their kills from snipers"],
+  ["Best pistol player", (p) => p.pistol_kills / p.matches, (v) => `${v.toFixed(1)} a game`, "Kills with pistols per game"],
+  ["Entry king", (p) => p.first_kills / p.matches, (v) => `${v.toFixed(1)} a game`, "Opening kills per game"],
+  ["Clutch king", (p) => p.clutches, (v) => `${v} won`, "1v1 and 1v2 clutches won"],
+  ["Headshot machine", (p) => (p.kills >= 15 ? p.hs : -1), (v) => `${Math.round(v)}%`, "Headshot share (15+ kills)"],
+  ["Utility damage", (p) => p.utility_damage / p.rounds, (v) => `${v.toFixed(1)} a round`, "Grenade damage per round"],
+  ["Multi-kill rounds", (p) => p.multi, (v) => `${v} rounds`, "Rounds with 3 kills or more"],
+];
+
+// Every player in the conference (FACEIT's per-match stats, read once per match and cached).
+async function loadDivision() {
+  if (state.division && Date.now() - state.divisionAt < 10 * 60 * 1000) return state.division;
+  try {
+    state.division = tauri ? await tauri.core.invoke("league_division") : null;
+    state.divisionAt = Date.now();
+  } catch (e) { state.division = state.division || null; }
+  return state.division;
+}
+
+// The conference table and the season leaders, once the division's stats are in.
+function renderDivision(el, D, L, rosterIds, st) {
+  if (!D) {
+    el.innerHTML = `<section class="panel lg-section"><div class="empty small">Couldn't read the conference's match stats from FACEIT. Try Refresh in a bit.</div></section>`;
+    return;
+  }
+  const players = D.players.map((p) => ({ ...p, clutches: (p.v1_wins || 0) + (p.v2_wins || 0) }));
+  const qualified = players.filter((p) => p.eligible);
+  const pool = leagueView.everyone ? players : qualified;
+  const key = leagueView.sort;
+  const sorted = pool.slice().sort((a, b) => ((b[key] ?? 0) - (a[key] ?? 0)) * (leagueView.desc ? 1 : -1) || b.kills - a.kills);
+  const shown = sorted.slice(0, leagueView.shown);
+  const minNote = `${D.min_games} of ${D.season_games} game${D.season_games === 1 ? "" : "s"} played or more (${Math.round(D.min_share * 100)}%)`;
+  const awards = AWARDS.map(([title, val, fmt, what]) => {
+    const top = qualified.map((p) => ({ p, v: val(p) })).filter((x) => Number.isFinite(x.v) && x.v >= 0).sort((a, b) => b.v - a.v).slice(0, 3);
+    if (!top.length) return "";
+    const [w, ...rest] = top;
+    return `<div class="lg-award ${rosterIds.has(w.p.id) ? "me" : ""}"><div class="lg-award-t">${esc(title)}</div>
+      <div class="lg-award-w"><b>${esc(w.p.nickname)}</b><span>${esc(w.p.team)}</span></div>
+      <div class="lg-award-v">${fmt(w.v)}</div>
+      <div class="lg-award-rest">${rest.map((x, i) => `<span>${i + 2}. ${esc(x.p.nickname)} · ${fmt(x.v)}</span>`).join("")}</div>
+      <div class="lg-award-what">${esc(what)}</div></div>`;
+  }).join("");
+  const partial = D.busy || D.teams_read < D.teams
+    ? `<div class="ml-note">So far ${D.teams_read} of ${D.teams} teams' matches are read (FACEIT limits how fast Veloxify can ask). The rest load the next time you open this page.</div>` : "";
+  el.innerHTML = `${partial}
+    <section class="panel lg-section"><div class="panel-head"><div class="h3">Season leaders</div><span class="grow"></span><span class="sub">Players with ${minNote}</span></div>
+      ${qualified.length ? `<div class="lg-awards">${awards}</div>` : `<div class="empty small">No one has played enough games yet.</div>`}</section>
+    <section class="panel lg-section"><div class="panel-head"><div class="h3">Stat leaders</div><span class="grow"></span>
+        <label class="check"><input type="checkbox" id="lg-everyone" ${leagueView.everyone ? "checked" : ""}> Include players under ${D.min_games} game${D.min_games === 1 ? "" : "s"}</label></div>
+      <div class="sub" style="padding:0 20px 8px">${leagueView.everyone ? `Everyone who played` : `Players with ${minNote}`} in ${esc(st.division_name || "the division")} ${esc(st.conference_name || "")}, from ${D.matches_read} league match${D.matches_read === 1 ? "" : "es"}. Click a column to sort.</div>
+      <div class="table-wrap"><table class="lg-table lg-leaders"><thead><tr><th>#</th><th class="left">Player</th>${DIV_COLS.map(([k, t, , tip]) => `<th data-lsort="${k}" title="${esc(tip)}" class="${key === k ? "on" : ""}">${t}${key === k ? (leagueView.desc ? " ↓" : " ↑") : ""}</th>`).join("")}</tr></thead>
+        <tbody>${shown.map((p, i) => `<tr class="${rosterIds.has(p.id) ? "me" : ""} ${p.eligible ? "" : "dim"}"><td>${i + 1}</td><td class="left"><b>${esc(p.nickname)}</b><span class="lg-team-name">${esc(p.team)}</span></td>${DIV_COLS.map(([k, , fmt]) => `<td class="${key === k ? "on" : ""}">${fmt(p[k] ?? 0)}</td>`).join("")}</tr>`).join("")}</tbody></table></div>
+      ${sorted.length > LEADERS_TOP ? `<button class="btn ghost lg-more" id="lg-more">${leagueView.shown > LEADERS_TOP ? `Show top ${LEADERS_TOP}` : `View all ${sorted.length} players`}</button>` : ""}</section>
+    <div class="note">Rating 1.0 is HLTV's original rating, worked out from FACEIT's numbers for every league match. HLTV Rating 3.0 and Round Swing need each match's demo, so here they're only in Team stats (your own matches).</div>`;
+  const again = () => renderDivision(el, D, L, rosterIds, st);
+  el.querySelector("#lg-everyone").onchange = (e) => { leagueView.everyone = e.target.checked; again(); };
+  el.querySelector("#lg-more")?.addEventListener("click", () => { leagueView.shown = leagueView.shown > LEADERS_TOP ? LEADERS_TOP : 100000; again(); });
+  el.querySelectorAll("[data-lsort]").forEach((th) => (th.onclick = () => { const k = th.dataset.lsort; leagueView.desc = leagueView.sort === k ? !leagueView.desc : true; leagueView.sort = k; again(); }));
+}
 
 async function renderLeague(view) {
   view.innerHTML = `<div class="empty">Loading your league from FACEIT…</div>`;
@@ -3271,10 +3354,13 @@ async function renderLeague(view) {
     }
   };
 
-  // Every player in the division (FACEIT's league stats).
-  const num = (p, k) => Number(p.stats?.[k] ?? 0);
-  const leaders = L.players.slice().sort((a, b) => (num(b, leagueView.sort) - num(a, leagueView.sort)) * (leagueView.desc ? 1 : -1) || num(b, "m3") - num(a, "m3"));
-  const lfmt = (k, v) => (k === "m13" ? `${Math.round(v)}%` : k === "k17" ? v.toFixed(1) : k === "m14" ? v.toFixed(2) : Math.round(v));
+  // Standings: your team pinned on top, then the top 10 (or everyone).
+  const standRow = (t, pinned) => { const tb = t.tie_breakers || {}; const diff = (t.won || 0) - (t.lost || 0); return `<tr class="${t.premade_team_id === L.team_id ? "me" : ""} ${pinned ? "pinned" : ""}">
+          <td>${t.rank_start === t.rank_end ? t.rank_start : `${t.rank_start}–${t.rank_end}`}</td>
+          <td class="left">${t.avatar_url ? `<img class="lg-tav" src="${esc(t.avatar_url)}" alt="">` : `<span class="lg-tav none"></span>`}<span>${esc(t.name)}</span>${pinned ? `<span class="sc-you">Your team</span>` : ""}</td>
+          <td><span class="lg-cc">${esc(t.country_code || "")}</span></td><td>${t.matches || 0}</td><td>${t.won || 0}</td><td>${t.lost || 0}</td>
+          <td class="${diff > 0 ? "up" : diff < 0 ? "down" : ""}">${diff > 0 ? "+" : ""}${diff}</td><td>${tb.rounds_won ?? 0}-${tb.rounds_lost ?? 0}</td><td><b>${t.points || 0}</b></td></tr>`; };
+  const standShown = leagueView.allStandings ? L.standings : L.standings.slice(0, STANDINGS_TOP);
 
   view.innerHTML = `
     <section class="lg-hero">
@@ -3304,21 +3390,16 @@ async function renderLeague(view) {
         <tbody>${team.map((p) => `<tr class="${p.is_me ? "me" : ""}">${TCOLS.map(([k]) => tcell(p, k)).join("")}</tr>`).join("")}</tbody></table></div>`
         : `<div class="empty small">Get the demos of your league matches (Match history → Get demos) and your team's stats show here.</div>`}</section>
     <section class="panel lg-section"><div class="panel-head"><div class="h3">Standings</div><span class="grow"></span><span class="sub">${esc(st.division_name || "")} ${esc(st.conference_name || "")} · ${esc(st.stage_name || "")}</span></div>
-      <div class="table-wrap"><table class="lg-table lg-standings"><thead><tr><th>#</th><th class="left">Team</th><th>Country</th><th>Matches</th><th>Won</th><th>Lost</th><th>+/-</th><th>Rounds</th><th>Points</th></tr></thead>
-        <tbody>${L.standings.map((t) => { const tb = t.tie_breakers || {}; const diff = (t.won || 0) - (t.lost || 0); return `<tr class="${t.premade_team_id === L.team_id ? "me" : ""}">
-          <td>${t.rank_start === t.rank_end ? t.rank_start : `${t.rank_start}–${t.rank_end}`}</td>
-          <td class="left">${t.avatar_url ? `<img class="lg-tav" src="${esc(t.avatar_url)}" alt="">` : `<span class="lg-tav none"></span>`}<span>${esc(t.name)}</span></td>
-          <td><span class="lg-cc">${esc(t.country_code || "")}</span></td><td>${t.matches || 0}</td><td>${t.won || 0}</td><td>${t.lost || 0}</td>
-          <td class="${diff > 0 ? "up" : diff < 0 ? "down" : ""}">${diff > 0 ? "+" : ""}${diff}</td><td>${tb.rounds_won ?? 0}-${tb.rounds_lost ?? 0}</td><td><b>${t.points || 0}</b></td></tr>`; }).join("")}</tbody></table></div></section>
-    <section class="panel lg-section"><div class="panel-head"><div class="h3">Stat leaders</div><span class="grow"></span><span class="sub">Every player in ${esc(st.division_name || "the division")} ${esc(st.conference_name || "")} · FACEIT's league stats</span></div>
-      <div class="table-wrap"><table class="lg-table lg-leaders"><thead><tr><th>#</th><th class="left">Player</th>${LEADER_COLS.map(([k, t]) => `<th data-lsort="${k}" class="${leagueView.sort === k ? "on" : ""}">${t}${leagueView.sort === k ? (leagueView.desc ? " ↓" : " ↑") : ""}</th>`).join("")}</tr></thead>
-        <tbody>${leaders.slice(0, leagueView.shown).map((p, i) => `<tr class="${rosterIds.has(p.id) ? "me" : ""}"><td>${i + 1}</td><td class="left"><b>${esc(p.nickname)}</b></td>${LEADER_COLS.map(([k]) => `<td>${lfmt(k, num(p, k))}</td>`).join("")}</tr>`).join("")}</tbody></table></div>
-      ${leaders.length > leagueView.shown ? `<button class="btn ghost lg-more" id="lg-more">Show all ${leaders.length} players</button>` : ""}</section>
-    <div class="note">From FACEIT's public league pages, refreshed every 20 minutes (or with Refresh). Team stats come from your own demos: HLTV Rating 3.0, RWS and Swing the same way as the rest of Veloxify.</div>`;
+      <div class="lg-standings-wrap"><table class="lg-table lg-standings"><thead><tr><th>#</th><th class="left">Team</th><th>Country</th><th>Matches</th><th>Won</th><th>Lost</th><th>+/-</th><th>Rounds</th><th>Points</th></tr></thead>
+        <tbody>${mine ? standRow(mine, true) : ""}${standShown.map((t) => standRow(t, false)).join("")}</tbody></table></div>
+      ${L.standings.length > STANDINGS_TOP ? `<button class="btn ghost lg-more" id="lg-stand-all">${leagueView.allStandings ? `Show top ${STANDINGS_TOP}` : `View all standings (${L.standings.length} teams)`}</button>` : ""}</section>
+    <div id="lg-division"><section class="panel lg-section"><div class="empty small">Reading every league match in your conference from FACEIT… FACEIT only allows a request every so often, so the first time takes a few minutes; after that only new matches are read.</div></section></div>
+    <div class="note">Standings and match stats from FACEIT's public league pages, refreshed every 20 minutes (or with Refresh). Team stats come from your own demos: HLTV Rating 3.0, RWS and Swing the same way as the rest of Veloxify.</div>`;
 
   view.querySelector("#lg-refresh").onclick = async (e) => { e.target.disabled = true; e.target.textContent = "Refreshing…"; await loadLeague(true); renderLeague(view); };
-  view.querySelector("#lg-more")?.addEventListener("click", () => { leagueView.shown = 10000; renderLeague(view); });
-  view.querySelectorAll("[data-lsort]").forEach((th) => (th.onclick = () => { const k = th.dataset.lsort; leagueView.desc = leagueView.sort === k ? !leagueView.desc : true; leagueView.sort = k; renderLeague(view); }));
+  view.querySelector("#lg-stand-all")?.addEventListener("click", () => { leagueView.allStandings = !leagueView.allStandings; renderLeague(view); });
+  const divEl = view.querySelector("#lg-division");
+  loadDivision().then((D) => { if (document.body.contains(divEl)) renderDivision(divEl, D, L, rosterIds, st); });
   view.querySelectorAll("[data-tsort]").forEach((th) => (th.onclick = () => { const k = th.dataset.tsort; leagueView.teamDesc = leagueView.teamSort === k ? !leagueView.teamDesc : k !== "name"; leagueView.teamSort = k; renderLeague(view); }));
 }
 
@@ -3880,11 +3961,30 @@ function renderClips(view, sub) {
       <div class="h1">Clips</div>
       <nav class="subtabs">${tabs.map(([k, t, n]) => `<a href="#/clips/${k}" class="${sub === k ? "on" : ""}">${t}${n != null ? ` <span class="sub">${n}</span>` : ""}</a>`).join("")}</nav>
     </div>
+    <div id="clips-sound"></div>
     <div id="clips-body"></div>`;
+  renderSilentClips(view.querySelector("#clips-sound"));
   const body = view.querySelector("#clips-body");
   if (sub === "lowlights") return renderLowlightsTab(body);
   if (sub === "montages") return renderMontages(body);
   return renderHighlightsTab(body);
+}
+
+// Clips recorded without sound (no silent audio device for CS2 then): say so, and record them
+// again once there is one.
+async function renderSilentClips(el) {
+  const n = [...(state.index.highlights || []), ...(state.index.lowlights || [])].filter((c) => c.clip && c.no_audio).length;
+  if (!n || !tauri) { el.innerHTML = ""; return; }
+  const device = await tauri.core.invoke("silent_audio_device");
+  el.innerHTML = `<div class="ml-note silent-note"><span><b>${n} clip${n === 1 ? " was" : "s were"} recorded without sound.</b> ${device
+    ? `CS2's sound can be recorded now (through ${esc(device)}).`
+    : `This PC has no silent audio device to record CS2's sound through. Install the free <b>VB-CABLE</b> (vb-audio.com/Cable), restart your PC, and record them again here.`}</span>
+    ${device ? `<button class="btn primary" id="rerender-silent">Record them again with sound</button>` : ""}</div>`;
+  el.querySelector("#rerender-silent")?.addEventListener("click", async (e) => {
+    e.target.disabled = true;
+    const k = await tauri.core.invoke("rerender_silent_clips");
+    e.target.textContent = `${k} clip${k === 1 ? "" : "s"} queued: they're recorded again when CS2 is closed`;
+  });
 }
 
 // Montages are coming: pick a folder or preset, order the clips, add music and transitions, and
@@ -4289,7 +4389,7 @@ async function renderSettings(view) {
         ${row("HUD", "Kill feed only is the clean Allstar look.", seg("killfeed_only", r.killfeed_only, [[true, "Kill feed only"], [false, "Full HUD"]]))}
         ${row("Crosshair", "", seg("own_crosshair", r.own_crosshair, [[false, "Clean default"], [true, "Player's own"]]))}
         ${row("X-ray", "Show players through walls.", sw("xray", r.xray))}
-        ${row("Game audio", "CS2's sound only, never Discord or music.", sw("audio", r.audio))}
+        ${row("Game audio", `CS2's sound only, never Discord or music. <span id="audio-device"></span>`, sw("audio", r.audio))}
       </section>
       <section class="panel">
         <div class="panel-head"><div class="h3">Demo folders</div><span class="grow"></span>${tauri ? `<button class="btn" id="add-folder">Add folder</button>` : ""}</div>
@@ -4347,6 +4447,10 @@ async function renderSettings(view) {
     setTimeout(() => { b.disabled = false; b.textContent = "Save debug log"; }, 4000);
   };
   renderStorage(view.querySelector("#storage"));
+  tauri.core.invoke("silent_audio_device").then((d) => {
+    const el = view.querySelector("#audio-device");
+    if (el) el.innerHTML = d ? `Recorded through ${esc(d)}, so you don't hear it.` : `<b class="down">No silent audio device on this PC, so clips have no sound.</b> Install the free VB-CABLE (vb-audio.com/Cable) and restart your PC.`;
+  });
   wireFaceitRefresh();
 }
 
@@ -4531,7 +4635,7 @@ function renderBanner() {
   } else if (st?.state === "error") {
     b = { kind: "warn", title: "Needs attention", count: "", frac: null, note: st.message, actions: [] };
   }
-  if (!b) { el.hidden = true; bannerKey = ""; return; }
+  if (!b) { el.hidden = true; bannerKey = ""; syncStickyTop(); return; }
   el.hidden = false;
   el.className = `banner ${b.kind}`;
   // Built once per kind of banner; progress updates in place (so buttons aren't swapped mid-click).
@@ -4551,6 +4655,14 @@ function renderBanner() {
   const note = el.querySelector(".banner-note");
   note.textContent = b.note || "";
   note.hidden = !b.note;
+  syncStickyTop();
+}
+
+// Sticky rows (the League standings' own team) sit under the top bar and the status banner.
+function syncStickyTop() {
+  const el = document.getElementById("banner");
+  const h = el && !el.hidden ? el.offsetHeight : 0;
+  document.documentElement.style.setProperty("--sticky-top", `${60 + h}px`);
 }
 
 if (tauri) {

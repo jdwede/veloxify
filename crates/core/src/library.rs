@@ -82,6 +82,9 @@ pub struct HighlightEntry {
     /// Why rendering failed (e.g. the demo is from an older CS2 version), if it did.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub render_error: Option<String>,
+    /// The clip was recorded without sound (no silent audio device for CS2 then).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_audio: bool,
     #[serde(flatten)]
     pub details: HighlightDetails,
 }
@@ -211,6 +214,8 @@ pub struct HighlightRef {
     pub clip: Option<String>,
     pub thumb: Option<String>,
     pub render_error: Option<String>,
+    #[serde(default)]
+    pub no_audio: bool,
     pub map: String,
     pub source: String,
     pub result: String,
@@ -246,6 +251,8 @@ pub struct LowlightRef {
     pub duration_s: f64,
     pub clip: Option<String>,
     pub thumb: Option<String>,
+    #[serde(default)]
+    pub no_audio: bool,
     pub map: String,
     pub source: String,
     pub source_label: String,
@@ -474,6 +481,7 @@ fn highlight_entry(match_id: &str, h: &Highlight, m: &Match, a: &Analysis) -> Hi
         clip: None,
         thumb: None,
         render_error: None,
+        no_audio: false,
     }
 }
 
@@ -647,6 +655,7 @@ pub fn build_index(me: u64, matches: &mut [MatchEntry], date_of: impl Fn(i64) ->
                 clip: h.clip.clone(),
                 thumb: h.thumb.clone(),
                 render_error: h.render_error.clone(),
+                no_audio: h.no_audio,
                 map: m.map.clone(),
                 source: m.source.clone(),
                 result: m.result.clone(),
@@ -682,6 +691,7 @@ pub fn build_index(me: u64, matches: &mut [MatchEntry], date_of: impl Fn(i64) ->
                 duration_s: l.duration_s,
                 clip: l.clip.clone(),
                 thumb: l.thumb.clone(),
+                no_audio: l.no_audio,
                 map: m.map.clone(),
                 source: m.source.clone(),
                 source_label: source_label(&m.source, m.competition.as_deref()),
