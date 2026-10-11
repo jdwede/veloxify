@@ -165,12 +165,13 @@ const f2 = (x) => x.toFixed(2);
 // How good a number is, as a class g0 (great, green) .. g4 (poor, red).
 const GRADES = {
   rating: [1.2, 1.05, 0.95, 0.85], rws: [13, 11, 9, 7], win: [0.6, 0.53, 0.47, 0.4],
-  kd: [1.3, 1.1, 0.9, 0.75], adr: [95, 82, 70, 60], kast: [80, 73, 66, 58],
+  kd: [1.3, 1.1, 0.9, 0.75], kpr: [0.85, 0.75, 0.62, 0.52], adr: [95, 82, 70, 60], kast: [80, 73, 66, 58],
   // Round Swing, % per round: 0 is neutral (it's zero-sum).
   swing: [1.5, 0.5, -0.5, -1.5],
 };
 const GRADE_COLORS = ["#2fd36f", "#9ddb8c", "var(--text)", "#f3a5a0", "#ff5252"];
-const gradeOf = (kind, v) => GRADES[kind].filter((t) => v < t).length;
+// A kind without thresholds is plain (average), never an error that blanks the page.
+const gradeOf = (kind, v) => (GRADES[kind] ? GRADES[kind].filter((t) => v < t).length : 2);
 const ratingClass = (r) => `g${gradeOf("rating", r)}`;
 const gradeClass = (kind, v) => `g${gradeOf(kind, v)}`;
 // HLTV Rating 3.0 est. (falls back to 2.0 est. for anything analyzed before 3.0 existed).
