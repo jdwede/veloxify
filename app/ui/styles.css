@@ -619,14 +619,18 @@ input[type=color] { width: 44px; height: 30px; padding: 2px; background: var(--r
 
 /* ---- status banner (under the top bar): downloading / analyzing / capturing clips ---------- */
 .banner {
-  position: sticky; top: 60px; z-index: 9; padding: 12px 24px 14px;
+  position: sticky; top: 60px; z-index: 9; padding: 4px 24px;
   background: var(--accent); color: var(--on-accent); box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35);
 }
 .banner[hidden] { display: none; }
 .banner.rec { background: #d93b4b; color: #fff; }
 .banner.warn { background: var(--t); color: #1a1405; }
 .banner.paused { background: var(--row-hi); color: var(--text); border-bottom: 1px solid var(--line-2); }
-.banner-in { display: flex; align-items: center; gap: 16px; max-width: 1440px; margin: 0 auto; }
+/* One row, just taller than the live picture: the title, progress and note on the left, the
+   picture and buttons centred beside them. */
+.banner-in { display: flex; align-items: center; gap: 14px; max-width: 1440px; margin: 0 auto; min-height: 44px; }
+.banner-main { flex: 1; min-width: 0; display: grid; gap: 4px; }
+.banner-top { display: flex; align-items: center; gap: 14px; min-width: 0; }
 .banner-dot { width: 12px; height: 12px; border-radius: 50%; background: currentColor; flex: none; animation: banner-pulse 1.4s ease-in-out infinite; }
 .banner.paused .banner-dot, .banner.warn .banner-dot { animation: none; }
 @keyframes banner-pulse { 50% { opacity: 0.3; } }
@@ -639,9 +643,12 @@ input[type=color] { width: 44px; height: 30px; padding: 2px; background: var(--r
 .banner-btn {
   border: 2px solid currentColor; background: transparent; color: inherit; font-weight: 700; font-size: 13.5px;
   padding: 6px 16px; border-radius: var(--radius-sm); cursor: pointer; white-space: nowrap;
+  display: inline-flex; align-items: center; justify-content: center; min-height: 34px; flex: none;
 }
+.banner-size { padding: 6px 9px; }
+.banner-size svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2.8; stroke-linecap: round; stroke-linejoin: round; }
 .banner-btn:hover { background: rgba(0, 0, 0, 0.15); }
-.banner-note { max-width: 1440px; margin: 6px auto 0; padding-left: 28px; font-size: 13.5px; font-weight: 600; }
+.banner-note { padding-left: 26px; font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .banner-note[hidden] { display: none; }
 @media (max-width: 700px) {
   .banner { padding: 10px 16px; }
@@ -1379,7 +1386,7 @@ a.lg-match:hover { background: var(--row-hi); }
 #gn-svg .gn-ln.hl .gn-arc { stroke-width: 4.5 !important; filter: drop-shadow(0 0 4px rgba(255, 255, 255, 0.55)); }
 #gn-svg .gn-from-g.hl .gn-from { r: 9; stroke-width: 3; }
 
-.banner-preview { width: 160px; height: 90px; object-fit: cover; border-radius: 6px; box-shadow: 0 2px 10px rgba(0, 0, 0, 0.45); background: #000; flex: none; margin: 0 4px; }
+.banner-preview { width: 160px; height: 90px; object-fit: cover; border-radius: 6px; box-shadow: 0 2px 10px rgba(0, 0, 0, 0.45); background: #000; flex: none; align-self: center; }
 
 .sess-queue { display: flex; align-items: center; gap: 8px; }
 .sess-queue .ic { width: 18px; height: 18px; color: var(--accent); display: inline-flex; }
@@ -1391,13 +1398,14 @@ a.lg-match:hover { background: var(--row-hi); }
 .mp-rank { white-space: nowrap; }
 .mp-rank .rank-chip { margin: 0; }
 
-.banner-size { background: transparent; border: 1px solid currentColor; color: inherit; opacity: 0.8; border-radius: 4px; width: 24px; height: 22px; line-height: 18px; padding: 0; cursor: pointer; font-weight: 800; flex: none; }
-.banner-size:hover { opacity: 1; }
 .banner.min { padding: 3px 16px; box-shadow: 0 3px 10px rgba(0, 0, 0, 0.3); }
 .banner.min .banner-in { gap: 10px; min-height: 22px; }
 .banner.min .banner-title { font-size: 12px; letter-spacing: 0.02em; }
 .banner.min .banner-count { font-size: 12px; }
 .banner.min .banner-bar { height: 4px; }
 .banner.min .banner-note, .banner.min .banner-preview { display: none !important; }
-.banner.min .banner-btn { padding: 1px 10px; font-size: 12px; }
+.banner.min .banner-btn { padding: 1px 10px; font-size: 12px; min-height: 22px; border-width: 1.5px; }
+.banner.min .banner-size { padding: 1px 6px; }
+.banner.min .banner-size svg { width: 14px; height: 14px; }
+.banner.min .banner-in { min-height: 0; }
 .banner.min .banner-dot { width: 8px; height: 8px; }

@@ -657,7 +657,7 @@ function renderMatchScoreboard(body, m) {
       case "deaths": return `<td>${c.deaths}</td>`;
       case "kd": return `<td class="${gradeClass("kd", d.kd)}">${f2(d.kd)}</td>`;
       case "adr": return `<td class="${gradeClass("adr", d.adr)}">${Math.round(d.adr)}</td>`;
-      case "kr": return `<td>${f2(d.kpr)}</td>`;
+      case "kr": return `<td class="${gradeClass("kpr", d.kpr)}">${f2(d.kpr)}</td>`;
       case "kast": return `<td class="${gradeClass("kast", d.kast)}">${Math.round(d.kast)}%</td>`;
       case "rws": return `<td class="${gradeClass("rws", d.rws)}">${f1(d.rws)}</td>`;
       case "swing": return `<td class="${gradeClass("swing", d.swing || 0)}" title="Round Swing: average change in the team's chance to win each round (HLTV Rating 3.0)">${fmtSwing(d.swing || 0)}</td>`;
@@ -4747,13 +4747,16 @@ function renderBanner() {
   const key = b.kind + b.actions.map((a) => a[0]).join();
   if (key !== bannerKey) {
     bannerKey = key;
-    el.innerHTML = `<div class="banner-in"><span class="banner-dot"></span><b class="banner-title"></b><span class="banner-count"></span>
-      <div class="banner-bar"><i></i></div>${b.kind === "rec" ? `<img class="banner-preview" alt="What CS2 is recording" hidden>` : ""}<button class="banner-size" title="Make this banner smaller or bigger" aria-label="Minimize or restore the banner"></button>${b.actions.map((a, i) => `<button class="banner-btn" data-i="${i}">${esc(a[0])}</button>`).join("")}</div>
-      <div class="banner-note"></div>`;
+    el.innerHTML = `<div class="banner-in">
+      <div class="banner-main"><div class="banner-top"><span class="banner-dot"></span><b class="banner-title"></b><span class="banner-count"></span><div class="banner-bar"><i></i></div></div>
+        <div class="banner-note"></div></div>
+      ${b.kind === "rec" ? `<img class="banner-preview" alt="What CS2 is recording" hidden>` : ""}${b.actions.map((a, i) => `<button class="banner-btn" data-i="${i}">${esc(a[0])}</button>`).join("")}<button class="banner-btn banner-size" aria-label="Minimize or restore the banner"></button></div>`;
   }
-  el.querySelectorAll(".banner-btn").forEach((btn) => (btn.onclick = b.actions[btn.dataset.i][1]));
+  el.querySelectorAll(".banner-btn[data-i]").forEach((btn) => (btn.onclick = b.actions[btn.dataset.i][1]));
   const size = el.querySelector(".banner-size");
-  size.textContent = bannerMin() ? "▢" : "–";
+  // A caret: up to make the banner small, down to bring it back.
+  size.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="${bannerMin() ? "M6 9l6 6 6-6" : "M6 15l6-6 6 6"}"/></svg>`;
+  size.title = bannerMin() ? "Show the full banner" : "Make the banner smaller";
   size.onclick = () => {
     try { localStorage.setItem("veloxify.bannerMin", bannerMin() ? "0" : "1"); } catch (e) { /* not remembered */ }
     renderBanner();
