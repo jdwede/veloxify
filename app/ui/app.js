@@ -56,7 +56,7 @@ async function loadIndex() {
   mergeFaceit();
 }
 
-const SESSION_GAP_S = 3 * 3600; // same as the backend's session grouping
+const SESSION_GAP_S = 6 * 3600; // same as the backend's session grouping (a night's sleep)
 const pad2 = (n) => String(n).padStart(2, "0");
 const localIso = (ts) => { const d = new Date(ts * 1000); return `${iso(d)}T${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`; };
 
@@ -556,8 +556,10 @@ async function loadRoster(m) {
   }
   return state.rosters.get(m.id);
 }
-const nameCell = (p, roster) =>
-  `${p.party ? `<span class="mp-party" title="In your party">${ICONS.party}</span>` : ""}${avatarHtml(p.steamid)}${rankHtml(p, roster)}<span class="mp-pname">${esc(p.name)}</span>`;
+const nameCell = (p, roster, withRank = true) =>
+  `${p.party ? `<span class="mp-party" title="In your party">${ICONS.party}</span>` : ""}${avatarHtml(p.steamid)}${withRank ? rankHtml(p, roster) : ""}<span class="mp-pname">${esc(p.name)}</span>`;
+// A player's rank as a number to sort by: FACEIT ELO in a FACEIT match, else the Premier rating.
+const rankValue = (p, roster) => (roster ? roster[p.steamid]?.elo ?? -1 : p.rank_type === 11 && p.rank ? p.rank : -1);
 
 // ---- match page (Leetify-style): header, scoreboard and the match's sections ------------------
 
@@ -626,7 +628,7 @@ async function renderMatchPage(view, id, tab) {
 }
 
 // The scoreboard's columns in their default order; drag a header to reorder (saved).
-const BOARD_COLS = [["rating", "HLTV 3.0"], ["rws", "RWS"], ["swing", "Swing"], ["kills", "Kills"], ["assists", "Assists"], ["deaths", "Deaths"], ["kd", "K/D"],
+const BOARD_COLS = [["rank", "Rank"], ["rating", "HLTV 3.0"], ["rws", "RWS"], ["swing", "Swing"], ["kills", "Kills"], ["assists", "Assists"], ["deaths", "Deaths"], ["kd", "K/D"],
   ["adr", "ADR"], ["kr", "K/R"], ["kast", "KAST"], ["k2", "2K"], ["k3", "3K"], ["k4", "4K"], ["k5", "5K"]];
 function boardCols() {
   let saved = [];
@@ -642,7 +644,7 @@ function boardCols() {
 function renderMatchScoreboard(body, m) {
   const me = state.index.me;
   const COLS = boardCols();
-  const by = MATCH_SORTS[matchSort.key];
+  const by = matchSort.key === "rank" ? (p) => rankValue(p, m._roster) : MATCH_SORTS[matchSort.key];
   const sorted = (side) => m.players.filter((p) => p.side === side).sort((a, b) => {
     const x = by(a), y = by(b);
     return (x < y ? -1 : x > y ? 1 : 0) * (matchSort.desc ? -1 : 1);
@@ -660,13 +662,14 @@ function renderMatchScoreboard(body, m) {
       case "rws": return `<td class="${gradeClass("rws", d.rws)}">${f1(d.rws)}</td>`;
       case "swing": return `<td class="${gradeClass("swing", d.swing || 0)}" title="Round Swing: average change in the team's chance to win each round (HLTV Rating 3.0)">${fmtSwing(d.swing || 0)}</td>`;
       case "rating": return `<td><span class="mp-rating ${ratingClass(r3(d))}">${f2(r3(d))}</span></td>`;
+      case "rank": return `<td class="mp-rank">${rankHtml(p, m._roster)}</td>`;
       default: return `<td class="${c.multikill_rounds[Number(k[1])] ? "" : "zero"}">${c.multikill_rounds[Number(k[1])]}</td>`;
     }
   };
   const head = (title, won) => `<tr class="mp-team"><th class="mp-name">${title} <span class="mp-badge ${won ? "win" : "loss"}">${won ? "WIN" : m.result === "tie" ? "TIE" : "LOSS"}</span></th>
     ${COLS.map(([k, t]) => `<th data-sort="${k}" draggable="true" title="Click to sort, drag to move" class="${matchSort.key === k ? "on" : ""}">${t}${matchSort.key === k ? (matchSort.desc ? " ↓" : " ↑") : ""}</th>`).join("")}</tr>`;
   const row = (p, won) => `<tr class="${won ? "won" : "lost"} ${p.steamid === me ? "me" : ""}">
-    <td class="mp-name">${nameCell(p, m._roster)}</td>
+    <td class="mp-name">${nameCell(p, m._roster, false)}</td>
     ${COLS.map(([k]) => cell(p, k)).join("")}</tr>`;
   const mineWon = m.result === "win", theirsWon = m.result === "loss";
   body.innerHTML = `
@@ -3242,6 +3245,17 @@ function renderGrenadeMap(view, d, map) {
   view.querySelector("#gn-rename-reset")?.addEventListener("click", async () => { delete mapCallouts(map).names[sel.id]; await saveCallouts(); rerender(); });
   view.querySelectorAll(".gn-item[data-gl]").forEach((b) => (b.onclick = (e) => { if (e.target.closest(".hl-card")) return; grenades.sel = b.dataset.gl; rerender(); }));
   view.querySelectorAll(".gn-item .hl-card").forEach((c) => (c.onclick = (e) => { e.stopPropagation(); grenades.sel = c.dataset.lineup; rerender(); }));
+  // Pointing at a lineup in the list lights it up on the map (and fades the rest).
+  const svgEl = view.querySelector("#gn-svg");
+  const light = (id) => {
+    if (!svgEl) return;
+    svgEl.classList.toggle("hovering", !!id);
+    svgEl.querySelectorAll("[data-gl]").forEach((g) => g.classList.toggle("hl", g.dataset.gl === id));
+  };
+  view.querySelectorAll(".gn-item[data-gl]").forEach((b) => {
+    b.addEventListener("mouseenter", () => light(b.dataset.gl));
+    b.addEventListener("mouseleave", () => light(null));
+  });
   view.querySelector("#gn-back")?.addEventListener("click", () => { grenades.sel = null; rerender(); });
   view.querySelector("#gn-copy")?.addEventListener("click", (e) => { navigator.clipboard?.writeText(setpos); e.target.textContent = "Copied"; });
   view.querySelector("#gn-render")?.addEventListener("click", async (e) => { e.target.disabled = true; e.target.textContent = "Queued: it films when CS2 is closed"; await tauri.core.invoke("render_lineups", { ids: [sel.id] }); });
@@ -3738,9 +3752,17 @@ async function renderSession(view, date, idx) {
   const me = state.index.me;
   const players = sumPlayers(entries, me);
   const meRow = players.find((p) => p.is_me);
-  // Cards: you and your party; solo, every teammate you had this session.
+  // Cards: you and your confirmed party (never teammates who just happened to be in your games).
   const party = players.filter((p) => !p.is_me && p.mine > 0 && p.party);
-  const cards = [meRow, ...(party.length ? party : players.filter((p) => !p.is_me && p.mine > 0))].filter(Boolean);
+  const cards = [meRow, ...party].filter(Boolean).slice(0, 5);
+  // How you queued: you plus the party members on your team, per match; the session's most common.
+  const QUEUE = ["", "Solo queue", "Duo queue", "3-stack", "4-stack", "5-stack"];
+  const SHORT = ["", "solo", "duo", "3-stack", "4-stack", "5-stack"];
+  const sizes = entries.map((m) => Math.min(5, 1 + m.players.filter((p) => p.party && p.side === "mine" && p.steamid !== me).length));
+  const bySize = new Map();
+  for (const n of sizes) bySize.set(n, (bySize.get(n) || 0) + 1);
+  const queueTop = [...bySize.entries()].sort((a, b) => b[1] - a[1] || b[0] - a[0])[0]?.[0];
+  const queueMix = bySize.size > 1 ? [...bySize.entries()].sort((a, b) => b[1] - a[1]).map(([n, c]) => `${c} ${SHORT[n]}`).join(" · ") : "";
   const w = sess.wins, l = sess.losses;
   const first = summaries[0], last = summaries[summaries.length - 1];
   // First start to last finish (a FACEIT-only match without room data counts as ~40 minutes).
@@ -3808,6 +3830,7 @@ async function renderSession(view, date, idx) {
   view.innerHTML = `
     <div class="sess-head">
       <div class="sess-box"><span class="sess-w">${w}W</span><span class="sess-sep">:</span><span class="sess-l">${l}L</span><span class="sub">/ ${summaries.length} match${summaries.length === 1 ? "" : "es"}</span></div>
+      ${queueTop ? `<div class="sess-box sess-queue" title="Who was in your party: FACEIT's party data, or (Premier) players on your team in two or more of the session's matches"><span class="ic">${ICONS.party}</span><b>${QUEUE[queueTop]}</b>${queueMix ? `<span class="sub">${esc(queueMix)}</span>` : ""}</div>` : ""}
       <div class="sess-box"><b>${fmtDate(date)}</b><span class="sub">${fmtTime(first.played_at)}–${fmtTime(last.played_at)} · ${fmtSpan(minutes)}</span></div>
       <span class="grow"></span>
       ${prevSess ? `<a class="btn ghost" href="${prevSess}">◀ Previous session</a>` : ""}
@@ -3815,18 +3838,18 @@ async function renderSession(view, date, idx) {
     </div>
     ${cards.length ? `<div class="sc-row">${cards.map(card).join("")}</div>` : `<div class="empty">No demos for this session yet.</div>`}
     ${statsOnly ? `<div class="ml-note" style="margin:0 0 14px">${statsOnly} match${statsOnly === 1 ? "" : "es"} without a demo yet (FACEIT stats only) aren't in these totals. ${demoButton(missingDemos(summaries, 3650), "btn")}</div>` : ""}
-    <section class="fc-card" style="margin-bottom:20px">
-      <div class="fc-head"><div class="h3">Matches</div></div>
-      <div class="ml-grid ml-head"><div>Date</div><div>Score</div><div></div><div><span class="ic">${ICONS.rating}</span>HLTV 3.0</div><div>RWS</div><div>K/D/A</div><div>ADR</div><div>Map</div><div></div></div>
-      ${historyRows().filter((r) => sess.match_ids.includes(r.id)).sort((a, b) => a.when - b.when).map(historyRow).join("")}
-    </section>
-    <section class="panel">
+    <section class="panel" style="margin-bottom:20px">
       <div class="panel-head"><div class="h3">Session scoreboard</div><span class="sub">you${rows.length > 1 ? " and your party" : ""}, all ${withDemo.length} match${withDemo.length === 1 ? "" : "es"} added up</span></div>
       <div class="sc-table"><table class="sb">
         <thead><tr>${COLS.map(([k, t]) => `<th data-sort="${k}" class="sortable ${sessionView.sort === k ? "on" : ""}">${t}${sessionView.sort === k ? (sessionView.desc ? " ▾" : " ▴") : ""}</th>`).join("")}</tr></thead>
         <tbody>${rows.map((p) => `<tr class="${p.is_me ? "me" : p.party ? "party" : ""}">${COLS.map(([k]) => cell(p, k)).join("")}</tr>`).join("")}</tbody>
       </table></div>
-      <div class="note">Your party: players who were on your team for at least two of the session's matches. HLTV 3.0, RWS, ADR, KAST and Swing are per round, so session values weight each match by its rounds. Eco kills: on players with under $2,000 of equipment (not pistol rounds).</div>
+      <div class="note">Your party: who FACEIT says queued with you, or (Premier, which doesn't record parties) teammates in two or more of the session's matches. HLTV 3.0, RWS, ADR, KAST and Swing are per round, so session values weight each match by its rounds. Eco kills: on players with under $2,000 of equipment (not pistol rounds).</div>
+    </section>
+    <section class="fc-card" style="margin-bottom:20px">
+      <div class="fc-head"><div class="h3">Matches</div></div>
+      <div class="ml-grid ml-head"><div>Date</div><div>Score</div><div></div><div><span class="ic">${ICONS.rating}</span>HLTV 3.0</div><div>RWS</div><div>K/D/A</div><div>ADR</div><div>Map</div><div></div></div>
+      ${historyRows().filter((r) => sess.match_ids.includes(r.id)).sort((a, b) => a.when - b.when).map(historyRow).join("")}
     </section>`;
   view.querySelectorAll("th[data-sort]").forEach((th) => (th.onclick = () => {
     const k = th.dataset.sort;
@@ -4719,16 +4742,22 @@ function renderBanner() {
   }
   if (!b) { el.hidden = true; bannerKey = ""; syncStickyTop(); return; }
   el.hidden = false;
-  el.className = `banner ${b.kind}`;
+  el.className = `banner ${b.kind} ${bannerMin() ? "min" : ""}`;
   // Built once per kind of banner; progress updates in place (so buttons aren't swapped mid-click).
   const key = b.kind + b.actions.map((a) => a[0]).join();
   if (key !== bannerKey) {
     bannerKey = key;
     el.innerHTML = `<div class="banner-in"><span class="banner-dot"></span><b class="banner-title"></b><span class="banner-count"></span>
-      <div class="banner-bar"><i></i></div>${b.actions.map((a, i) => `<button class="banner-btn" data-i="${i}">${esc(a[0])}</button>`).join("")}</div>
+      <div class="banner-bar"><i></i></div>${b.kind === "rec" ? `<img class="banner-preview" alt="What CS2 is recording" hidden>` : ""}<button class="banner-size" title="Make this banner smaller or bigger" aria-label="Minimize or restore the banner"></button>${b.actions.map((a, i) => `<button class="banner-btn" data-i="${i}">${esc(a[0])}</button>`).join("")}</div>
       <div class="banner-note"></div>`;
   }
   el.querySelectorAll(".banner-btn").forEach((btn) => (btn.onclick = b.actions[btn.dataset.i][1]));
+  const size = el.querySelector(".banner-size");
+  size.textContent = bannerMin() ? "▢" : "–";
+  size.onclick = () => {
+    try { localStorage.setItem("veloxify.bannerMin", bannerMin() ? "0" : "1"); } catch (e) { /* not remembered */ }
+    renderBanner();
+  };
   el.querySelector(".banner-title").textContent = b.title;
   el.querySelector(".banner-count").textContent = b.count;
   const bar = el.querySelector(".banner-bar");
@@ -4738,6 +4767,38 @@ function renderBanner() {
   note.textContent = b.note || "";
   note.hidden = !b.note;
   syncStickyTop();
+  livePreview(b.kind === "rec" ? el.querySelector(".banner-preview") : null);
+}
+
+// While CS2 records, the banner shows a small live picture of it (the capture refreshes the
+// file about once a second).
+let captureTimer = null, captureUrl = null;
+function livePreview(img) {
+  if (!img || !tauri) {
+    clearInterval(captureTimer);
+    captureTimer = null;
+    return;
+  }
+  if (captureTimer) return;
+  const tick = async () => {
+    const pic = document.querySelector(".banner-preview");
+    if (!pic) return;
+    try {
+      const r = await fetch(assetUrl("capture_preview.bmp"), { cache: "no-store" });
+      if (!r.ok) throw new Error(String(r.status));
+      const url = URL.createObjectURL(await r.blob());
+      pic.onload = () => { if (captureUrl) URL.revokeObjectURL(captureUrl); captureUrl = url; };
+      pic.src = url;
+      pic.hidden = false;
+    } catch (e) { pic.hidden = true; }
+  };
+  tick();
+  captureTimer = setInterval(tick, 1000);
+}
+
+// The banner can be made small (one line: title, count, a thin bar and Stop); remembered.
+function bannerMin() {
+  try { return localStorage.getItem("veloxify.bannerMin") === "1"; } catch (e) { return false; }
 }
 
 // Sticky rows (the League standings' own team) sit under the top bar and the status banner.

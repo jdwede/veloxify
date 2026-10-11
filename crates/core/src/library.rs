@@ -26,8 +26,9 @@ impl Default for ClipPolicy {
     }
 }
 
-/// Matches closer together than this belong to the same session.
-pub const SESSION_GAP_S: i64 = 3 * 3600;
+/// A new session starts after a break this long: about a night's sleep, not the date (a late
+/// session from 11 PM to 4 AM is one session; a long dinner break doesn't split one).
+pub const SESSION_GAP_S: i64 = 6 * 3600;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlayerRow {

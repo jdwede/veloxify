@@ -51,6 +51,7 @@ fn main() -> Result<()> {
         bail!("usage: cs2hl-capture <window title> <out.mp4> <seconds> [bitrate_mbps=20] [fps=60]");
     }
     let opts = CaptureOptions {
+        preview: None,
         window_title: args[0].clone(),
         out: args[1].clone(),
         seconds: args[2].parse()?,

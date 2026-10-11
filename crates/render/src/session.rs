@@ -208,6 +208,20 @@ pub fn silent_device(preferred: &str) -> Option<(String, String)> {
         .find_map(|want| devices.iter().find(|(_, name)| name.to_lowercase().contains(&want.to_lowercase())).cloned())
 }
 
+/// Where the capture keeps a small picture of what's being recorded (for the app's status banner).
+static PREVIEW: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+pub fn set_preview(path: Option<PathBuf>) {
+    let old = std::mem::replace(&mut *PREVIEW.lock().unwrap(), path);
+    if let Some(old) = old {
+        let _ = std::fs::remove_file(old);
+    }
+}
+
+fn preview_path() -> Option<String> {
+    PREVIEW.lock().unwrap().as_ref().map(|p| p.display().to_string())
+}
+
 /// Asks Windows to keep the display (and the PC) awake from this thread, or lets it sleep again.
 fn keep_display_on(on: bool) {
     use windows::Win32::System::Power::{SetThreadExecutionState, ES_CONTINUOUS, ES_DISPLAY_REQUIRED, ES_SYSTEM_REQUIRED};
@@ -582,6 +596,7 @@ impl Renderer {
                     fps: o.fps,
                     audio_pid: self.pid,
                     abort: Some(self.abort.clone()),
+                    preview: preview_path(),
                 };
                 let (tx, rx) = std::sync::mpsc::channel();
                 let o2 = opts.clone();
@@ -673,6 +688,7 @@ impl Renderer {
                 fps: o.fps,
                 audio_pid: self.pid,
                 abort: Some(self.abort.clone()),
+                preview: preview_path(),
             };
             let (tx, rx) = std::sync::mpsc::channel();
             let o2 = opts.clone();

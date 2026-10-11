@@ -36,6 +36,9 @@ pub struct CaptureOptions {
     pub audio_pid: Option<u32>,
     /// Set from another thread to stop recording early (the outcome reports `aborted`).
     pub abort: Option<Arc<AtomicBool>>,
+    /// Keep a small picture of what's being recorded here (a BMP, about once a second), for the
+    /// app to show while it records.
+    pub preview: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -60,6 +63,41 @@ struct Job {
     started: Option<Sender<()>>,
     abort: Option<Arc<AtomicBool>>,
     aborted: Arc<AtomicBool>,
+    preview: Option<String>,
+    last_preview: Option<Instant>,
+}
+
+/// A frame (BGRA rows `pitch` bytes apart) shrunk to `tw` pixels wide, as a 24-bit BMP file.
+fn thumb_bmp(raw: &[u8], w: usize, h: usize, pitch: usize, tw: usize) -> Vec<u8> {
+    let th = (h * tw / w.max(1)).max(1);
+    let row = (tw * 3 + 3) & !3;
+    let size = 54 + row * th;
+    let mut out = Vec::with_capacity(size);
+    out.extend_from_slice(b"BM");
+    out.extend_from_slice(&(size as u32).to_le_bytes());
+    out.extend_from_slice(&[0u8; 4]);
+    out.extend_from_slice(&54u32.to_le_bytes());
+    out.extend_from_slice(&40u32.to_le_bytes());
+    out.extend_from_slice(&(tw as i32).to_le_bytes());
+    out.extend_from_slice(&(th as i32).to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes());
+    out.extend_from_slice(&24u16.to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes());
+    out.extend_from_slice(&((row * th) as u32).to_le_bytes());
+    out.extend_from_slice(&[0u8; 16]);
+    // BMP rows run bottom to top.
+    for y in (0..th).rev() {
+        let line = (y * h / th) * pitch;
+        for x in 0..tw {
+            let p = line + (x * w / tw) * 4;
+            match raw.get(p..p + 3) {
+                Some(bgr) => out.extend_from_slice(bgr),
+                None => out.extend_from_slice(&[0, 0, 0]),
+            }
+        }
+        out.resize(out.len() + (row - tw * 3), 0);
+    }
+    out
 }
 
 struct Recorder {
@@ -98,6 +136,22 @@ impl GraphicsCaptureApiHandler for Recorder {
         if let Some(enc) = self.encoder.as_mut() {
             enc.send_frame(frame)?;
             *self.job.frames.lock().unwrap() += 1;
+        }
+        // About once a second, a small picture of it (written off this thread).
+        if let Some(path) = self.job.preview.clone() {
+            if self.job.last_preview.is_none_or(|t| t.elapsed() >= Duration::from_secs(1)) {
+                self.job.last_preview = Some(Instant::now());
+                if let Ok(mut buf) = frame.buffer() {
+                    let (w, h, pitch) = (buf.width() as usize, buf.height() as usize, buf.row_pitch() as usize);
+                    let bmp = thumb_bmp(buf.as_raw_buffer(), w, h, pitch, 320);
+                    std::thread::spawn(move || {
+                        let tmp = format!("{path}.tmp");
+                        if std::fs::write(&tmp, &bmp).is_ok() {
+                            let _ = std::fs::rename(&tmp, &path);
+                        }
+                    });
+                }
+            }
         }
         let aborted = self.job.abort.as_ref().is_some_and(|a| a.load(Ordering::SeqCst));
         if aborted {
@@ -140,6 +194,8 @@ pub fn record_window(opts: &CaptureOptions, started: Option<Sender<()>>) -> Resu
         started,
         abort: opts.abort.clone(),
         aborted: aborted.clone(),
+        preview: opts.preview.clone(),
+        last_preview: None,
     };
     // Start audio first so it's already running when the first video frame arrives.
     let stop = Arc::new(AtomicBool::new(false));

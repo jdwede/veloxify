@@ -63,7 +63,9 @@
 }
 
 * { box-sizing: border-box; }
-html, body { height: 100%; }
+/* min-height, not height: a body only as tall as the window would let the sticky top bar and
+   status banner scroll away once the page is longer than the window. */
+html, body { min-height: 100%; }
 body {
   margin: 0;
   color: var(--text);
@@ -491,8 +493,9 @@ code { font-family: Consolas, monospace; font-size: 12px; background: var(--row)
 .sess-w { font-size: 26px; font-weight: 800; color: var(--win); }
 .sess-l { font-size: 26px; font-weight: 800; color: var(--loss); }
 .sess-sep { font-size: 22px; font-weight: 700; color: var(--faint); }
-.sc-row { display: flex; gap: 14px; overflow-x: auto; padding-bottom: 8px; margin-bottom: 16px; scroll-snap-type: x mandatory; }
-.sc-card { flex: 0 0 270px; scroll-snap-align: start; background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px 16px; display: grid; gap: 10px; align-content: start; }
+/* At most 5 cards (you and your party), always fitting the width: no scrolling. */
+.sc-row { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; margin-bottom: 16px; }
+.sc-card { min-width: 0; background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px 16px; display: grid; gap: 10px; align-content: start; }
 .sc-card.me { border-color: var(--accent-line); }
 .sc-name { display: flex; align-items: center; gap: 8px; }
 .sc-name b { font-size: 15.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 150px; }
@@ -1371,3 +1374,30 @@ a.lg-match:hover { background: var(--row-hi); }
 .gn-from-g.dim { opacity: 0.35; }
 .gn-hit { fill: transparent; stroke: none; }
 .gn-spawn { cursor: pointer; }
+
+#gn-svg.hovering .gn-ln:not(.hl), #gn-svg.hovering .gn-from-g:not(.hl) { opacity: 0.12; transition: opacity 0.12s; }
+#gn-svg .gn-ln.hl .gn-arc { stroke-width: 4.5 !important; filter: drop-shadow(0 0 4px rgba(255, 255, 255, 0.55)); }
+#gn-svg .gn-from-g.hl .gn-from { r: 9; stroke-width: 3; }
+
+.banner-preview { width: 160px; height: 90px; object-fit: cover; border-radius: 6px; box-shadow: 0 2px 10px rgba(0, 0, 0, 0.45); background: #000; flex: none; margin: 0 4px; }
+
+.sess-queue { display: flex; align-items: center; gap: 8px; }
+.sess-queue .ic { width: 18px; height: 18px; color: var(--accent); display: inline-flex; }
+.sess-queue .ic svg { width: 18px; height: 18px; }
+
+.sc-card .sc-name b { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sc-card .sc-stats { gap: 4px; }
+
+.mp-rank { white-space: nowrap; }
+.mp-rank .rank-chip { margin: 0; }
+
+.banner-size { background: transparent; border: 1px solid currentColor; color: inherit; opacity: 0.8; border-radius: 4px; width: 24px; height: 22px; line-height: 18px; padding: 0; cursor: pointer; font-weight: 800; flex: none; }
+.banner-size:hover { opacity: 1; }
+.banner.min { padding: 3px 16px; box-shadow: 0 3px 10px rgba(0, 0, 0, 0.3); }
+.banner.min .banner-in { gap: 10px; min-height: 22px; }
+.banner.min .banner-title { font-size: 12px; letter-spacing: 0.02em; }
+.banner.min .banner-count { font-size: 12px; }
+.banner.min .banner-bar { height: 4px; }
+.banner.min .banner-note, .banner.min .banner-preview { display: none !important; }
+.banner.min .banner-btn { padding: 1px 10px; font-size: 12px; }
+.banner.min .banner-dot { width: 8px; height: 8px; }

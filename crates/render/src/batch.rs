@@ -156,6 +156,8 @@ pub fn render(
     if order.is_empty() {
         return Ok(0);
     }
+    crate::session::set_preview(Some(lib.join(PREVIEW_FILE)));
+    let _clear_preview = ClearPreview;
     let t0 = Instant::now();
     let (log_tx, log_rx) = std::sync::mpsc::channel::<String>();
     let started = Renderer::start(steamid64, profile, work_dir, abort, Box::new(move |s| {
@@ -448,6 +450,17 @@ pub fn reset_silent_clips(lib: &Path, steamid64: u64) -> Vec<(String, String)> {
     items
 }
 
+/// The live picture of what's being recorded, in the library (the app shows it in its banner).
+pub const PREVIEW_FILE: &str = "capture_preview.bmp";
+
+/// Removes the live picture when a batch ends, however it ends.
+struct ClearPreview;
+impl Drop for ClearPreview {
+    fn drop(&mut self) {
+        crate::session::set_preview(None);
+    }
+}
+
 /// A rendered lineup video (`lineup_clips.json`, by lineup id).
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct LineupClip {
@@ -639,6 +652,8 @@ pub fn render_lineups(
     if jobs.is_empty() {
         return Ok(0);
     }
+    crate::session::set_preview(Some(lib.join(PREVIEW_FILE)));
+    let _clear_preview = ClearPreview;
     let t0 = Instant::now();
     let (log_tx, log_rx) = std::sync::mpsc::channel::<String>();
     let start = |abort: Arc<AtomicBool>| -> Result<Renderer> {
