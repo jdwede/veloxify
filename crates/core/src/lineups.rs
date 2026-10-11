@@ -49,7 +49,7 @@ const RARE_SHARE: f32 = 0.10;
 /// lineup, not a miss).
 const MISS_AIM: f32 = 5.0;
 /// Bumped when the rules above change: `lineups.json` from older rules is rebuilt.
-pub const VERSION: u32 = 6;
+pub const VERSION: u32 = 7;
 /// Spawn spots closer than this are one spot.
 const SPAWN_RADIUS: f32 = 48.0;
 /// Example throws kept per lineup.
@@ -542,6 +542,15 @@ pub fn write(root: &Path) -> Result<()> {
             let mut newest: Vec<(&str, &DThrow)> = g.members.clone();
             newest.sort_by_key(|(mid, t)| (!in_main(t), std::cmp::Reverse(played(mid)), t.round, t.tick));
             let rep = newest.iter().find(|(_, t)| in_main(t) && t.tick > 0 && t.path.len() > 1).or(newest.first()).copied().unwrap();
+            // The flight drawn on the map: a whole one (some throws' flights were only picked up
+            // near the end), the most common aim's first.
+            let starts_at_hand = |t: &DThrow| t.path.first().is_some_and(|p| (p[0] as f32 - t.from[0]).hypot(p[1] as f32 - t.from[1]) < 150.0);
+            let drawn = newest
+                .iter()
+                .filter(|(_, t)| t.path.len() > 1 && starts_at_hand(t))
+                .min_by_key(|(_, t)| !in_main(t))
+                .map(|(_, t)| *t)
+                .unwrap_or(rep.1);
             // How the most common aim is thrown.
             let mut main_tags: BTreeMap<String, usize> = BTreeMap::new();
             for (_, t) in g.members.iter().filter(|(_, t)| in_main(t)) {
@@ -598,7 +607,7 @@ pub fn write(root: &Path) -> Result<()> {
                 yaw: r.yaw,
                 to: r.to,
                 // Every other point (8 ticks apart) is plenty to draw it.
-                path: r.path.iter().step_by(2).chain(r.path.last()).copied().collect(),
+                path: drawn.path.iter().step_by(2).chain(drawn.path.last()).copied().collect(),
                 technique,
                 tags,
                 click,

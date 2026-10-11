@@ -263,6 +263,7 @@ function relDay(date) {
 
 async function route() {
   const parts = location.hash.replace(/^#\/?/, "").split("/").filter(Boolean);
+  document.getElementById("xh-modal")?.remove(); // a crosshair opened on the previous page
   document.querySelectorAll("[data-nav]").forEach((a) => a.classList.remove("active"));
   const view = document.getElementById("view");
   await initLib();
@@ -278,6 +279,18 @@ async function route() {
   if (parts[0] === "grenades") {
     document.querySelector('[data-nav="grenades"]').classList.add("active");
     return renderGrenades(view, parts[1] ? decodeURIComponent(parts[1]) : null);
+  }
+  if (parts[0] === "insights") {
+    document.querySelector('[data-nav="insights"]').classList.add("active");
+    return renderInsights(view, parts[1] ? decodeURIComponent(parts[1]) : null);
+  }
+  if (parts[0] === "playstyle") {
+    document.querySelector('[data-nav="playstyle"]').classList.add("active");
+    return renderPlaystyle(view, parts[1] ? decodeURIComponent(parts[1]) : null);
+  }
+  if (parts[0] === "crosshairs") {
+    document.querySelector('[data-nav="profile"]').classList.add("active");
+    return renderCrosshairs(view);
   }
   if (parts[0] === "league") {
     document.querySelector('[data-nav="league"]').classList.add("active");
@@ -630,7 +643,7 @@ async function renderMatchPage(view, id, tab) {
 
 // The scoreboard's columns in their default order; drag a header to reorder (saved).
 const BOARD_COLS = [["rank", "Rank"], ["rating", "HLTV 3.0"], ["rws", "RWS"], ["swing", "Swing"], ["kills", "Kills"], ["assists", "Assists"], ["deaths", "Deaths"], ["kd", "K/D"],
-  ["adr", "ADR"], ["kr", "K/R"], ["kast", "KAST"], ["k2", "2K"], ["k3", "3K"], ["k4", "4K"], ["k5", "5K"]];
+  ["adr", "ADR"], ["kr", "K/R"], ["kast", "KAST"], ["k2", "2K"], ["k3", "3K"], ["k4", "4K"], ["k5", "5K"], ["xhair", "Crosshair"]];
 function boardCols() {
   let saved = [];
   try { saved = JSON.parse(localStorage.getItem("veloxify.boardCols") || "[]"); } catch (e) { /* default order */ }
@@ -644,6 +657,9 @@ function boardCols() {
 // Both teams, Leetify's match-details columns (no Leetify rating), sortable by any column.
 function renderMatchScoreboard(body, m) {
   const me = state.index.me;
+  // Crosshairs come from crosshairs.json: draw again once it's loaded.
+  if (!state.xh) loadCrosshairs().then(() => { if (document.body.contains(body)) renderMatchScoreboard(body, m); });
+  const codes = state.xh?.matches?.[m.id] || {};
   const COLS = boardCols();
   const by = matchSort.key === "rank" ? (p) => rankValue(p, m._roster) : MATCH_SORTS[matchSort.key];
   const sorted = (side) => m.players.filter((p) => p.side === side).sort((a, b) => {
@@ -664,6 +680,7 @@ function renderMatchScoreboard(body, m) {
       case "swing": return `<td class="${gradeClass("swing", d.swing || 0)}" title="Round Swing: average change in the team's chance to win each round (HLTV Rating 3.0)">${fmtSwing(d.swing || 0)}</td>`;
       case "rating": return `<td><span class="mp-rating ${ratingClass(r3(d))}">${f2(r3(d))}</span></td>`;
       case "rank": return `<td class="mp-rank">${rankHtml(p, m._roster)}</td>`;
+      case "xhair": return xhCell(codes[p.steamid], p.name);
       default: return `<td class="${c.multikill_rounds[Number(k[1])] ? "" : "zero"}">${c.multikill_rounds[Number(k[1])]}</td>`;
     }
   };
@@ -684,6 +701,7 @@ function renderMatchScoreboard(body, m) {
   body.querySelectorAll("th[data-sort]").forEach((th) => {
     th.onclick = () => {
       const k = th.dataset.sort;
+      if (!MATCH_SORTS[k] && k !== "rank") return; // e.g. Crosshair: nothing to sort by
       matchSort.desc = matchSort.key === k ? !matchSort.desc : k !== "name";
       matchSort.key = k;
       renderMatchScoreboard(body, m);
@@ -2943,7 +2961,8 @@ function renderProfile(view) {
     <div class="profile-head">
       <div class="profile-id">${avatarHtml(state.index.me, 64)}<div><div class="h2">Profile</div><div class="h1" style="display:flex;align-items:center;gap:10px">${esc(state.faceit?.nickname || state.index.me_name || "You")}${state.faceit?.level ? `<span class="rank-chip faceit" title="FACEIT level ${state.faceit.level} · ${(state.faceit.elo || 0).toLocaleString("en-US")} ELO">${levelBadge(state.faceit.level, 24)}<b>${(state.faceit.elo || 0).toLocaleString("en-US")}</b></span>` : ""}${premier ? premierChip(premier[0]) : ""}</div></div></div>
       <div class="profile-controls">${seg("last", [[10, "Last 10"], [30, "Last 30"], [50, "Last 50"], [0, "All time"]])}
-        ${seg("source", [["all", "All"], ["faceit", "FACEIT"], ["valve", "Premier"]])}</div>
+        ${seg("source", [["all", "All"], ["faceit", "FACEIT"], ["valve", "Premier"]])}
+        <a class="btn ghost" href="#/crosshairs" title="Every crosshair you've played with, and your favorites">${XH_ICON} Crosshairs</a></div>
     </div>
     <div class="profile-grid">
       <section class="panel skills">
@@ -3035,7 +3054,13 @@ async function loadCallouts() {
 }
 function mapCallouts(map) {
   const c = state.callouts || { maps: {} };
-  return (c.maps[map] = c.maps[map] || { places: {}, names: {} });
+  const m = (c.maps[map] = c.maps[map] || {});
+  // Your names for areas and lineups, your favorite lineups, and the ones you removed (misses).
+  m.places = m.places || {};
+  m.names = m.names || {};
+  m.favorites = m.favorites || [];
+  m.removed = m.removed || [];
+  return m;
 }
 async function saveCallouts() {
   if (tauri) await tauri.core.invoke("save_callouts", { callouts: state.callouts });
@@ -3080,7 +3105,7 @@ async function loadLineups(force = false) {
   return state.lineups;
 }
 const NADE_KINDS = [["smoke", "Smokes", "smokegrenade"], ["molotov", "Molotovs", "molotov"], ["flash", "Flashes", "flashbang"], ["he", "HEs", "hegrenade"]];
-const grenades = { kinds: new Set(["smoke", "molotov", "flash", "he"]), category: "instant", side: "all", min: 2, spawn: null, videoOnly: false, sel: null, zoom: 1, pan: [0, 0], map: null };
+const grenades = { kinds: new Set(["smoke", "molotov", "flash", "he"]), category: "instant", side: "all", min: 2, spawn: null, videoOnly: false, favOnly: false, showRemoved: false, sel: null, zoom: 1, pan: [0, 0], map: null };
 const placeName2 = (s) => (s || "").replace(/([a-z])([A-Z])/g, "$1 $2").replace("Bombsite", "Site ");
 const lineupClip = (id) => state.lineupClips?.[id];
 // A lineup's thumbnail: its video's frame (plays on hover) or a placeholder.
@@ -3120,8 +3145,12 @@ function renderGrenadeMap(view, d, map) {
   if (grenades.category === "instant" && !d.lineups.some((l) => l.category === "instant")) grenades.category = "set";
   const instantView = grenades.category === "instant";
   const fromSpawn = (l) => !grenades.spawn || (l.category === "instant" && `${l.side}:${l.spawn}` === grenades.spawn);
+  const mc = mapCallouts(map), isFav = (l) => mc.favorites.includes(l.id), isRemoved = (l) => mc.removed.includes(l.id);
+  const nRemoved = d.lineups.filter(isRemoved).length;
+  if (!nRemoved) grenades.showRemoved = false;
   const shown = d.lineups.filter((l) => l.category === grenades.category && (instantView || grenades.kinds.has(l.kind)) && fromSpawn(l)
-    && (grenades.side === "all" || l.side === grenades.side) && l.count >= grenades.min && (!grenades.videoOnly || lineupClip(l.id)?.clip));
+    && (grenades.side === "all" || l.side === grenades.side) && l.count >= grenades.min && (!grenades.videoOnly || lineupClip(l.id)?.clip)
+    && (!grenades.favOnly || isFav(l)) && isRemoved(l) === grenades.showRemoved);
   const sel = shown.find((l) => l.id === grenades.sel) || null;
   const names = lineupNames(d, map);
   const nm = (l) => names.get(l.id) || l.name;
@@ -3131,7 +3160,10 @@ function renderGrenadeMap(view, d, map) {
     const R = { smoke: 144, molotov: 120, flash: 40, he: 70 };
     const maxN = Math.max(1, ...shown.map((l) => l.count));
     const arcs = shown.map((l) => {
-      const pts = (l.path?.length > 1 ? l.path : [l.from, [...l.to, 0]]).map(([x, y]) => at(x, y));
+      // A flight picked up only near its end still starts at the throw spot.
+      const flight = l.path?.length > 1 ? l.path : [[...l.to, 0]];
+      const whole = Math.hypot(flight[0][0] - l.from[0], flight[0][1] - l.from[1]) < 150 ? flight : [l.from, ...flight];
+      const pts = whole.map(([x, y]) => at(x, y));
       const [fx, fy] = at(l.from[0], l.from[1]), [tx, ty] = at(l.to[0], l.to[1]);
       const on = sel?.id === l.id, dim = sel && !on;
       const wdt = 1.2 + 2.2 * Math.sqrt(l.count / maxN);
@@ -3148,10 +3180,11 @@ function renderGrenadeMap(view, d, map) {
       return `<g class="gn-from-g ${on ? "on" : ""} ${dim ? "dim" : ""}" data-gl="${esc(l.id)}"><circle cx="${fx}" cy="${fy}" r="12" class="gn-hit"/>
         <circle cx="${fx}" cy="${fy}" r="${on ? 8 : 5}" class="gn-from ${l.side === "T" ? "t" : "ct"}"/><title>${esc(nm(l))} · thrown from ${esc(areaName(d, map, l.from_place) || "here")}</title></g>`;
     }).join("");
-    // Spawn spots (instant lineups start from them).
+    // Spawn spots that instant smokes are thrown from (the others would only be clutter).
     const spawns = grenades.category === "instant" || sel?.category === "instant" ? Object.entries(d.spawns || {}).flatMap(([side, list]) => (grenades.side === "all" || grenades.side === side ? list.map((p, i) => {
       const [x, y] = at(p[0], p[1]);
       const n = d.lineups.filter((l) => l.category === "instant" && l.side === side && l.spawn === i + 1).length;
+      if (!n) return "";
       return `<g class="gn-spawn ${side === "T" ? "t" : "ct"} ${(sel?.spawn === i + 1 && sel?.side === side) || grenades.spawn === `${side}:${i + 1}` ? "on" : ""}" data-spawn="${side}:${i + 1}"><circle cx="${x}" cy="${y}" r="9"/><text x="${x}" y="${y + 3.5}" text-anchor="middle">${i + 1}</text>
         <title>${side} spawn ${i + 1}: ${n ? `${n} instant smoke${n === 1 ? "" : "s"} from here` : "no instant smokes from here yet"}</title></g>`;
     }) : [])).join("") : "";
@@ -3188,6 +3221,8 @@ function renderGrenadeMap(view, d, map) {
       <label class="gn-min">Thrown at least <select id="gn-min">${[2, 3, 5, 10].map((n) => `<option value="${n}" ${grenades.min === n ? "selected" : ""}>${n}×</option>`).join("")}</select></label>
       ${grenades.spawn ? `<button class="chip on" id="gn-spawn-clear" title="Show every spawn">${esc(grenades.spawn.replace(":", " spawn "))} ✕</button>` : ""}
       <label class="gn-min"><input type="checkbox" id="gn-vid" ${grenades.videoOnly ? "checked" : ""}> Only with video</label>
+      <button class="chip ${grenades.favOnly ? "on" : ""}" id="gn-fav-only" title="Only your favorite lineups">${ICONS.star} Favorites <span class="sub">${mc.favorites.filter((id) => d.lineups.some((l) => l.id === id)).length}</span></button>
+      ${nRemoved ? `<button class="chip ${grenades.showRemoved ? "on" : ""}" id="gn-removed" title="Lineups you removed; open one to put it back">Removed <span class="sub">${nRemoved}</span></button>` : ""}
       ${tauri ? `<button class="btn ghost" id="gn-callouts">${grenades.calloutsOpen ? "Done" : "Callouts"}</button>` : ""}
     </div>
     ${grenades.calloutsOpen ? `<section class="panel gn-callouts"><div class="panel-head"><div class="h3">${esc(mapName(map))} callouts</div><span class="grow"></span><span class="sub">Rename an area and every lineup thrown from or landing there uses your name</span></div>
@@ -3202,6 +3237,7 @@ function renderGrenadeMap(view, d, map) {
             : clip?.too_old ? `<div class="gn-novideo"><b>No video</b><span>Every time this was thrown, it was in a demo from before a CS2 update, and CS2 can't play those demos any more. It gets a video the next time it's thrown in one of your matches.</span></div>`
             : `<div class="gn-novideo">${clip?.error ? `<b>No video</b><span>${esc(clip.error)}</span>` : `<b>No video yet</b><span>Veloxify films lineups in the background after your highlights, most thrown first.</span>`}${tauri ? `<button class="btn primary" id="gn-render">Film this lineup now</button>` : ""}</div>`}</div>
           <div class="gn-title">${kindIcon(sel.kind)}${grenades.renaming ? `<input class="gn-rename-in" id="gn-rename-in" value="${esc(nm(sel))}" maxlength="60" aria-label="Lineup name">` : `<b>${esc(nm(sel))}</b>`}${sel.spawn ? `<span class="gn-spawnchip">Spawn #${sel.spawn}</span>` : ""}<span class="gn-x">×${sel.count}</span>
+            ${tauri ? `<button class="btn ghost small gn-star ${isFav(sel) ? "on" : ""}" id="gn-fav" title="${isFav(sel) ? "Remove from favorites" : "Add to favorites"}">${ICONS.star}</button>` : ""}
             ${tauri ? `<button class="btn ghost small" id="gn-rename">${grenades.renaming ? "Save" : "Rename"}</button>${mapCallouts(map).names[sel.id] && !grenades.renaming ? `<button class="btn ghost small" id="gn-rename-reset" title="Back to the automatic name">Reset</button>` : ""}` : ""}</div>
           <div class="sub">${sub(sel)} · ${sel.side} · thrown ${sel.count} time${sel.count === 1 ? "" : "s"} in ${sel.matches} match${sel.matches === 1 ? "" : "es"} by ${sel.throwers} player${sel.throwers === 1 ? "" : "s"} · about ${Math.round(sel.t)} seconds into the round</div>
           <div class="gn-tags">${tagList(sel).map(([t, n]) => `<span class="tag ${t === sel.technique ? "main" : ""}">${esc(t)}${n < sel.count ? ` ${n}×` : ""}</span>`).join("")}<span class="tag">${esc(({ left: "Left click", right: "Right click", both: "Left + right click" })[sel.click] || sel.click)}</span></div>
@@ -3209,10 +3245,11 @@ function renderGrenadeMap(view, d, map) {
           <div class="ln-cmd"><code>${esc(setpos)}</code><button class="btn" id="gn-copy">Copy</button></div>
           <div class="sub">Paste in the console on a practice server (sv_cheats 1) to stand and aim exactly like this.</div>
           <div class="gn-ex"><div class="h3">Thrown by</div>${sel.examples.map((e) => `<a href="${matchHref(e.match_id, "lineups")}">${esc(e.name || "someone")} · round ${e.round}</a>`).join("")}</div>
-          <button class="btn ghost" id="gn-back">◀ All lineups</button></div>` : ""}
+          <div class="gn-detail-foot"><button class="btn ghost" id="gn-back">◀ All lineups</button>
+            ${tauri ? `<button class="btn ghost" id="gn-remove" title="${isRemoved(sel) ? "Show it in the list again" : "Hide a lineup that's really a miss (or one you don't want); you can put it back"}">${isRemoved(sel) ? "Put back" : "Remove"}</button>` : ""}</div></div>` : ""}
         <div class="gn-list">${shown.map((l) => `<button class="gn-item ${sel?.id === l.id ? "on" : ""}" data-gl="${esc(l.id)}">
           ${lineupThumb(l)}
-          <div class="gn-item-body"><div class="gn-item-title">${kindIcon(l.kind)}<b>${esc(nm(l))}</b>${l.spawn ? `<span class="gn-spawnchip">Spawn #${l.spawn}</span>` : ""}<span class="gn-x">×${l.count}</span></div>
+          <div class="gn-item-body"><div class="gn-item-title">${kindIcon(l.kind)}${isFav(l) ? `<span class="gn-fav-mark" title="Favorite">${ICONS.star}</span>` : ""}<b>${esc(nm(l))}</b>${l.spawn ? `<span class="gn-spawnchip">Spawn #${l.spawn}</span>` : ""}<span class="gn-x">×${l.count}</span></div>
             <div class="sub">${sub(l)} · ${l.side}</div><div class="gn-item-tag">${esc(l.technique)}</div></div></button>`).join("") || `<div class="empty small">No lineups with these filters.</div>`}</div>
       </section>
     </div>
@@ -3227,6 +3264,19 @@ function renderGrenadeMap(view, d, map) {
   view.querySelector("#gn-min").onchange = (e) => { grenades.min = Number(e.target.value); grenades.sel = null; rerender(); };
   view.querySelector("#gn-vid").onchange = (e) => { grenades.videoOnly = e.target.checked; grenades.sel = null; rerender(); };
   view.querySelector("#gn-callouts")?.addEventListener("click", () => { grenades.calloutsOpen = !grenades.calloutsOpen; rerender(); });
+  view.querySelector("#gn-fav-only").onclick = () => { grenades.favOnly = !grenades.favOnly; grenades.sel = null; rerender(); };
+  view.querySelector("#gn-removed")?.addEventListener("click", () => { grenades.showRemoved = !grenades.showRemoved; grenades.sel = null; rerender(); });
+  view.querySelector("#gn-fav")?.addEventListener("click", async () => {
+    mc.favorites = isFav(sel) ? mc.favorites.filter((id) => id !== sel.id) : [...mc.favorites, sel.id];
+    await saveCallouts();
+    rerender();
+  });
+  view.querySelector("#gn-remove")?.addEventListener("click", async () => {
+    mc.removed = isRemoved(sel) ? mc.removed.filter((id) => id !== sel.id) : [...mc.removed, sel.id];
+    grenades.sel = null;
+    await saveCallouts();
+    rerender();
+  });
   view.querySelectorAll("[data-place]").forEach((i) => (i.onchange = async () => {
     const v = i.value.trim(), place = i.dataset.place, places = mapCallouts(map).places;
     if (!v || v === (d.callouts?.[place] || placeName2(place))) delete places[place]; else places[place] = v;
@@ -3251,7 +3301,11 @@ function renderGrenadeMap(view, d, map) {
   const light = (id) => {
     if (!svgEl) return;
     svgEl.classList.toggle("hovering", !!id);
-    svgEl.querySelectorAll("[data-gl]").forEach((g) => g.classList.toggle("hl", g.dataset.gl === id));
+    svgEl.querySelectorAll("[data-gl]").forEach((g) => {
+      g.classList.toggle("hl", g.dataset.gl === id);
+      // On top of the others, so nothing covers it.
+      if (g.dataset.gl === id) g.parentNode.appendChild(g);
+    });
   };
   view.querySelectorAll(".gn-item[data-gl]").forEach((b) => {
     b.addEventListener("mouseenter", () => light(b.dataset.gl));
@@ -3281,6 +3335,1488 @@ function renderGrenadeMap(view, d, map) {
     await loadLineups();
     if (JSON.stringify(state.lineupClips || {}) !== before && document.getElementById("player").hidden && !view.querySelector("#gn-video:not([paused])")) rerender();
   }, 15000);
+}
+
+// ---- crosshairs -------------------------------------------------------------------------------------
+
+// Every crosshair seen in your matches (crosshairs.json, written as demos are read): each match's
+// players' codes, and each code read into CS2's pixel crosshair with the code CS2 imports today.
+async function loadCrosshairs(force = false) {
+  if (!state.xh || force) {
+    try { state.xh = await (await fetch(assetUrl("crosshairs.json"), { cache: "no-store" })).json(); } catch (e) { state.xh = null; }
+    state.xh = state.xh && state.xh.codes ? state.xh : { matches: {}, codes: {} };
+    try { state.xhFav = await (await fetch(assetUrl("crosshair_favorites.json"), { cache: "no-store" })).json(); } catch (e) { state.xhFav = null; }
+    if (!Array.isArray(state.xhFav)) state.xhFav = [];
+  }
+  return state.xh;
+}
+const xhOf = (code) => state.xh?.codes?.[code] || null;
+const xhFav = (code) => state.xhFav?.find((f) => f.code === code);
+async function saveXhFav() {
+  if (tauri) await tauri.core.invoke("save_crosshair_favorites", { favorites: state.xhFav });
+}
+const XH_ICON = `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 3v6M12 15v6M3 12h6M15 12h6"/></svg>`;
+const XH_STYLES = ["Dynamic cross", "Dynamic circle", "Dynamic cross (legacy)", "Static circle", "Static cross", "Static cross (shot feedback)", "Dot only", "Dynamic quad", "Static square", "Static quad"];
+
+// The crosshair as it looks on a 1080p screen (`zoom` times bigger), centred in a `size` box.
+function xhSvg(c, size = 40, zoom = 1) {
+  if (!c) return `<svg class="xh-svg" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" aria-hidden="true"><text x="50%" y="58%" text-anchor="middle" class="xh-none">?</text></svg>`;
+  // Sizes are pixels at the code's screen height; CS2 scales them to the real one.
+  const k = 1080 / (c.screen_height || 1080);
+  const px = (v) => Math.round(v * k);
+  const L = px(c.length) * zoom, T = Math.max(1, px(c.thickness)) * zoom, inner = (px(c.gap) / 2) * zoom;
+  const fill = `rgba(${c.color[0]},${c.color[1]},${c.color[2]},${(c.color[3] / 255).toFixed(2)})`;
+  const oc = c.outline_color || [0, 0, 0, 255];
+  const line = `rgba(${oc[0]},${oc[1]},${oc[2]},${((oc[3] / 255) * (c.outline === 2 ? 0.5 : 1)).toFixed(2)})`;
+  const o = c.outline ? zoom : 0;
+  const cx = size / 2, cy = size / 2;
+  const rects = [], strokes = [];
+  const style = c.style;
+  if (style === 1 || style === 3) {
+    strokes.push([inner + L / 2, T]);
+  } else if (style === 8) {
+    const h = inner + L / 2;
+    rects.push([cx - h - T / 2, cy - h - T / 2, 2 * h + T, T], [cx - h - T / 2, cy + h - T / 2, 2 * h + T, T], [cx - h - T / 2, cy - h - T / 2, T, 2 * h + T], [cx + h - T / 2, cy - h - T / 2, T, 2 * h + T]);
+  } else if (style !== 6) {
+    rects.push([cx + inner, cy - T / 2, L, T], [cx - inner - L, cy - T / 2, L, T], [cx - T / 2, cy + inner, T, L]);
+    if (!c.t_style) rects.push([cx - T / 2, cy - inner - L, T, L]);
+  }
+  if (c.dot || style === 6) rects.push([cx - T / 2, cy - T / 2, T, T]);
+  const r = (x, y, w, h, f) => `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${w.toFixed(1)}" height="${h.toFixed(1)}" fill="${f}"/>`;
+  const outlines = o ? rects.map(([x, y, w, h]) => r(x - o, y - o, w + 2 * o, h + 2 * o, line)).join("") + strokes.map(([rad, w]) => `<circle cx="${cx}" cy="${cy}" r="${rad}" fill="none" stroke="${line}" stroke-width="${w + 2 * o}"/>`).join("") : "";
+  return `<svg class="xh-svg" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" shape-rendering="crispEdges" aria-hidden="true">${outlines}
+    ${rects.map(([x, y, w, h]) => r(x, y, w, h, fill)).join("")}${strokes.map(([rad, w]) => `<circle cx="${cx}" cy="${cy}" r="${rad}" fill="none" stroke="${fill}" stroke-width="${w}"/>`).join("")}</svg>`;
+}
+
+// The scoreboard's crosshair cell: the preview (opens the crosshair) and a copy button.
+function xhCell(code, who) {
+  if (!code) return `<td class="xh-cell"><span class="sub" title="Not read yet: Veloxify re-reads this match's demo in the background">—</span></td>`;
+  const c = xhOf(code);
+  return `<td class="xh-cell"><button class="xh-prev" data-xh="${esc(code)}" data-xh-who="${esc(who)}" title="${esc(who)}'s crosshair (2× size): click for more">${xhSvg(c, 34, 2)}</button>
+    <button class="xh-copy" data-xh-copy="${esc(c?.cs2 || code)}" title="Copy the code (CS2: Settings > Crosshair > Import)">Copy</button></td>`;
+}
+
+async function copyXh(code, btn) {
+  try { await navigator.clipboard.writeText(code); } catch (e) { /* the button says so */ }
+  if (btn) { const t = btn.textContent; btn.textContent = "Copied"; setTimeout(() => (btn.textContent = t), 1400); }
+}
+
+async function recordingCrosshair() {
+  if (!tauri) return "";
+  if (!settingsData) settingsData = await tauri.core.invoke("get_settings");
+  return settingsData.render.own_crosshair ? "own" : settingsData.render.crosshair || "";
+}
+async function useInRecordings(code) {
+  if (!tauri) return;
+  if (!settingsData) settingsData = await tauri.core.invoke("get_settings");
+  settingsData.render.crosshair = code === "own" ? "" : code;
+  settingsData.render.own_crosshair = code === "own";
+  await saveSettings();
+}
+
+// A crosshair up close: what it is and what you can do with it.
+async function openXh(code, who = "") {
+  await loadCrosshairs();
+  const c = xhOf(code);
+  document.getElementById("xh-modal")?.remove();
+  const el = document.createElement("div");
+  el.id = "xh-modal";
+  el.className = "xh-modal";
+  const recording = await recordingCrosshair();
+  const paint = () => {
+    const fav = xhFav(code);
+    el.innerHTML = `<div class="xh-box" role="dialog" aria-label="Crosshair">
+      <div class="xh-head"><div><div class="h3">${esc(fav?.name || (who ? `${who}'s crosshair` : "Crosshair"))}</div>
+        <div class="sub">${c ? `${esc(XH_STYLES[c.style] || "Crosshair")} · length ${c.length}, gap ${c.gap}, thickness ${c.thickness}${c.dot ? ", dot" : ""}${c.outline ? ", outline" : ""} · sizes for a ${c.screen_height}-line screen` : "Veloxify can't read this code"}</div></div>
+        <button class="icon-btn" id="xh-close" aria-label="Close">✕</button></div>
+      <div class="xh-stage">${xhSvg(c, 220, 4)}<span class="xh-scale">4× zoom</span><div class="xh-actual">${xhSvg(c, 64, 1)}<span>Actual size</span></div></div>
+      ${c?.format === "csgo" ? `<div class="note">This code is from before CS2's September 2026 crosshair update, which CS2 no longer imports. Veloxify converted it to the new pixel crosshair: close, but not guaranteed to match exactly.</div>` : ""}
+      <div class="xh-code"><code>${esc(c?.cs2 || code)}</code><button class="btn" id="xh-copy">Copy</button></div>
+      <div class="sub">In CS2: Settings > Crosshair > Import, then paste.</div>
+      <div class="xh-actions">
+        ${tauri && c ? `<button class="btn primary" id="xh-apply">Use in my CS2</button>` : ""}
+        <button class="btn ${fav ? "on" : ""}" id="xh-fav">${ICONS.star} ${fav ? "Favorited" : "Favorite"}</button>
+        ${tauri && c ? `<button class="btn ${recording === code ? "on" : ""}" id="xh-rec">${recording === code ? "Recording with it" : "Use in recordings"}</button>` : ""}
+      </div>
+      <div class="sub" id="xh-msg"></div></div>`;
+    el.querySelector("#xh-close").onclick = () => el.remove();
+    el.querySelector("#xh-copy").onclick = (e) => copyXh(c?.cs2 || code, e.currentTarget);
+    el.querySelector("#xh-fav").onclick = async () => {
+      if (fav) state.xhFav = state.xhFav.filter((f) => f.code !== code);
+      else state.xhFav.unshift({ code, name: who ? `${who}'s crosshair` : "", by: who, added: Math.floor(Date.now() / 1000) });
+      await saveXhFav();
+      paint();
+      document.dispatchEvent(new Event("xh-changed"));
+    };
+    el.querySelector("#xh-apply")?.addEventListener("click", async (e) => {
+      const msg = el.querySelector("#xh-msg");
+      e.currentTarget.disabled = true;
+      try {
+        await tauri.core.invoke("apply_crosshair", { code });
+        msg.innerHTML = `<b class="up">Done.</b> It's your crosshair the next time you start CS2. (Your previous settings are backed up next to them.)`;
+      } catch (err) {
+        msg.innerHTML = `<b class="down">Not set:</b> ${esc(err)}`;
+        e.currentTarget.disabled = false;
+      }
+    });
+    el.querySelector("#xh-rec")?.addEventListener("click", async () => {
+      await useInRecordings(code);
+      paint();
+      document.dispatchEvent(new Event("xh-changed"));
+    });
+  };
+  paint();
+  el.addEventListener("click", (e) => { if (e.target === el) el.remove(); });
+  document.body.appendChild(el);
+}
+// Crosshair buttons anywhere on the page.
+document.addEventListener("click", (e) => {
+  const p = e.target.closest("[data-xh]");
+  if (p) { e.preventDefault(); openXh(p.dataset.xh, p.dataset.xhWho || ""); return; }
+  const c = e.target.closest("[data-xh-copy]");
+  if (c) { e.preventDefault(); copyXh(c.dataset.xhCopy, c); }
+});
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") document.getElementById("xh-modal")?.remove(); });
+
+// Your crosshairs: favorites, every one you've played with (newest first), and the ones others
+// in your matches use most.
+async function renderCrosshairs(view) {
+  const X = await loadCrosshairs(true);
+  const me = state.index.me;
+  const recording = await recordingCrosshair();
+  const tsOf = (id) => summaryOf(id)?.played_ts || 0;
+  const mine = new Map();
+  for (const [id, players] of Object.entries(X.matches)) {
+    const code = players[me];
+    if (!code) continue;
+    const ts = tsOf(id);
+    const e = mine.get(code) || { code, first: ts, last: ts, n: 0, last_id: id };
+    e.n++;
+    if (ts < e.first) e.first = ts;
+    if (ts >= e.last) { e.last = ts; e.last_id = id; }
+    mine.set(code, e);
+  }
+  const history = [...mine.values()].sort((a, b) => b.last - a.last);
+  // Others' crosshairs, by how many players used them.
+  const users = new Map();
+  for (const [id, players] of Object.entries(X.matches)) {
+    for (const [sid, code] of Object.entries(players)) {
+      if (sid === me || !code) continue;
+      const u = users.get(code) || { code, players: new Set() };
+      u.players.add(sid);
+      users.set(code, u);
+    }
+  }
+  const popular = [...users.values()].filter((u) => u.players.size >= 2).sort((a, b) => b.players.size - a.players.size).slice(0, 12);
+  const day = (ts) => (ts ? new Date(ts * 1000).toLocaleDateString([], { month: "short", day: "numeric", year: new Date(ts * 1000).getFullYear() !== new Date().getFullYear() ? "numeric" : undefined }) : "");
+  const card = (code, title, sub) => {
+    const c = xhOf(code);
+    return `<div class="xh-card ${recording === code ? "rec" : ""}">
+      <button class="xh-card-prev" data-xh="${esc(code)}">${xhSvg(c, 96, 2)}</button>
+      <div class="xh-card-body"><b>${esc(title)}</b><span class="sub">${sub}</span>
+        <div class="xh-card-actions"><button class="btn small" data-xh-copy="${esc(c?.cs2 || code)}">Copy</button><button class="btn small ghost" data-xh="${esc(code)}">More</button>
+        ${xhFav(code) ? `<span class="xh-star" title="Favorite">${ICONS.star}</span>` : ""}${recording === code ? `<span class="tag main">Recording with it</span>` : ""}</div></div></div>`;
+  };
+  const current = history[0];
+  view.innerHTML = `
+    <a class="day-back" href="#/profile">◀ Profile</a>
+    <div class="gn-head"><div><div class="h1">Crosshairs</div><div class="sub">Every crosshair you've played with, read from your demos, plus your favorites. Copy one to import it in CS2, put it straight in your CS2 settings, or record your clips with it.</div></div></div>
+    ${!Object.keys(X.matches).length ? `<div class="empty">No crosshairs yet. Veloxify reads them from your demos in the background (after you close CS2), newest matches first.</div>` : ""}
+    ${current ? `<section class="panel xh-current"><div class="panel-head"><div class="h3">Your crosshair now</div><span class="grow"></span><span class="sub">From your latest match</span></div>${card(current.code, "Current", `Since ${day(current.first)} · ${current.n} match${current.n === 1 ? "" : "es"}`)}</section>` : ""}
+    <section class="panel"><div class="panel-head"><div class="h3">Favorites</div><span class="grow"></span><span class="sub">Star a crosshair (yours or anyone's from a match page) to keep it here</span></div>
+      <div class="xh-grid">${state.xhFav.map((f) => card(f.code, f.name || "Favorite", f.by ? `From ${esc(f.by)}` : "")).join("") || `<div class="empty small">No favorites yet.</div>`}</div></section>
+    <section class="panel"><div class="panel-head"><div class="h3">Your history</div><span class="grow"></span><span class="sub">${history.length} crosshair${history.length === 1 ? "" : "s"}</span></div>
+      <div class="xh-grid">${history.map((h, i) => card(h.code, i === 0 ? "Current" : day(h.last), `${day(h.first)}${h.first !== h.last ? ` – ${day(h.last)}` : ""} · ${h.n} match${h.n === 1 ? "" : "es"}`)).join("") || `<div class="empty small">None read yet.</div>`}</div></section>
+    ${popular.length ? `<section class="panel"><div class="panel-head"><div class="h3">Popular in your matches</div><span class="grow"></span><span class="sub">Used by the most players you've played with or against</span></div>
+      <div class="xh-grid">${popular.map((u) => card(u.code, `${u.players.size} players`, "")).join("")}</div></section>` : ""}
+    <section class="panel"><div class="panel-head"><div class="h3">In your recordings</div></div>
+      <div class="set-row"><div class="lbl"><b>${recording === "own" ? "Each player's own crosshair" : recording ? "A crosshair you picked" : "Clean default"}</b><span>Clips and lineup videos are recorded with this. Pick one above (More > Use in recordings), or switch back here.</span></div>
+        ${tauri ? `<div class="seg"><button data-rec="" class="${!recording ? "on" : ""}">Clean default</button><button data-rec="own" class="${recording === "own" ? "on" : ""}">Player's own</button></div>` : ""}</div></section>`;
+  view.querySelectorAll("[data-rec]").forEach((b) => (b.onclick = async () => { await useInRecordings(b.dataset.rec); renderCrosshairs(view); }));
+  const again = () => { if (location.hash.startsWith("#/crosshairs")) renderCrosshairs(view); };
+  document.removeEventListener("xh-changed", state.xhListener || (() => {}));
+  state.xhListener = again;
+  document.addEventListener("xh-changed", again);
+}
+
+// ---- match insights ---------------------------------------------------------------------------------
+
+// Every round of every match on a map (insights/<map>.json, built in the background from each
+// match's 2D replay): who stood where and when, what they bought, the kills, damage, grenades and
+// the bomb. The page asks questions of it: tendencies by round type, "if this, then what",
+// strats, plants, entries, lurks and timings. Times are tenths of a second since the round went live.
+const INS_KINDS = [["pistol", "Pistol"], ["eco", "Eco"], ["force", "Force buy"], ["full", "Full buy"]];
+const INS_VIEWS = [["overview", "Overview"], ["ask", "Ask"], ["positions", "Positions"], ["strats", "Strats"], ["plants", "Plants"], ["paths", "Paths"]];
+const INS_WHO = [["opp", "Opponents"], ["us", "Your team"], ["all", "Everyone"]];
+const NADE_NAMES = ["Smoke", "Molotov", "Flash", "HE", "Decoy"];
+const SIDE_WORD = { T: "T", C: "CT" };
+const ins = { map: null, side: "T", kinds: [], who: "opp", src: "all", view: "overview", t: 200, conds: [], sel: null, zoom: 1, pan: [0, 0], line: null, drawing: false, pathTab: "entries" };
+try { Object.assign(ins, JSON.parse(localStorage.getItem("veloxify.insights") || "{}"), { sel: null, drawing: false }); } catch (e) { /* defaults */ }
+const saveIns = () => { try { localStorage.setItem("veloxify.insights", JSON.stringify({ side: ins.side, kinds: ins.kinds, who: ins.who, src: ins.src, view: ins.view, t: ins.t, conds: ins.conds, line: ins.line, pathTab: ins.pathTab })); } catch (e) { /* not saved */ } };
+
+// "1:42" on the round clock for a time since the round went live.
+const clockOf = (tenths) => { const s = Math.max(0, Math.round(ROUND_S - tenths / 10)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`; };
+const pctOf = (a, b) => (b ? Math.round((100 * a) / b) : 0);
+const median = (a) => { if (!a.length) return null; const s = [...a].sort((x, y) => x - y); return s[Math.floor(s.length / 2)]; };
+
+async function loadInsightsIndex() {
+  try { return await (await fetch(assetUrl("insights/index.json"), { cache: "no-store" })).json(); } catch (e) { return null; }
+}
+async function loadInsights(map) {
+  state.insights = state.insights || new Map();
+  if (!state.insights.has(map)) {
+    let D = null;
+    try { D = await (await fetch(assetUrl(`insights/${map}.json`), { cache: "no-store" })).json(); } catch (e) { /* not built yet */ }
+    if (D) prepInsights(D);
+    state.insights.set(map, D);
+  }
+  return state.insights.get(map);
+}
+
+// Per round: whose side is whose, and quick lookups.
+function prepInsights(D) {
+  const U = D.path_unit || 4;
+  D.U = U;
+  for (const r of D.rounds) {
+    const mt = D.matches[r.m];
+    r.match = mt;
+    r.team = { T: [], C: [] };
+    [...r.sides].forEach((s, p) => { if (s === "T" || s === "C") r.team[s].push(p); });
+    // Your team's side this round (most of that side's players on your team).
+    const mineOn = (s) => r.team[s].filter((p) => mt.players[p]?.mine).length * 2 > r.team[s].length;
+    r.ours = mineOn("T") ? "T" : mineOn("C") ? "C" : null;
+    r.firstKill = r.kills[0] || null;
+    r.contact = r.hurts.find((h) => h[1] >= 0 && r.sides[h[1]] !== r.sides[h[2]])?.[0] ?? r.firstKill?.[0] ?? null;
+  }
+  // Place grid: which callout any spot on the map belongs to.
+  const g = D.grid;
+  D.placeAt = (x, y) => {
+    if (!g || !g.w) return -1;
+    const cx = Math.floor((x - g.x0) / g.cell), cy = Math.floor((y - g.y0) / g.cell);
+    for (let r = 0; r <= 2; r++) {
+      for (let dx = -r; dx <= r; dx++) for (let dy = -r; dy <= r; dy++) {
+        if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
+        const x2 = cx + dx, y2 = cy + dy;
+        if (x2 < 0 || y2 < 0 || x2 >= g.w || y2 >= g.h) continue;
+        const v = g.data[y2 * g.w + x2];
+        if (v >= 0) return v;
+      }
+    }
+    return -1;
+  };
+  // Each place's middle (for its label) and its cells (to outline it).
+  D.placeCells = new Map();
+  if (g && g.w) g.data.forEach((v, i) => {
+    if (v < 0) return;
+    if (!D.placeCells.has(v)) D.placeCells.set(v, []);
+    D.placeCells.get(v).push([g.x0 + (i % g.w) * g.cell, g.y0 + Math.floor(i / g.w) * g.cell]);
+  });
+  D.placeMid = new Map([...D.placeCells].map(([v, cells]) => {
+    const mx = sum(cells.map((c) => c[0])) / cells.length, my = sum(cells.map((c) => c[1])) / cells.length;
+    // The cell nearest the middle (an L-shaped area's middle can be outside it).
+    const best = cells.reduce((a, c) => (Math.hypot(c[0] - mx, c[1] - my) < Math.hypot(a[0] - mx, a[1] - my) ? c : a));
+    return [v, [best[0] + g.cell / 2, best[1] + g.cell / 2, cells.length]];
+  }));
+  // Bombsite middles: where bombs are planted (else the site's cells).
+  D.sites = [0, 1].map((s) => {
+    const ps = D.rounds.filter((r) => r.plant?.[2] === s).map((r) => [r.plant[3], r.plant[4]]);
+    if (ps.length) return [sum(ps.map((p) => p[0])) / ps.length, sum(ps.map((p) => p[1])) / ps.length];
+    const pl = D.places.indexOf(s ? "BombsiteB" : "BombsiteA");
+    return D.placeMid.get(pl)?.slice(0, 2) || null;
+  });
+}
+
+// Where player p was at time t (tenths): [x, y] or null (dead / not yet).
+function posAt(D, r, p, t) {
+  const path = r.paths[p];
+  const i = Math.round(t / 5);
+  if (!path || 2 * i + 1 >= path.length) return null;
+  return [path[2 * i] * D.U, path[2 * i + 1] * D.U];
+}
+// The callout player p was in at time t, or -1.
+function placeAt(r, p, t) {
+  const a = r.areas[p];
+  if (!a || !a.length) return -1;
+  if (r.death[p] >= 0 && t >= r.death[p]) return -1;
+  let pl = -1;
+  for (let i = 0; i < a.length; i += 2) { if (a[i + 1] > t) break; pl = a[i]; }
+  return pl;
+}
+// When player p first entered any of `places` within [from, to] (tenths), or null.
+function enteredAt(r, p, places, from = 0, to = 1e9) {
+  const a = r.areas[p];
+  if (!a) return null;
+  const end = r.death[p] >= 0 ? r.death[p] : r.end;
+  for (let i = 0; i < a.length; i += 2) {
+    const start = a[i + 1], stop = i + 3 < a.length ? a[i + 3] : end;
+    if (places.has(a[i]) && stop >= from && start <= to) return Math.max(start, from);
+  }
+  return null;
+}
+
+// The rounds the page's filters keep, for side S's perspective.
+function insRounds(D, S, opts = {}) {
+  const who = opts.who ?? ins.who, kinds = opts.kinds ?? ins.kinds, src = opts.src ?? ins.src;
+  return D.rounds.filter((r) => {
+    if (!r.team[S].length) return false;
+    if (src !== "all" && r.match.source !== src) return false;
+    if (who === "opp" && r.ours === S) return false;
+    if (who === "us" && r.ours !== S) return false;
+    if (kinds.length && !kinds.includes(r.kind[S === "T" ? 0 : 1])) return false;
+    return true;
+  });
+}
+
+// ---- conditions ("Ask") ----
+// area: {type, count: "any"|"2"|"3"|"4"|"5"|"none", side, place, by (tenths or null)}
+// nade: {type, side, kind, target: "lineup:<id>" | "place:<i>" | "", by}
+// first: {type, side, place (-1 = anywhere)}
+// plant: {type, site: 0 | 1 | -1 (no plant)}
+function condMatch(D, r, c, L) {
+  if (c.type === "area") {
+    const team = r.team[c.side] || [];
+    const places = new Set([Number(c.place)]);
+    const by = c.by ?? 1e9;
+    const n = team.filter((p) => enteredAt(r, p, places, 0, by) !== null).length;
+    if (c.count === "none") return n === 0;
+    const need = c.count === "any" ? 1 : Number(c.count);
+    return n >= need;
+  }
+  if (c.type === "nade") {
+    const by = c.by ?? 1e9;
+    return r.nades.some((nd) => {
+      if (nd[0] > by || nd[2] !== Number(c.kind) || r.sides[nd[1]] !== c.side) return false;
+      if (!c.target) return true;
+      if (c.target.startsWith("lineup:")) return L?.by_throw?.[`${r.match.id}@${nd[7]}`] === c.target.slice(7);
+      if (c.target.startsWith("place:")) return D.placeAt(nd[5], nd[6]) === Number(c.target.slice(6));
+      return true;
+    });
+  }
+  if (c.type === "first") {
+    const k = r.firstKill;
+    if (!k || k[1] < 0) return false;
+    if (r.sides[k[1]] !== c.side) return false;
+    // Where it happened: where the victim stood.
+    return Number(c.place) < 0 || D.placeAt(k[7], k[8]) === Number(c.place);
+  }
+  if (c.type === "plant") {
+    const site = Number(c.site);
+    return site < 0 ? !r.plant : r.plant?.[2] === site;
+  }
+  return true;
+}
+
+// What happened in a set of rounds: plants, wins, contact, opening kills.
+function outcomes(D, rounds, S) {
+  const n = rounds.length;
+  const plantA = rounds.filter((r) => r.plant?.[2] === 0).length, plantB = rounds.filter((r) => r.plant?.[2] === 1).length;
+  const wins = rounds.filter((r) => r.win === S).length;
+  const openT = rounds.filter((r) => r.firstKill && r.firstKill[1] >= 0 && r.sides[r.firstKill[1]] === "T").length;
+  const withOpen = rounds.filter((r) => r.firstKill && r.firstKill[1] >= 0).length;
+  const contact = median(rounds.map((r) => r.contact).filter((x) => x != null));
+  const plantT = median(rounds.filter((r) => r.plant).map((r) => r.plant[0]));
+  return { n, plantA, plantB, none: n - plantA - plantB, wins, openT, withOpen, contact, plantT };
+}
+
+// A bar of where the bomb went: A, B, no plant.
+function plantBar(o, base) {
+  if (!o.n) return "";
+  const seg = (k, v, cls, label) => (v ? `<i class="${cls}" style="width:${(100 * v) / o.n}%" title="${label}: ${v} of ${o.n} rounds"></i>` : "");
+  const delta = (v, bv) => (base && base.n ? ((d) => (Math.abs(d) >= 3 ? ` <span class="${d > 0 ? "up" : "down"}">${d > 0 ? "+" : ""}${d}</span>` : ""))(pctOf(v, o.n) - pctOf(bv, base.n)) : "");
+  return `<div class="ins-bar">${seg("a", o.plantA, "a", "Planted A")}${seg("b", o.plantB, "b", "Planted B")}${seg("n", o.none, "n", "No plant")}</div>
+    <div class="ins-legend"><span><i class="a"></i>A <b>${pctOf(o.plantA, o.n)}%</b>${delta(o.plantA, base?.plantA)}</span><span><i class="b"></i>B <b>${pctOf(o.plantB, o.n)}%</b>${delta(o.plantB, base?.plantB)}</span><span><i class="n"></i>No plant <b>${pctOf(o.none, o.n)}%</b>${delta(o.none, base?.none)}</span></div>`;
+}
+
+// A short sentence for a condition.
+function condText(D, c, L, nameOf, lnames) {
+  const by = c.by != null ? ` by ${clockOf(c.by)}` : "";
+  if (c.type === "area") {
+    const who = { any: "Someone", none: "Nobody", 2: "2+", 3: "3+", 4: "4+", 5: "All 5" }[c.count] || "Someone";
+    return `${who} of the ${SIDE_WORD[c.side]} ${c.count === "none" ? "goes" : c.count === "any" ? "goes" : "go"} to ${nameOf(Number(c.place))}${by}`;
+  }
+  if (c.type === "nade") {
+    const what = c.target?.startsWith("lineup:") ? lnames.get(c.target.slice(7)) || "a lineup" : c.target?.startsWith("place:") ? `a ${NADE_NAMES[c.kind].toLowerCase()} into ${nameOf(Number(c.target.slice(6)))}` : `a ${NADE_NAMES[c.kind].toLowerCase()}`;
+    return `The ${SIDE_WORD[c.side]} throw ${what}${by}`;
+  }
+  if (c.type === "first") return `The first kill is by the ${SIDE_WORD[c.side]}${Number(c.place) >= 0 ? ` in ${nameOf(Number(c.place))}` : ""}`;
+  if (c.type === "plant") return Number(c.site) < 0 ? "The bomb isn't planted" : `The bomb is planted at ${Number(c.site) ? "B" : "A"}`;
+  return "";
+}
+
+// ---- the page ----
+async function renderInsights(view, map) {
+  const idx = await loadInsightsIndex();
+  const maps = Object.entries(idx?.maps || {}).filter(([, c]) => c.matches > 0).sort((a, b) => b[1].rounds - a[1].rounds);
+  const waiting = sum(Object.values(idx?.maps || {}).map((c) => c.waiting || 0));
+  if (!maps.length) {
+    view.innerHTML = `<div class="gn-head"><div><div class="h1">Match insights</div><div class="sub">How players in your matches play each map: where they go and when, by round type, what follows what, strats, plants and entries.</div></div></div>
+      <div class="empty">Not ready yet. Veloxify is re-reading your demos for this in the background${waiting ? ` (${waiting} matches to go)` : ""}, while CS2 is closed. Check back in a while.</div>`;
+    return;
+  }
+  const has = (m) => maps.some(([x]) => x === m);
+  if (!map || !has(map)) map = ins.map && has(ins.map) ? ins.map : maps[0][0];
+  if (ins.map !== map) Object.assign(ins, { map, sel: null, zoom: 1, pan: [0, 0], line: null });
+  const [D, L] = await Promise.all([loadInsights(map), loadMapLineups(map), loadCallouts()]);
+  if (!D) { view.innerHTML = `<div class="empty">No insights for ${esc(mapName(map))} yet.</div>`; return; }
+  insPage(view, D, L || {}, map, maps, waiting);
+}
+
+function insPage(view, D, L, map, maps, waiting) {
+  const S = ins.side, O = S === "T" ? "C" : "T";
+  const nameOf = (pl) => (pl >= 0 ? areaName(L, map, D.places[pl]) : "somewhere");
+  const lnames = L.lineups ? lineupNames(L, map) : new Map();
+  const base = insRounds(D, S);
+  const rerender = () => { saveIns(); insPage(view, D, L, map, maps, waiting); };
+  const segBtns = (key, opts, val) => opts.map(([k, l]) => `<button data-${key}="${k}" class="${String(val) === String(k) ? "on" : ""}">${l}</button>`).join("");
+  const nMatches = new Set(base.map((r) => r.m)).size;
+  view.innerHTML = `
+    <div class="ins-head"><div><div class="h1">Match insights</div>
+      <div class="sub">${esc(mapName(map))}: ${base.length} ${SIDE_WORD[S]}-side round${base.length === 1 ? "" : "s"} from ${nMatches} match${nMatches === 1 ? "" : "es"}${waiting ? ` · ${waiting} more match${waiting === 1 ? "" : "es"} on the way (re-read in the background)` : ""}</div></div></div>
+    <div class="ins-maps">${maps.map(([m, c]) => `<a class="ins-map ${m === map ? "on" : ""}" href="#/insights/${esc(m)}">${mapIcon(m)}<b>${esc(mapName(m))}</b><span class="sub">${c.matches}</span></a>`).join("")}</div>
+    <div class="ln-bar ins-filters">
+      <div class="seg" title="Whose side to look at">${segBtns("side", [["T", "T side"], ["C", "CT side"]], S)}</div>
+      <div class="chips" title="Round types (by what that side bought)">${INS_KINDS.map(([k, l]) => `<button class="chip ${ins.kinds.includes(k) ? "on" : ""}" data-kind="${k}">${l}</button>`).join("")}</div>
+      <div class="seg" title="Whose rounds">${segBtns("who", INS_WHO, ins.who)}</div>
+      <div class="seg">${segBtns("src", [["all", "All"], ["faceit", "FACEIT"], ["valve", "Premier"]], ins.src)}</div>
+    </div>
+    <nav class="ins-tabs">${INS_VIEWS.map(([k, l]) => `<button data-view="${k}" class="${ins.view === k ? "on" : ""}">${l}</button>`).join("")}</nav>
+    <div class="gn-main ins-main">
+      <section class="tl-map"><div class="tl-viewport"><div class="tl-canvas" style="transform:translate(${ins.pan[0]}px,${ins.pan[1]}px) scale(${ins.zoom})">
+        <img src="${assetUrl(`radars/${map}.png`)}" alt="${esc(mapName(map))} radar" draggable="false"><canvas id="ins-heat" width="512" height="512"></canvas><svg id="ins-svg" viewBox="0 0 1024 1024"></svg></div></div>
+        <input class="tl-zoom" type="range" min="1" max="3" step="0.1" value="${ins.zoom}" aria-label="Zoom" orient="vertical">
+        <div class="ins-clock" id="ins-clock"></div></section>
+      <section class="gn-side ins-side" id="ins-side"></section>
+    </div>
+    <div class="note">Round types are by what that side bought (average equipment value per player): eco under $1,600, force buy under $3,900, full buy above; pistol rounds are each half's first. "Opponents" are the teams you played against, "Your team" is you and your teammates. Callouts use your names from the Grenades page.</div>`;
+
+  view.querySelectorAll("[data-side]").forEach((b) => (b.onclick = () => { ins.side = b.dataset.side; ins.sel = null; rerender(); }));
+  view.querySelectorAll("[data-who]").forEach((b) => (b.onclick = () => { ins.who = b.dataset.who; rerender(); }));
+  view.querySelectorAll("[data-src]").forEach((b) => (b.onclick = () => { ins.src = b.dataset.src; rerender(); }));
+  view.querySelectorAll("[data-kind]").forEach((b) => (b.onclick = () => {
+    const k = b.dataset.kind;
+    ins.kinds = ins.kinds.includes(k) ? ins.kinds.filter((x) => x !== k) : [...ins.kinds, k];
+    rerender();
+  }));
+  view.querySelectorAll("[data-view]").forEach((b) => (b.onclick = () => { ins.view = b.dataset.view; ins.sel = null; ins.drawing = false; rerender(); }));
+  wireInsMap(view);
+
+  const ctx = { view, D, L, map, S, O, base, nameOf, lnames, rerender };
+  loadRadar(map).then((radar) => {
+    ctx.radar = radar;
+    ctx.at = (x, y) => (radar ? [(x - radar.pos_x) / radar.scale, (radar.pos_y - y) / radar.scale] : [0, 0]);
+    ctx.world = (px, py) => (radar ? [px * radar.scale + radar.pos_x, radar.pos_y - py * radar.scale] : [0, 0]);
+    const side = view.querySelector("#ins-side");
+    if (ins.view === "ask") insAsk(ctx, side);
+    else if (ins.view === "positions") insPositions(ctx, side);
+    else if (ins.view === "strats") insStrats(ctx, side);
+    else if (ins.view === "plants") insPlants(ctx, side);
+    else if (ins.view === "paths") insPaths(ctx, side);
+    else insOverview(ctx, side);
+  });
+}
+
+// Zoom and pan like the grenades map.
+function wireInsMap(view) {
+  const canvas = view.querySelector(".tl-canvas"), zoom = view.querySelector(".tl-zoom"), vp = view.querySelector(".tl-viewport");
+  const apply = () => { canvas.style.transform = `translate(${ins.pan[0]}px,${ins.pan[1]}px) scale(${ins.zoom})`; zoom.value = ins.zoom; };
+  zoom.oninput = () => { ins.zoom = Number(zoom.value); if (ins.zoom === 1) ins.pan = [0, 0]; apply(); };
+  vp.onwheel = (e) => { e.preventDefault(); ins.zoom = Math.max(1, Math.min(3, ins.zoom - Math.sign(e.deltaY) * 0.2)); if (ins.zoom === 1) ins.pan = [0, 0]; apply(); };
+  vp.onpointerdown = (e) => {
+    if (ins.drawing || ins.zoom === 1 || e.target.closest("[data-pl],[data-hl]")) return;
+    const start = [e.clientX - ins.pan[0], e.clientY - ins.pan[1]];
+    vp.setPointerCapture(e.pointerId);
+    vp.onpointermove = (ev) => { ins.pan = [ev.clientX - start[0], ev.clientY - start[1]]; apply(); };
+    vp.onpointerup = () => { vp.onpointermove = null; };
+  };
+}
+
+// A heat map of points (world units) on the radar canvas.
+function drawHeat(ctx, pts, palette = "heat") {
+  const cv = ctx.view.querySelector("#ins-heat");
+  if (!cv) return;
+  const g = cv.getContext("2d");
+  const W = cv.width;
+  g.clearRect(0, 0, W, W);
+  if (!pts.length) return;
+  const R = 9;
+  // Normalise: the busiest spot reaches full strength.
+  const bins = new Map();
+  const px = pts.map(([x, y]) => { const [a, b] = ctx.at(x, y); return [a / 2, b / 2]; });
+  for (const [a, b] of px) { const k = `${Math.floor(a / R)},${Math.floor(b / R)}`; bins.set(k, (bins.get(k) || 0) + 1); }
+  const top = Math.max(...bins.values());
+  const tpl = document.createElement("canvas");
+  tpl.width = tpl.height = 2 * R;
+  const t = tpl.getContext("2d");
+  const grad = t.createRadialGradient(R, R, 0, R, R, R);
+  grad.addColorStop(0, "rgba(0,0,0,1)");
+  grad.addColorStop(1, "rgba(0,0,0,0)");
+  t.fillStyle = grad;
+  t.fillRect(0, 0, 2 * R, 2 * R);
+  g.globalAlpha = Math.min(1, 1.6 / top);
+  for (const [a, b] of px) g.drawImage(tpl, a - R, b - R);
+  g.globalAlpha = 1;
+  const img = g.getImageData(0, 0, W, W), d = img.data;
+  const stops = palette === "red" ? [[0, [255, 120, 90]], [1, [255, 40, 40]]] : palette === "green" ? [[0, [120, 255, 160]], [1, [30, 220, 90]]]
+    : [[0, [40, 170, 200]], [0.35, [60, 220, 140]], [0.65, [255, 220, 40]], [1, [255, 60, 30]]];
+  const col = (v) => {
+    for (let i = 1; i < stops.length; i++) if (v <= stops[i][0]) {
+      const [a0, c0] = stops[i - 1], [a1, c1] = stops[i], f = (v - a0) / (a1 - a0 || 1);
+      return c0.map((c, j) => c + (c1[j] - c) * f);
+    }
+    return stops[stops.length - 1][1];
+  };
+  for (let i = 0; i < d.length; i += 4) {
+    const v = d[i + 3] / 255;
+    if (!v) continue;
+    // The faintest spots stay clear, so the busy ones stand out.
+    if (v < 0.07) { d[i + 3] = 0; continue; }
+    const [r, gg, b] = col(Math.min(1, v));
+    d[i] = r; d[i + 1] = gg; d[i + 2] = b; d[i + 3] = Math.round(30 + 190 * Math.min(1, v));
+  }
+  g.putImageData(img, 0, 0);
+}
+
+// The round clock under the map: a slider (and play) for the time the heat map shows.
+function insClock(ctx, onChange, label = "Where they are at") {
+  const el = ctx.view.querySelector("#ins-clock");
+  el.innerHTML = `<button class="btn ghost small" id="ins-play" aria-label="Play">▶</button><span class="sub">${label}</span><b id="ins-clock-t">${clockOf(ins.t)}</b>
+    <input type="range" id="ins-t" min="0" max="1100" step="5" value="${ins.t}" aria-label="Round clock">`;
+  const input = el.querySelector("#ins-t"), out = el.querySelector("#ins-clock-t");
+  const set = (t) => { ins.t = t; input.value = t; out.textContent = clockOf(t); onChange(t); };
+  input.oninput = () => set(Number(input.value));
+  input.onchange = saveIns;
+  let timer = null;
+  el.querySelector("#ins-play").onclick = (e) => {
+    if (timer) { clearInterval(timer); timer = null; e.currentTarget.textContent = "▶"; return; }
+    e.currentTarget.textContent = "❚❚";
+    timer = setInterval(() => { if (!document.body.contains(el)) return clearInterval(timer); set(ins.t >= 1100 ? 0 : ins.t + 10); }, 120);
+  };
+  set(ins.t);
+}
+
+// Everyone on side S at time t in these rounds.
+function pointsAt(ctx, rounds, S, t) {
+  const pts = [];
+  for (const r of rounds) for (const p of r.team[S]) { const q = posAt(ctx.D, r, p, t); if (q) pts.push(q); }
+  return pts;
+}
+
+// Callout labels (and click targets) on the map; `hl` places are outlined.
+function drawPlaces(ctx, { hl = new Set(), labels = true, extra = "" } = {}) {
+  const svg = ctx.view.querySelector("#ins-svg");
+  if (!svg) return;
+  const D = ctx.D, cell = D.grid.cell / (ctx.radar?.scale || 5);
+  const fills = [...hl].map((pl) => (D.placeCells.get(pl) || []).map(([x, y]) => { const [a, b] = ctx.at(x, y + D.grid.cell); return `<rect x="${a.toFixed(1)}" y="${b.toFixed(1)}" width="${cell.toFixed(1)}" height="${cell.toFixed(1)}"/>`; }).join("")).join("");
+  const big = [...D.placeMid].filter(([, [, , n]]) => n >= 12);
+  svg.innerHTML = `<g class="ins-hl">${fills}</g>${extra}${labels ? big.map(([pl, [x, y]]) => { const [a, b] = ctx.at(x, y); return `<text class="ins-pl ${hl.has(pl) ? "on" : ""}" x="${a.toFixed(0)}" y="${b.toFixed(0)}" text-anchor="middle" data-pl="${pl}">${esc(ctx.nameOf(pl))}</text>`; }).join("") : ""}`;
+}
+
+// Clicking the map picks the callout there.
+function onMapPlace(ctx, fn) {
+  const svg = ctx.view.querySelector("#ins-svg");
+  svg.onclick = (e) => {
+    if (ins.drawing) return;
+    const label = e.target.closest("[data-pl]");
+    if (label) return fn(Number(label.dataset.pl));
+    const box = svg.getBoundingClientRect();
+    const px = ((e.clientX - box.left) / box.width) * 1024, py = ((e.clientY - box.top) / box.height) * 1024;
+    const [x, y] = ctx.world(px, py);
+    const pl = ctx.D.placeAt(x, y);
+    if (pl >= 0) fn(pl);
+  };
+}
+
+// The share of rounds side S had someone in each place at time t (±1 s), and how many.
+function placeShares(ctx, rounds, S, t) {
+  const by = new Map();
+  for (const r of rounds) {
+    const seen = new Map();
+    for (const p of r.team[S]) {
+      let pl = -1;
+      for (const dt of [0, -10, 10]) { pl = placeAt(r, p, t + dt); if (pl >= 0) break; }
+      if (pl >= 0) seen.set(pl, (seen.get(pl) || 0) + 1);
+    }
+    for (const [pl, n] of seen) { const e = by.get(pl) || { pl, rounds: 0, players: 0 }; e.rounds++; e.players += n; by.set(pl, e); }
+  }
+  return [...by.values()].sort((a, b) => b.rounds - a.rounds);
+}
+
+// One place's story for side S: how often, when they get there, what happens.
+function placeStory(ctx, rounds, S, pl) {
+  const set = new Set([pl]);
+  const arrive = [], contact = [];
+  const withIt = [];
+  for (const r of rounds) {
+    const ts = r.team[S].map((p) => enteredAt(r, p, set)).filter((x) => x !== null);
+    if (!ts.length) continue;
+    withIt.push(r);
+    arrive.push(Math.min(...ts));
+    // First damage dealt or taken by someone while there.
+    const h = r.hurts.find((h) => h[1] >= 0 && r.sides[h[1]] !== r.sides[h[2]] && ((r.sides[h[2]] === S && placeAt(r, h[2], h[0]) === pl) || (r.sides[h[1]] === S && placeAt(r, h[1], h[0]) === pl)));
+    if (h) contact.push(h[0]);
+  }
+  const without = rounds.filter((r) => !withIt.includes(r));
+  return { n: withIt.length, of: rounds.length, arrive: median(arrive), contact: median(contact), withIt, without, oWith: outcomes(ctx.D, withIt, S), oWithout: outcomes(ctx.D, without, S) };
+}
+
+// ---- Overview: the strongest patterns first ----
+function insOverview(ctx, el) {
+  const { D, S, base, nameOf } = ctx;
+  if (!base.length) { el.innerHTML = `<div class="empty small">No rounds with these filters.</div>`; drawPlaces(ctx); return; }
+  insClock(ctx, (t) => drawHeat(ctx, pointsAt(ctx, base, S, t)));
+  drawPlaces(ctx);
+  onMapPlace(ctx, (pl) => { ins.view = "positions"; ins.sel = pl; ctx.rerender(); });
+  const cards = [];
+  // Pistol rounds.
+  const pistols = insRounds(D, S, { kinds: ["pistol"] });
+  if (pistols.length >= 4) {
+    const o = outcomes(D, pistols, S);
+    const strats = stratGroups(ctx, pistols, "T").slice(0, 3);
+    cards.push(`<div class="ins-card" data-go="strats" data-kinds="pistol"><div class="ins-card-h">Pistol rounds <span class="sub">${pistols.length} rounds</span></div>
+      ${plantBar(o)}<div class="sub">${SIDE_WORD[S]} win ${pctOf(o.wins, o.n)}%${o.plantT != null ? ` · bombs usually down by ${clockOf(o.plantT)}` : ""}</div>
+      ${strats.length ? `<ol class="ins-list">${strats.map((g) => `<li><b>${esc(g.name)}</b> <span class="sub">${g.rounds.length}× · ${pctOf(g.rounds.length, pistols.length)}%</span></li>`).join("")}</ol>` : ""}</div>`);
+  }
+  // Tells: where the Ts are early says where they're going.
+  const tells = S === "T" ? tellsOf(ctx, base) : [];
+  if (tells.length) cards.push(`<div class="ins-card" data-go="ask"><div class="ins-card-h">Tells <span class="sub">where the T are early says where they hit</span></div>
+    <ul class="ins-list">${tells.slice(0, 4).map((x) => `<li data-tell='${esc(JSON.stringify(x.cond))}'>${x.html}</li>`).join("")}</ul></div>`);
+  // Timings.
+  const shares = placeShares(ctx, base, S, 250).filter((x) => x.rounds >= base.length * 0.2).slice(0, 6);
+  const timing = shares.map((x) => ({ ...x, story: placeStory(ctx, base, S, x.pl) })).filter((x) => x.story.arrive != null);
+  if (timing.length) cards.push(`<div class="ins-card" data-go="positions"><div class="ins-card-h">Timings <span class="sub">when the ${SIDE_WORD[S]} usually get there</span></div>
+    <table class="ins-table"><thead><tr><th>Area</th><th>Rounds</th><th>Arrive</th><th>First contact</th></tr></thead><tbody>
+    ${timing.map((x) => `<tr data-place="${x.pl}"><td>${esc(nameOf(x.pl))}</td><td>${pctOf(x.story.n, x.story.of)}%</td><td>${clockOf(x.story.arrive)}</td><td>${x.story.contact != null ? clockOf(x.story.contact) : "—"}</td></tr>`).join("")}</tbody></table></div>`);
+  // Plants.
+  const plants = plantSpots(ctx, base).slice(0, 4);
+  if (S === "T" && plants.length) cards.push(`<div class="ins-card" data-go="plants"><div class="ins-card-h">Where they plant <span class="sub">${base.filter((r) => r.plant).length} plants</span></div>
+    <ol class="ins-list">${plants.map((p) => `<li><b>${esc(p.name)}</b> <span class="sub">${p.rounds.length}× · win ${pctOf(p.rounds.filter((r) => r.win === "T").length, p.rounds.length)}%</span></li>`).join("")}</ol></div>`);
+  // Executes.
+  const ex = S === "T" ? executes(ctx, base).slice(0, 3) : [];
+  if (ex.length) cards.push(`<div class="ins-card" data-go="strats"><div class="ins-card-h">Common executes <span class="sub">smokes thrown together before a site take</span></div>
+    <ol class="ins-list">${ex.map((x) => `<li><b>${esc(x.name)}</b> <span class="sub">${x.rounds.length}× · win ${pctOf(x.rounds.filter((r) => r.win === "T").length, x.rounds.length)}%</span></li>`).join("")}</ol></div>`);
+  // CT setups.
+  if (S === "C") {
+    const setups = stratGroups(ctx, base, "C").slice(0, 4);
+    if (setups.length) cards.push(`<div class="ins-card" data-go="strats"><div class="ins-card-h">CT setups <span class="sub">where the 5 CTs are at ${clockOf(250)}</span></div>
+      <ol class="ins-list">${setups.map((g) => `<li><b>${esc(g.name)}</b> <span class="sub">${g.rounds.length}× · CT win ${pctOf(g.rounds.filter((r) => r.win === "C").length, g.rounds.length)}%</span></li>`).join("")}</ol></div>`);
+  }
+  // Entries.
+  const entries = S === "T" ? siteEntries(ctx, base) : [];
+  for (const site of [0, 1]) {
+    const list = entries.filter((e) => e.site === site);
+    if (list.length < 4) continue;
+    const routes = groupBy(list, (e) => e.from);
+    cards.push(`<div class="ins-card" data-go="paths"><div class="ins-card-h">Into ${site ? "B" : "A"} <span class="sub">where the first T comes in from</span></div>
+      <ol class="ins-list">${routes.slice(0, 4).map(([from, es]) => `<li><b>${esc(nameOf(from))}</b> <span class="sub">${pctOf(es.length, list.length)}% · ${clockOf(median(es.map((e) => e.t)))} · entry wins ${pctOf(es.filter((e) => e.won).length, es.length)}%</span></li>`).join("")}</ol></div>`);
+  }
+  el.innerHTML = `<div class="ins-cards">${cards.join("") || `<div class="empty small">Not enough rounds for patterns yet.</div>`}</div>`;
+  el.querySelectorAll("[data-go]").forEach((c) => (c.onclick = (e) => {
+    const tell = e.target.closest("[data-tell]");
+    if (tell) { ins.conds = JSON.parse(tell.dataset.tell); ins.view = "ask"; ctx.rerender(); return; }
+    const row = e.target.closest("[data-place]");
+    if (row) { ins.view = "positions"; ins.sel = Number(row.dataset.place); ctx.rerender(); return; }
+    if (c.dataset.kinds) ins.kinds = [c.dataset.kinds];
+    ins.view = c.dataset.go;
+    ctx.rerender();
+  }));
+}
+
+function groupBy(list, key) {
+  const m = new Map();
+  for (const x of list) { const k = key(x); if (!m.has(k)) m.set(k, []); m.get(k).push(x); }
+  return [...m].sort((a, b) => b[1].length - a[1].length);
+}
+
+// Places whose early presence moves the T's plant the most.
+function tellsOf(ctx, rounds) {
+  const { D, nameOf } = ctx;
+  if (rounds.length < 20) return [];
+  const by = 300; // by 1:25
+  const counts = new Map();
+  for (const r of rounds) {
+    const seen = new Set();
+    for (const p of r.team.T) for (let i = 0; i < (r.areas[p] || []).length; i += 2) if (r.areas[p][i + 1] <= by && r.areas[p][i] >= 0) seen.add(r.areas[p][i]);
+    for (const pl of seen) counts.set(pl, (counts.get(pl) || 0) + 1);
+  }
+  const out = [];
+  for (const [pl, n] of counts) {
+    if (n < 6 || n > rounds.length - 6) continue;
+    const cond = { type: "area", count: "any", side: "T", place: pl, by };
+    const yes = rounds.filter((r) => condMatch(D, r, cond));
+    const no = rounds.filter((r) => !yes.includes(r));
+    const oy = outcomes(D, yes, "T"), on = outcomes(D, no, "T");
+    for (const [site, k] of [[0, "plantA"], [1, "plantB"]]) {
+      const a = oy[k] / oy.n, b = on[k] / on.n;
+      const lift = a - b;
+      if (Math.abs(lift) < 0.15) continue;
+      const score = Math.abs(lift) * Math.sqrt(Math.min(oy.n, on.n));
+      const html = lift > 0
+        ? `When the T are in <b>${esc(nameOf(pl))}</b> by ${clockOf(by)}, they plant <b>${site ? "B" : "A"} ${Math.round(a * 100)}%</b> of the time <span class="sub">(${Math.round(b * 100)}% otherwise · ${oy.n} rounds)</span>`
+        : `When nobody's in <b>${esc(nameOf(pl))}</b> by ${clockOf(by)}, the T plant <b>${site ? "B" : "A"} ${Math.round(b * 100)}%</b> of the time <span class="sub">(${Math.round(a * 100)}% when someone is · ${on.n} rounds)</span>`;
+      out.push({ score, html, cond: [lift > 0 ? cond : { ...cond, count: "none" }] });
+    }
+  }
+  return out.sort((a, b) => b.score - a.score);
+}
+
+// ---- strats: where a side's 5 players are early, and where the round goes ----
+// Each player's region at 25 s: A side, B side or mid (nearer neither site).
+function regionOf(D, x, y) {
+  const [a, b] = D.sites;
+  if (!a || !b) return "Mid";
+  const da = Math.hypot(x - a[0], y - a[1]), db = Math.hypot(x - b[0], y - b[1]);
+  if (da < db * 0.65) return "A";
+  if (db < da * 0.65) return "B";
+  return "Mid";
+}
+function stratGroups(ctx, rounds, S, at = 250) {
+  const { D, nameOf } = ctx;
+  const groups = new Map();
+  for (const r of rounds) {
+    const regions = { A: 0, Mid: 0, B: 0 }, places = new Map();
+    let alive = 0;
+    for (const p of r.team[S]) {
+      const q = posAt(D, r, p, at);
+      if (!q) continue;
+      alive++;
+      regions[regionOf(D, q[0], q[1])]++;
+      const pl = placeAt(r, p, at);
+      if (pl >= 0) places.set(pl, (places.get(pl) || 0) + 1);
+    }
+    if (alive < 4) continue;
+    // The shape of it: stacked on a site, split between both, or spread (default).
+    const { A: nA, B: nB, Mid: nM } = regions;
+    let name = nA >= 4 ? `${nA}-man A` : nB >= 4 ? `${nB}-man B` : nA >= 2 && nB >= 2 ? `Split ${nA} A / ${nB} B` : nM >= 3 ? "Mid control" : nA === 3 ? "A-heavy default" : nB === 3 ? "B-heavy default" : "Default";
+    if (S === "T") {
+      // And where it went: a rush (bomb down in 40 s), a normal take, a late one, or no plant.
+      const site = r.plant ? (r.plant[2] ? "B" : "A") : null;
+      name += !site ? " → no plant" : r.plant[0] < 400 ? ` → rush ${site}` : r.plant[0] > 750 ? ` → late ${site}` : ` → ${site}`;
+    }
+    if (!groups.has(name)) groups.set(name, { name, rounds: [], places: new Map() });
+    const g = groups.get(name);
+    g.rounds.push(r);
+    for (const [pl, n] of places) g.places.set(pl, (g.places.get(pl) || 0) + n);
+  }
+  return [...groups.values()].filter((g) => g.rounds.length >= 2).sort((a, b) => b.rounds.length - a.rounds.length).map((g) => ({
+    ...g, where: [...g.places].sort((a, b) => b[1] - a[1]).slice(0, 4).map(([pl, n]) => `${Math.round(n / g.rounds.length * 10) / 10} ${nameOf(pl)}`).join(", "),
+  }));
+}
+
+// Smokes the T threw together right before taking a site.
+function executes(ctx, rounds) {
+  const { D, L, nameOf } = ctx;
+  const sets = new Map();
+  for (const r of rounds) {
+    if (!r.plant) continue;
+    const site = r.plant[2];
+    const siteName = site ? "BombsiteB" : "BombsiteA";
+    const sitePl = new Set([D.places.indexOf(siteName)]);
+    const entry = Math.min(...r.team.T.map((p) => enteredAt(r, p, sitePl) ?? 1e9));
+    const t0 = entry < 1e9 ? entry : r.plant[0];
+    const smokes = r.nades.filter((n) => n[2] === 0 && r.sides[n[1]] === "T" && n[0] >= t0 - 150 && n[0] <= t0 + 30);
+    if (smokes.length < 2) continue;
+    // Each smoke by where it lands (its lineup's landing callout when it's a known lineup).
+    const names = [...new Set(smokes.map((n) => {
+      const l = L.lineups?.find((x) => x.id === L.by_throw?.[`${r.match.id}@${n[7]}`]);
+      return l?.to_place ? areaName(L, ctx.map, l.to_place) : nameOf(D.placeAt(n[5], n[6]));
+    }))].sort();
+    const key = `${site ? "B" : "A"}: ${names.join(" + ")}`;
+    if (!sets.has(key)) sets.set(key, { name: `${site ? "B" : "A"} execute: ${names.join(" + ")} smokes`, rounds: [] });
+    sets.get(key).rounds.push(r);
+  }
+  return [...sets.values()].filter((x) => x.rounds.length >= 2).sort((a, b) => b.rounds.length - a.rounds.length);
+}
+
+function insStrats(ctx, el) {
+  const { D, S, base } = ctx;
+  const groups = stratGroups(ctx, base, S);
+  const ex = S === "T" ? executes(ctx, base) : [];
+  const sel = groups.find((g) => g.name === ins.sel) || ex.find((g) => g.name === ins.sel) || null;
+  const paint = (rounds, hlPlayers = S) => {
+    const lines = [];
+    for (const r of rounds.slice(0, 60)) for (const p of r.team[hlPlayers]) {
+      const path = r.paths[p];
+      if (!path) continue;
+      const pts = [];
+      for (let i = 0; i < Math.min(path.length, 2 * 2 * 45); i += 2) pts.push(ctx.at(path[i] * D.U, path[i + 1] * D.U).map((v) => v.toFixed(0)).join(","));
+      lines.push(`<polyline points="${pts.join(" ")}" class="ins-path ${hlPlayers === "T" ? "t" : "ct"}"/>`);
+    }
+    drawPlaces(ctx, { extra: `<g class="ins-paths">${lines.join("")}</g>`, labels: true });
+  };
+  ctx.view.querySelector("#ins-clock").innerHTML = `<span class="sub">Paths over the first 45 seconds of each round in the group (up to 60 rounds)</span>`;
+  drawHeat(ctx, []);
+  paint(sel ? sel.rounds : []);
+  const winOf = (g) => pctOf(g.rounds.filter((r) => r.win === S).length, g.rounds.length);
+  const item = (g, i) => `<button class="ins-item ${sel?.name === g.name ? "on" : ""}" data-g="${i}"><div><b>${esc(g.name)}</b>${g.where ? `<div class="sub">usually ${esc(g.where)}</div>` : ""}</div>
+    <span class="ins-n">${g.rounds.length}×<small>${pctOf(g.rounds.length, base.length)}% · win ${winOf(g)}%</small></span></button>`;
+  const all = [...groups, ...ex];
+  el.innerHTML = `<div class="ins-intro sub">${S === "T" ? `How the T split up 25 seconds in (${clockOf(250)}: A side, mid or B side) and where the bomb went, most common first.` : `Where the CTs stand ${clockOf(250)}, most common setups first.`} Point at one to see its paths; pick round types above (pistol rounds!).</div>
+    <div class="ins-items">${groups.map((g, i) => item(g, i)).join("") || `<div class="empty small">Not enough rounds yet.</div>`}</div>
+    ${ex.length ? `<div class="h3 ins-sub">Executes</div><div class="ins-items">${ex.map((g, i) => item(g, groups.length + i)).join("")}</div>` : ""}
+    ${sel ? roundList(ctx, sel.rounds) : ""}`;
+  el.querySelectorAll("[data-g]").forEach((b) => {
+    const g = all[Number(b.dataset.g)];
+    b.onmouseenter = () => paint(g.rounds);
+    b.onmouseleave = () => paint(sel ? sel.rounds : []);
+    b.onclick = () => { ins.sel = sel?.name === g.name ? null : g.name; ctx.rerender(); };
+  });
+  wireRoundList(el);
+}
+
+// Rounds to open in the 2D replay.
+function roundList(ctx, rounds) {
+  const rows = [...rounds].sort((a, b) => b.match.ts - a.match.ts).slice(0, 40);
+  return `<div class="h3 ins-sub">Rounds <span class="sub">${rounds.length}${rounds.length > rows.length ? `, newest ${rows.length}` : ""}</span></div>
+    <div class="ins-rounds">${rows.map((r) => `<button class="ins-round" data-rmatch="${esc(r.match.id)}" data-rnum="${r.n}" title="Open in the 2D replay">
+      <span>${new Date(r.match.ts * 1000).toLocaleDateString([], { month: "short", day: "numeric" })}</span><span>Round ${r.n}</span>
+      <span class="${r.win === ctx.S ? "up" : "down"}">${r.win === "T" ? "T win" : "CT win"}</span><span class="sub">${r.plant ? `planted ${r.plant[2] ? "B" : "A"}` : ""}</span></button>`).join("")}</div>`;
+}
+function wireRoundList(el) {
+  el.querySelectorAll("[data-rmatch]").forEach((b) => (b.onclick = () => {
+    Object.assign(replay, { matchId: b.dataset.rmatch, round: Number(b.dataset.rnum), t: 0, playing: false });
+    location.hash = matchHref(b.dataset.rmatch, "replay");
+  }));
+}
+
+// ---- Ask: conditions and what follows ----
+function insAsk(ctx, el) {
+  const { D, L, S, base, nameOf, lnames } = ctx;
+  const conds = ins.conds || [];
+  const rounds = base.filter((r) => conds.every((c) => condMatch(D, r, c, L)));
+  const o = outcomes(D, rounds, S), b = outcomes(D, base, S);
+  const placeOpts = [...D.placeMid.keys()].filter((pl) => D.placeMid.get(pl)[2] >= 6).sort((a, b) => nameOf(a).localeCompare(nameOf(b)));
+  const opt = (v, l, cur) => `<option value="${esc(v)}" ${String(cur) === String(v) ? "selected" : ""}>${esc(l)}</option>`;
+  const times = [null, 50, 100, 150, 200, 250, 300, 400, 500, 600, 800];
+  const timeSel = (c, i) => `<select data-ci="${i}" data-f="by">${times.map((t) => opt(t ?? "", t == null ? "any time" : `by ${clockOf(t)}`, c.by ?? "")).join("")}</select>`;
+  const sideSel = (c, i) => `<select data-ci="${i}" data-f="side">${opt("T", "T", c.side)}${opt("C", "CT", c.side)}</select>`;
+  const row = (c, i) => {
+    let body = "";
+    if (c.type === "area") body = `<select data-ci="${i}" data-f="count">${[["any", "Someone"], ["2", "2+"], ["3", "3+"], ["4", "4+"], ["5", "All 5"], ["none", "Nobody"]].map(([v, l]) => opt(v, l, c.count)).join("")}</select> of the ${sideSel(c, i)} in
+      <select data-ci="${i}" data-f="place">${placeOpts.map((pl) => opt(pl, nameOf(pl), c.place)).join("")}</select> ${timeSel(c, i)}`;
+    if (c.type === "nade") {
+      const ls = (L.lineups || []).filter((l) => l.side === (c.side === "C" ? "CT" : "T") && NADE_NAMES.indexOf({ smoke: "Smoke", molotov: "Molotov", flash: "Flash", he: "HE" }[l.kind]) === Number(c.kind)).slice(0, 40);
+      body = `The ${sideSel(c, i)} throw a <select data-ci="${i}" data-f="kind">${NADE_NAMES.slice(0, 4).map((n, k) => opt(k, n.toLowerCase(), c.kind)).join("")}</select>
+        <select data-ci="${i}" data-f="target">${opt("", "anywhere", c.target)}${ls.map((l) => opt(`lineup:${l.id}`, `${lnames.get(l.id) || l.id} (${l.count}×)`, c.target)).join("")}${placeOpts.map((pl) => opt(`place:${pl}`, `into ${nameOf(pl)}`, c.target)).join("")}</select> ${timeSel(c, i)}`;
+    }
+    if (c.type === "first") body = `The first kill is by the ${sideSel(c, i)} <select data-ci="${i}" data-f="place">${opt(-1, "anywhere", c.place)}${placeOpts.map((pl) => opt(pl, `in ${nameOf(pl)}`, c.place)).join("")}</select>`;
+    if (c.type === "plant") body = `The bomb <select data-ci="${i}" data-f="site">${opt(0, "is planted at A", c.site)}${opt(1, "is planted at B", c.site)}${opt(-1, "isn't planted", c.site)}</select>`;
+    return `<div class="ins-cond">${i ? `<span class="ins-and">and</span>` : `<span class="ins-and">If</span>`}<div class="ins-cond-body">${body}</div><button class="icon-btn" data-del="${i}" aria-label="Remove">✕</button></div>`;
+  };
+  // Openings: where the first kill happens in these rounds.
+  const openings = groupBy(rounds.filter((r) => r.firstKill), (r) => ctx.D.placeAt(r.firstKill[7], r.firstKill[8])).slice(0, 4);
+  el.innerHTML = `<div class="ins-intro sub">Build a situation and see what usually follows, compared with every ${SIDE_WORD[S]}-side round under the filters above. Click a callout on the map to add it.</div>
+    <div class="ins-conds">${conds.map(row).join("") || `<div class="sub">No conditions yet: these are all ${base.length} rounds.</div>`}</div>
+    <div class="ins-add"><span class="sub">Add:</span><button class="btn small" data-add="area">Players in an area</button><button class="btn small" data-add="nade">A grenade</button><button class="btn small" data-add="first">The first kill</button><button class="btn small" data-add="plant">The bomb</button>${conds.length ? `<button class="btn small ghost" data-clear>Clear</button>` : ""}</div>
+    <div class="ins-result">
+      <div class="ins-big"><b>${o.n}</b> round${o.n === 1 ? "" : "s"} <span class="sub">${conds.length ? `${pctOf(o.n, b.n)}% of ${b.n}` : ""}</span></div>
+      ${o.n ? `<div class="h3 ins-sub">Where the bomb goes</div>${plantBar(o, conds.length ? b : null)}
+      <div class="ins-stats"><div><b>${pctOf(o.wins, o.n)}%</b><span>${SIDE_WORD[S]} win${conds.length ? ` <i class="${pctOf(o.wins, o.n) >= pctOf(b.wins, b.n) ? "up" : "down"}">${pctOf(o.wins, o.n) - pctOf(b.wins, b.n) >= 0 ? "+" : ""}${pctOf(o.wins, o.n) - pctOf(b.wins, b.n)}</i>` : ""}</span></div>
+        <div><b>${o.contact != null ? clockOf(o.contact) : "—"}</b><span>first contact</span></div>
+        <div><b>${pctOf(o.openT, o.withOpen)}%</b><span>opening kills by T</span></div>
+        <div><b>${o.plantT != null ? clockOf(o.plantT) : "—"}</b><span>bomb down by</span></div></div>
+      ${openings.length ? `<div class="h3 ins-sub">Where the first kill happens</div><ul class="ins-list">${openings.map(([pl, rs]) => `<li><b>${esc(nameOf(pl))}</b> <span class="sub">${pctOf(rs.length, o.n)}%</span></li>`).join("")}</ul>` : ""}
+      ${roundList(ctx, rounds)}` : `<div class="empty small">No rounds match. Loosen a condition.</div>`}
+    </div>`;
+  const heatSide = { v: S };
+  insClock(ctx, (t) => drawHeat(ctx, pointsAt(ctx, rounds, heatSide.v, t)), `Where the ${SIDE_WORD[S]} are in these rounds at`);
+  const condPlaces = new Set(conds.filter((c) => c.type === "area").map((c) => Number(c.place)));
+  drawPlaces(ctx, { hl: condPlaces });
+  onMapPlace(ctx, (pl) => { ins.conds = [...conds, { type: "area", count: "any", side: S, place: pl, by: 300 }]; ctx.rerender(); });
+  el.querySelectorAll("[data-add]").forEach((btn) => (btn.onclick = () => {
+    const t = btn.dataset.add;
+    const def = { area: { type: "area", count: "any", side: "T", place: placeOpts[0], by: 300 }, nade: { type: "nade", side: "T", kind: 0, target: "", by: 200 }, first: { type: "first", side: "T", place: -1 }, plant: { type: "plant", site: 0 } }[t];
+    ins.conds = [...conds, def];
+    ctx.rerender();
+  }));
+  el.querySelector("[data-clear]")?.addEventListener("click", () => { ins.conds = []; ctx.rerender(); });
+  el.querySelectorAll("[data-del]").forEach((btn) => (btn.onclick = () => { ins.conds = conds.filter((_, i) => i !== Number(btn.dataset.del)); ctx.rerender(); }));
+  el.querySelectorAll("select[data-ci]").forEach((s) => (s.onchange = () => {
+    const c = { ...conds[Number(s.dataset.ci)] }, f = s.dataset.f;
+    c[f] = f === "by" ? (s.value === "" ? null : Number(s.value)) : ["place", "kind", "site"].includes(f) ? Number(s.value) : s.value;
+    if (f === "kind" || f === "side") c.target = "";
+    ins.conds = conds.map((x, i) => (i === Number(s.dataset.ci) ? c : x));
+    ctx.rerender();
+  }));
+  wireRoundList(el);
+}
+
+// ---- Positions: where they are, when, and what each area means ----
+function insPositions(ctx, el) {
+  const { D, S, base, nameOf } = ctx;
+  const selected = () => (typeof ins.sel === "number" ? ins.sel : null);
+  const sel0 = selected();
+  const paintSide = () => {
+    const sel = selected();
+    const shares = placeShares(ctx, base, S, ins.t).slice(0, 14);
+    const story = sel != null ? placeStory(ctx, base, S, sel) : null;
+    el.innerHTML = `${story ? `<div class="ins-detail"><div class="ins-card-h">${esc(nameOf(sel))} <button class="icon-btn" id="ins-unsel" aria-label="Close">✕</button></div>
+      <div class="ins-stats"><div><b>${pctOf(story.n, story.of)}%</b><span>of rounds someone goes</span></div><div><b>${story.arrive != null ? clockOf(story.arrive) : "—"}</b><span>usually there by</span></div>
+        <div><b>${story.contact != null ? clockOf(story.contact) : "—"}</b><span>first contact there</span></div><div><b>${pctOf(story.oWith.wins, story.oWith.n)}%</b><span>${SIDE_WORD[S]} win when they go</span></div></div>
+      ${S === "T" || true ? `<div class="h3 ins-sub">Bomb when someone's there</div>${plantBar(story.oWith, outcomes(D, base, S))}<div class="h3 ins-sub">When nobody is</div>${plantBar(story.oWithout)}` : ""}
+      <button class="btn small" id="ins-ask-place">Ask: what happens when they go here?</button></div>` : ""}
+      <div class="ins-intro sub">At <b>${clockOf(ins.t)}</b>: the share of ${SIDE_WORD[S]}-side rounds with someone in each area (and how many there). Click an area on the map or the list.</div>
+      <table class="ins-table"><thead><tr><th>Area</th><th>Rounds</th><th>Players</th></tr></thead><tbody>
+      ${shares.map((x) => `<tr data-place="${x.pl}" class="${x.pl === sel ? "on" : ""}"><td>${esc(nameOf(x.pl))}</td><td><span class="ins-mini"><i style="width:${pctOf(x.rounds, base.length)}%"></i></span>${pctOf(x.rounds, base.length)}%</td><td>${(x.players / x.rounds).toFixed(1)}</td></tr>`).join("")}</tbody></table>`;
+    el.querySelectorAll("[data-place]").forEach((r) => (r.onclick = () => { ins.sel = Number(r.dataset.place); paintSide(); drawPlaces(ctx, { hl: new Set([ins.sel]) }); }));
+    el.querySelector("#ins-unsel")?.addEventListener("click", () => { ins.sel = null; ctx.rerender(); });
+    el.querySelector("#ins-ask-place")?.addEventListener("click", () => { ins.conds = [{ type: "area", count: "any", side: S, place: sel, by: null }]; ins.view = "ask"; ctx.rerender(); });
+  };
+  insClock(ctx, (t) => { drawHeat(ctx, pointsAt(ctx, base, S, t)); clearTimeout(ctx.posTimer); ctx.posTimer = setTimeout(paintSide, 60); });
+  drawPlaces(ctx, { hl: sel0 != null ? new Set([sel0]) : new Set() });
+  onMapPlace(ctx, (pl) => { ins.sel = pl; drawPlaces(ctx, { hl: new Set([pl]) }); paintSide(); });
+}
+
+// ---- Plants: spots and afterplants ----
+// Plants grouped into spots (within ~110 units), named: the most common on a site is its default,
+// others by the callout they lean towards (or your name for them).
+function plantSpots(ctx, rounds) {
+  const { D, map, nameOf } = ctx;
+  // Plants on the bombsite (a few positions in the data land off it: left out).
+  const sitePls = [D.places.indexOf("BombsiteA"), D.places.indexOf("BombsiteB")];
+  const near = (x, y, pl) => [[0, 0], [60, 0], [-60, 0], [0, 60], [0, -60]].some(([dx, dy]) => D.placeAt(x + dx, y + dy) === pl);
+  const plants = rounds.filter((r) => r.plant && r.plant[2] >= 0).map((r) => ({ r, x: r.plant[3], y: r.plant[4], site: r.plant[2] }))
+    .filter((p) => sitePls[p.site] < 0 || near(p.x, p.y, sitePls[p.site]));
+  const groups = [];
+  for (const p of plants) {
+    const g = groups.find((g) => g.site === p.site && Math.hypot(g.x - p.x, g.y - p.y) < 140);
+    if (g) { g.list.push(p); g.x += (p.x - g.x) / g.list.length; g.y += (p.y - g.y) / g.list.length; } else groups.push({ site: p.site, x: p.x, y: p.y, list: [p] });
+  }
+  groups.sort((a, b) => b.list.length - a.list.length);
+  const named = mapCallouts(map).plants || [];
+  const known = PLANT_SPOTS[map] || [];
+  const firstOfSite = new Set();
+  for (const g of groups) {
+    const site = g.site ? "B" : "A";
+    const mine = named.find((n) => Math.hypot(n.x - g.x, n.y - g.y) < 140);
+    const k = known.find((n) => n.site === site && Math.hypot(n.x - g.x, n.y - g.y) < 160);
+    if (mine) g.name = mine.name;
+    else if (k) g.name = k.name;
+    else if (!firstOfSite.has(site)) g.name = `${site} default`;
+    else {
+      // After the callout it's closest to, the way players name plants ("Long plant").
+      let best = -1, bd = 1e9;
+      for (const [pl, cells] of D.placeCells) {
+        if (pl === sitePls[g.site]) continue;
+        for (const [x, y] of cells) { const d = Math.hypot(x + D.grid.cell / 2 - g.x, y + D.grid.cell / 2 - g.y); if (d < bd) { bd = d; best = pl; } }
+      }
+      g.name = best >= 0 && bd < 700 ? `${nameOf(best)} plant` : `${site} site`;
+    }
+    firstOfSite.add(site);
+  }
+  // Groups with the same name are one spot (a corner of the site, say).
+  const spots = [];
+  for (const g of groups) {
+    const s = spots.find((s) => s.name === g.name && s.site === g.site);
+    if (s) { s.list.push(...g.list); s.x = sum(s.list.map((q) => q.x)) / s.list.length; s.y = sum(s.list.map((q) => q.y)) / s.list.length; } else spots.push({ ...g, list: [...g.list] });
+  }
+  return spots.filter((s) => s.list.length >= 2).map((s) => ({ ...s, rounds: s.list.map((p) => p.r) })).sort((a, b) => b.rounds.length - a.rounds.length);
+}
+// Named plant spots people use (rough positions; the nearest plant group gets the name).
+const PLANT_SPOTS = {};
+
+function insPlants(ctx, el) {
+  const { D, map, S, base, nameOf } = ctx;
+  const spots = plantSpots(ctx, base);
+  const total = sum(spots.map((s) => s.rounds.length));
+  const sel = spots.find((s) => `${s.site}:${Math.round(s.x)}:${Math.round(s.y)}` === ins.sel) || null;
+  const key = (s) => `${s.site}:${Math.round(s.x)}:${Math.round(s.y)}`;
+  // Afterplant: where the T are 10 seconds after the plant (selected spot, else all plants).
+  const after = (sel ? sel.rounds : spots.flatMap((s) => s.rounds));
+  const aPts = [];
+  const aPlaces = new Map();
+  for (const r of after) for (const p of r.team.T) {
+    const t = r.plant[0] + 100;
+    const q = posAt(D, r, p, t);
+    if (!q) continue;
+    aPts.push(q);
+    const pl = placeAt(r, p, t);
+    if (pl >= 0) { const e = aPlaces.get(pl) || { n: 0, wins: 0, rounds: new Set() }; e.n++; e.rounds.add(r); aPlaces.set(pl, e); }
+  }
+  const aList = [...aPlaces].map(([pl, e]) => ({ pl, n: e.n, rounds: [...e.rounds], wins: [...e.rounds].filter((r) => r.win === "T").length })).sort((a, b) => b.n - a.n).slice(0, 8);
+  drawHeat(ctx, aPts, "heat");
+  const dots = spots.map((s, i) => {
+    const [x, y] = ctx.at(s.x, s.y), r = 5 + 10 * Math.sqrt(s.rounds.length / Math.max(1, spots[0]?.rounds.length || 1));
+    const label = sel === s || (!sel && i < 6);
+    return `<g class="ins-plant ${sel === s ? "on" : ""}" data-hl="${esc(key(s))}"><circle cx="${x}" cy="${y}" r="${r.toFixed(1)}"/>${label ? `<text x="${x}" y="${(y - r - 4).toFixed(0)}" text-anchor="middle">${esc(s.name)} · ${s.rounds.length}</text>` : ""}<title>${esc(s.name)}: ${s.rounds.length} plants</title></g>`;
+  }).join("");
+  drawPlaces(ctx, { extra: dots, labels: false });
+  ctx.view.querySelector("#ins-clock").innerHTML = `<span class="sub">Dots: plant spots (bigger = more). Heat: where the T are 10 seconds after ${sel ? "planting there" : "planting"}.</span>`;
+  ctx.view.querySelector("#ins-svg").onclick = (e) => { const g = e.target.closest("[data-hl]"); if (g) { ins.sel = ins.sel === g.dataset.hl ? null : g.dataset.hl; ctx.rerender(); } };
+  el.innerHTML = `<div class="ins-intro sub">Where the bomb gets planted (${total} plants${S === "C" ? ", against these CTs" : ""}) and where the T play after. Click a spot to see its afterplant; rename a spot to what you call it.</div>
+    <div class="ins-items">${spots.slice(0, 14).map((s) => `<button class="ins-item ${sel === s ? "on" : ""}" data-spot="${esc(key(s))}"><div><b>${esc(s.name)}</b><div class="sub">${s.site ? "B" : "A"} site · T win ${pctOf(s.rounds.filter((r) => r.win === "T").length, s.rounds.length)}%</div></div>
+      <span class="ins-n">${s.rounds.length}×<small>${pctOf(s.rounds.length, total)}%</small></span></button>`).join("") || `<div class="empty small">No plants with these filters.</div>`}</div>
+    ${sel && tauri ? `<div class="ins-rename"><input id="ins-spot-name" value="${esc(sel.name)}" maxlength="40" aria-label="Spot name"><button class="btn small" id="ins-spot-save">Rename</button></div>` : ""}
+    ${aList.length ? `<div class="h3 ins-sub">Afterplant: where the T play ${sel ? `after a ${esc(sel.name)} plant` : "after planting"}</div>
+      <table class="ins-table"><thead><tr><th>Area</th><th>Players</th><th>T win</th></tr></thead><tbody>${aList.map((a) => `<tr><td>${esc(nameOf(a.pl))}</td><td>${pctOf(a.n, sum(aList.map((x) => x.n)))}%</td><td>${pctOf(a.wins, a.rounds.length)}%</td></tr>`).join("")}</tbody></table>` : ""}
+    ${sel ? roundList(ctx, sel.rounds) : ""}`;
+  el.querySelectorAll("[data-spot]").forEach((b) => (b.onclick = () => { ins.sel = ins.sel === b.dataset.spot ? null : b.dataset.spot; ctx.rerender(); }));
+  el.querySelector("#ins-spot-save")?.addEventListener("click", async () => {
+    const v = el.querySelector("#ins-spot-name").value.trim();
+    const mc = mapCallouts(map);
+    mc.plants = (mc.plants || []).filter((n) => Math.hypot(n.x - sel.x, n.y - sel.y) >= 140);
+    if (v) mc.plants.push({ x: Math.round(sel.x), y: Math.round(sel.y), name: v });
+    await saveCallouts();
+    ctx.rerender();
+  });
+  wireRoundList(el);
+}
+
+// ---- Paths: site entries, lurks, and crossings of a line you draw ----
+// The first T into each site: where they came from, when, and whether they won the entry duel.
+function siteEntries(ctx, rounds) {
+  const { D } = ctx;
+  const out = [];
+  for (const site of [0, 1]) {
+    const pl = D.places.indexOf(site ? "BombsiteB" : "BombsiteA");
+    if (pl < 0) continue;
+    const set = new Set([pl]);
+    for (const r of rounds) {
+      let first = null;
+      for (const p of r.team.T) { const t = enteredAt(r, p, set); if (t !== null && (!first || t < first.t)) first = { p, t }; }
+      if (!first || first.t < 30) continue;
+      // Where they were before: the last other callout.
+      const a = r.areas[first.p];
+      let from = -1;
+      for (let i = 0; i < a.length; i += 2) { if (a[i + 1] >= first.t) break; if (a[i] >= 0 && a[i] !== pl) from = a[i]; }
+      const kill = r.kills.find((k) => k[0] >= first.t - 20 && k[0] <= first.t + 50 && (k[1] === first.p || k[2] === first.p));
+      out.push({ r, site, p: first.p, t: first.t, from, won: kill ? kill[1] === first.p : false, died: kill ? kill[2] === first.p : false });
+    }
+  }
+  return out;
+}
+
+// Lurkers: a T far (1,200+ units) from every teammate for 10+ seconds in the first minute.
+function lurks(ctx, rounds) {
+  const { D } = ctx;
+  const out = [];
+  for (const r of rounds) for (const p of r.team.T) {
+    let run = 0, best = null, start = 0;
+    for (let t = 50; t <= 600; t += 10) {
+      const q = posAt(D, r, p, t);
+      if (!q) break;
+      const mates = r.team.T.filter((o) => o !== p).map((o) => posAt(D, r, o, t)).filter(Boolean);
+      const far = mates.length >= 2 && mates.every((m) => Math.hypot(m[0] - q[0], m[1] - q[1]) > 1200);
+      if (far) { if (!run) start = t; run += 10; if (run >= 100 && (!best || run > best.len)) best = { start, len: run }; } else run = 0;
+    }
+    if (!best) continue;
+    const mid = best.start + best.len / 2;
+    const kills = r.kills.filter((k) => k[1] === p && k[0] >= best.start && k[0] <= best.start + best.len + 100).length;
+    const died = r.death[p] >= 0 && r.death[p] <= best.start + best.len + 100;
+    out.push({ r, p, start: best.start, len: best.len, place: placeAt(r, p, mid), kills, died });
+  }
+  return out;
+}
+
+// Where paths cross a line (world units): time, how far along it, and jumps there.
+function crossings(ctx, rounds, S, line) {
+  const { D } = ctx;
+  const [[ax, ay], [bx, by]] = line;
+  const out = [];
+  const inter = (x1, y1, x2, y2) => {
+    const d = (x2 - x1) * (by - ay) - (y2 - y1) * (bx - ax);
+    if (!d) return null;
+    const u = ((ax - x1) * (by - ay) - (ay - y1) * (bx - ax)) / d;
+    const v = ((ax - x1) * (y2 - y1) - (ay - y1) * (x2 - x1)) / d;
+    return u >= 0 && u <= 1 && v >= 0 && v <= 1 ? [u, v] : null;
+  };
+  for (const r of rounds) {
+    let first = null;
+    for (const p of r.team[S]) {
+      const path = r.paths[p] || [];
+      for (let i = 2; i + 1 < path.length; i += 2) {
+        const hit = inter(path[i - 2] * D.U, path[i - 1] * D.U, path[i] * D.U, path[i + 1] * D.U);
+        if (!hit) continue;
+        const t = ((i - 2) / 2 + hit[0]) * 5;
+        const jumped = r.jumps.some((j) => j[1] === p && Math.abs(j[0] - t) <= 10);
+        const died = r.death[p] >= 0 && r.death[p] - t <= 30 && r.death[p] >= t;
+        const c = { r, p, t, along: hit[1], jumped, died };
+        out.push(c);
+        if (!first || t < first.t) first = c;
+        break; // each player's first crossing
+      }
+    }
+    if (first) first.firstOfRound = true;
+  }
+  return out;
+}
+
+function insPaths(ctx, el) {
+  const { D, S, base, nameOf } = ctx;
+  const tab = ins.pathTab || "entries";
+  drawHeat(ctx, []);
+  const pathLine = (r, p, from, to, cls) => {
+    const path = r.paths[p] || [];
+    const pts = [];
+    for (let i = Math.max(0, Math.floor(from / 5) * 2); i < Math.min(path.length, Math.floor(to / 5) * 2 + 2); i += 2) pts.push(ctx.at(path[i] * D.U, path[i + 1] * D.U).map((v) => v.toFixed(0)).join(","));
+    return pts.length > 1 ? `<polyline points="${pts.join(" ")}" class="ins-path ${cls}"/>` : "";
+  };
+  const tabs = `<div class="seg ins-pathtabs">${[["entries", "Site entries"], ["lurks", "Lurks"], ["line", "Draw a line"]].map(([k, l]) => `<button data-ptab="${k}" class="${tab === k ? "on" : ""}">${l}</button>`).join("")}</div>`;
+  if (tab === "entries") {
+    const T = S === "T" ? base : insRounds(D, "T", { who: ins.who === "opp" ? "us" : ins.who === "us" ? "opp" : "all" });
+    const es = siteEntries(ctx, T);
+    const groups = [0, 1].map((site) => ({ site, list: es.filter((e) => e.site === site), routes: groupBy(es.filter((e) => e.site === site), (e) => e.from) }));
+    const selKey = ins.sel;
+    const draw = (key) => {
+      const shown = es.filter((e) => !key || `${e.site}:${e.from}` === key);
+      drawPlaces(ctx, { extra: `<g class="ins-paths">${shown.slice(0, 120).map((e) => pathLine(e.r, e.p, e.t - 60, e.t + 10, e.won ? "won" : e.died ? "lost" : "t")).join("")}</g>` });
+    };
+    draw(selKey);
+    ctx.view.querySelector("#ins-clock").innerHTML = `<span class="sub">The first T's last 6 seconds into the site: <b class="up">won the entry duel</b>, <b class="down">died</b>, or neither.</span>`;
+    el.innerHTML = `${tabs}<div class="ins-intro sub">The first T into each site${S === "C" ? " (against these CTs)" : ""}: where they came from, when, and how the entry duel went.</div>
+      ${groups.map((g) => g.list.length ? `<div class="h3 ins-sub">Into ${g.site ? "B" : "A"} <span class="sub">${g.list.length} entries</span></div><div class="ins-items">${g.routes.slice(0, 6).map(([from, list]) => `<button class="ins-item ${selKey === `${g.site}:${from}` ? "on" : ""}" data-route="${g.site}:${from}"><div><b>From ${esc(nameOf(from))}</b><div class="sub">usually ${clockOf(median(list.map((e) => e.t)))} · entry duel won ${pctOf(list.filter((e) => e.won).length, list.length)}%, lost ${pctOf(list.filter((e) => e.died).length, list.length)}%</div></div><span class="ins-n">${pctOf(list.length, g.list.length)}%<small>${list.length}×</small></span></button>`).join("")}</div>` : "").join("") || `<div class="empty small">No site entries with these filters.</div>`}`;
+    el.querySelectorAll("[data-route]").forEach((b) => {
+      b.onmouseenter = () => draw(b.dataset.route);
+      b.onmouseleave = () => draw(ins.sel);
+      b.onclick = () => { ins.sel = ins.sel === b.dataset.route ? null : b.dataset.route; ctx.rerender(); };
+    });
+  } else if (tab === "lurks") {
+    const T = S === "T" ? base : insRounds(D, "T", { who: ins.who === "opp" ? "us" : ins.who === "us" ? "opp" : "all" });
+    const ls = lurks(ctx, T);
+    const byPlace = groupBy(ls, (l) => l.place).filter(([pl]) => pl >= 0);
+    const draw = (pl) => drawPlaces(ctx, { extra: `<g class="ins-paths">${ls.filter((l) => pl == null || l.place === pl).slice(0, 100).map((l) => pathLine(l.r, l.p, l.start - 30, l.start + l.len, l.kills ? "won" : l.died ? "lost" : "t")).join("")}</g>` });
+    draw(typeof ins.sel === "number" ? ins.sel : null);
+    ctx.view.querySelector("#ins-clock").innerHTML = `<span class="sub">Lurk paths: <b class="up">got a kill</b>, <b class="down">died alone</b>, or neither.</span>`;
+    el.innerHTML = `${tabs}<div class="ins-intro sub">A lurk: one T 1,200+ units from every teammate for 10 seconds or more in the first minute. ${ls.length} lurks in ${T.length} rounds (${pctOf(new Set(ls.map((l) => l.r)).size, T.length)}% of rounds have one).</div>
+      <div class="ins-items">${byPlace.slice(0, 10).map(([pl, list]) => `<button class="ins-item ${ins.sel === pl ? "on" : ""}" data-lurk="${pl}"><div><b>${esc(nameOf(pl))}</b><div class="sub">around ${clockOf(median(list.map((l) => l.start)))} · ${pctOf(list.filter((l) => l.kills).length, list.length)}% get a kill · ${pctOf(list.filter((l) => l.died).length, list.length)}% die</div></div><span class="ins-n">${list.length}×</span></button>`).join("") || `<div class="empty small">No lurks with these filters.</div>`}</div>`;
+    el.querySelectorAll("[data-lurk]").forEach((b) => {
+      b.onmouseenter = () => draw(Number(b.dataset.lurk));
+      b.onmouseleave = () => draw(typeof ins.sel === "number" ? ins.sel : null);
+      b.onclick = () => { const pl = Number(b.dataset.lurk); ins.sel = ins.sel === pl ? null : pl; ctx.rerender(); };
+    });
+  } else {
+    const line = ins.line;
+    const cs = line ? crossings(ctx, base, S, line) : [];
+    const firsts = cs.filter((c) => c.firstOfRound);
+    const lineSvg = line ? (() => { const [a, b] = line.map(([x, y]) => ctx.at(x, y)); return `<line x1="${a[0]}" y1="${a[1]}" x2="${b[0]}" y2="${b[1]}" class="ins-line"/><circle cx="${a[0]}" cy="${a[1]}" r="4" class="ins-line-end"/><circle cx="${b[0]}" cy="${b[1]}" r="4" class="ins-line-end"/>`; })() : "";
+    const dots = cs.slice(0, 300).map((c) => { const [x, y] = [line[0][0] + (line[1][0] - line[0][0]) * c.along, line[0][1] + (line[1][1] - line[0][1]) * c.along]; const [a, b] = ctx.at(x, y); return `<circle cx="${a.toFixed(1)}" cy="${b.toFixed(1)}" r="3" class="ins-cross ${c.jumped ? "jump" : ""} ${c.died ? "died" : ""}"/>`; }).join("");
+    drawPlaces(ctx, { extra: lineSvg + dots, labels: true });
+    ctx.view.querySelector("#ins-clock").innerHTML = `<span class="sub">${ins.drawing ? "Drag across the map to draw your line (e.g. across a doorway)." : "Dots: where each player crossed (blue = jumped, red = died within 3 seconds)."}</span>`;
+    // Time histogram of first crossings, in 5-second bins.
+    const bins = new Map();
+    for (const c of firsts) { const k = Math.floor(c.t / 50); bins.set(k, (bins.get(k) || 0) + 1); }
+    const maxBin = Math.max(1, ...bins.values());
+    const thirds = [0, 1, 2].map((i) => cs.filter((c) => Math.min(2, Math.floor(c.along * 3)) === i).length);
+    el.innerHTML = `${tabs}<div class="ins-intro sub">Draw a line across a doorway, a choke or a gap and see who crosses it, when, where along it, and whether they jump.</div>
+      <div class="ins-add"><button class="btn small ${ins.drawing ? "primary" : ""}" id="ins-draw">${ins.drawing ? "Drawing… drag on the map" : line ? "Draw again" : "Draw a line"}</button>${line ? `<button class="btn small ghost" id="ins-line-clear">Clear</button>` : ""}</div>
+      ${line ? `<div class="ins-big"><b>${pctOf(firsts.length, base.length)}%</b> <span class="sub">of ${SIDE_WORD[S]}-side rounds someone crosses (${cs.length} crossings)</span></div>
+      ${firsts.length ? `<div class="ins-stats"><div><b>${clockOf(median(firsts.map((c) => c.t)))}</b><span>first cross, usually</span></div><div><b>${pctOf(cs.filter((c) => c.jumped).length, cs.length)}%</b><span>jump</span></div>
+        <div><b>${pctOf(cs.filter((c) => c.died).length, cs.length)}%</b><span>die within 3 s</span></div></div>
+        <div class="h3 ins-sub">When the first one crosses</div><div class="ins-hist">${[...bins].sort((a, b) => a[0] - b[0]).map(([k, n]) => `<div title="${clockOf(k * 50)}–${clockOf(k * 50 + 50)}: ${n} round${n === 1 ? "" : "s"}"><i style="height:${Math.max(2, Math.round((70 * n) / maxBin))}px"></i><span>${clockOf(k * 50)}</span></div>`).join("")}</div>
+        <div class="h3 ins-sub">Where along the line <span class="sub">from the end you started drawing</span></div>
+        <div class="ins-stats">${["Start", "Middle", "End"].map((l, i) => `<div><b>${pctOf(thirds[i], cs.length)}%</b><span>${l} third</span></div>`).join("")}</div>
+        ${roundList(ctx, [...new Set(firsts.map((c) => c.r))])}` : `<div class="sub">Nobody crossed it in these rounds.</div>`}` : ""}`;
+    el.querySelector("#ins-draw").onclick = () => { ins.drawing = true; ctx.rerender(); };
+    el.querySelector("#ins-line-clear")?.addEventListener("click", () => { ins.line = null; ctx.rerender(); });
+    if (ins.drawing) {
+      const svg = ctx.view.querySelector("#ins-svg");
+      svg.style.cursor = "crosshair";
+      const toWorld = (e) => { const box = svg.getBoundingClientRect(); return ctx.world(((e.clientX - box.left) / box.width) * 1024, ((e.clientY - box.top) / box.height) * 1024); };
+      svg.onpointerdown = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const a = toWorld(e);
+        svg.setPointerCapture(e.pointerId);
+        const tmp = document.createElementNS("http://www.w3.org/2000/svg", "line");
+        tmp.setAttribute("class", "ins-line");
+        svg.appendChild(tmp);
+        const [pa0, pa1] = ctx.at(a[0], a[1]);
+        svg.onpointermove = (ev) => { const b = toWorld(ev); const [pb0, pb1] = ctx.at(b[0], b[1]); tmp.setAttribute("x1", pa0); tmp.setAttribute("y1", pa1); tmp.setAttribute("x2", pb0); tmp.setAttribute("y2", pb1); };
+        svg.onpointerup = (ev) => {
+          svg.onpointermove = null;
+          const b = toWorld(ev);
+          if (Math.hypot(b[0] - a[0], b[1] - a[1]) > 40) ins.line = [a.map(Math.round), b.map(Math.round)];
+          ins.drawing = false;
+          ctx.rerender();
+        };
+      };
+    }
+    wireRoundList(el);
+  }
+  el.querySelectorAll("[data-ptab]").forEach((b) => (b.onclick = () => { ins.pathTab = b.dataset.ptab; ins.sel = null; ins.drawing = false; ctx.rerender(); }));
+}
+
+// ---- playstyle ----------------------------------------------------------------------------------------
+
+// Your own tendencies from every round you played (the same insight files as Match insights):
+// the roles you take, T versus CT, the duels you win and lose, and your best and worst spots.
+const ps = { map: "all", side: "all", src: "all", bucket: null, place: null };
+try { Object.assign(ps, JSON.parse(localStorage.getItem("veloxify.playstyle") || "{}"), { bucket: null, place: null }); } catch (e) { /* defaults */ }
+const savePs = () => { try { localStorage.setItem("veloxify.playstyle", JSON.stringify({ map: ps.map, side: ps.side, src: ps.src })); } catch (e) { /* not saved */ } };
+
+const WCLASS = (w) => {
+  if (!w) return "other";
+  if (["ak47", "m4a1", "m4a1_silencer", "famas", "galilar", "aug", "sg556"].includes(w)) return "rifle";
+  if (w === "awp") return "awp";
+  if (["ssg08", "g3sg1", "scar20"].includes(w)) return "scout";
+  if (["glock", "usp_silencer", "hkp2000", "p250", "fiveseven", "tec9", "cz75a", "deagle", "elite", "revolver"].includes(w)) return "pistol";
+  if (["mp9", "mac10", "mp7", "mp5sd", "ump45", "p90", "bizon"].includes(w)) return "smg";
+  if (["nova", "xm1014", "sawedoff", "mag7", "m249", "negev"].includes(w)) return "heavy";
+  return "other";
+};
+const WCLASS_NAME = { rifle: "Rifles", awp: "AWP", scout: "Scout", pistol: "Pistols", smg: "SMGs", heavy: "Shotguns and machine guns", other: "Other" };
+
+// Your duels: every kill you got (won) and every death to an enemy (lost), with what they were.
+function myDuels(sets) {
+  const out = [];
+  for (const { D, rounds } of sets) for (const r of rounds) {
+    const me = r.match.me;
+    if (me < 0) continue;
+    const mySide = r.sides[me];
+    // Teammates and enemies alive at each kill: to tell clutches and afterplants.
+    for (const k of r.kills) {
+      const won = k[1] === me && k[2] >= 0 && r.sides[k[2]] !== mySide;
+      const lost = k[2] === me && k[1] >= 0 && r.sides[k[1]] !== mySide;
+      if (!won && !lost) continue;
+      const myWeapon = D.weapons[won ? k[3] : k[13]] || "";
+      const theirWeapon = D.weapons[won ? k[13] : k[3]] || "";
+      const height = won ? k[9] : -k[9];
+      const mySpeed = won ? k[11] : k[12], theirSpeed = won ? k[12] : k[11];
+      const myPos = won ? [k[5], k[6]] : [k[7], k[8]];
+      const aliveMates = r.team[mySide].filter((p) => p !== me && (r.death[p] < 0 || r.death[p] > k[0])).length;
+      out.push({
+        D, r, k, won, side: mySide, t: k[0], dist: k[10], myWeapon, theirWeapon, wclass: WCLASS(myWeapon), height, mySpeed, theirSpeed,
+        hs: won && !!(k[4] & 1), opening: !!(k[4] & 2), trade: !!(k[4] & 4), smoke: !!(k[4] & 16), myPos, place: D.placeAt(myPos[0], myPos[1]),
+        afterPlant: !!r.plant && k[0] > r.plant[0], alone: aliveMates === 0,
+      });
+    }
+  }
+  return out;
+}
+
+// Duel buckets: what kind of fight it was. Each has a test and a tip for when you lose them.
+const DUEL_BUCKETS = [
+  ["close", "Close range", "under 600 units", (d) => d.dist > 0 && d.dist < 600, "Up close, crosshair placement at head height and not over-peeking win fights. Try holding tighter angles so they come to you."],
+  ["mid", "Mid range", "600 to 1,500 units", (d) => d.dist >= 600 && d.dist < 1500, "At mid range, stop fully before you shoot (counter-strafe) and tap or burst instead of spraying."],
+  ["long", "Long range", "1,500+ units", (d) => d.dist >= 1500, "At long range, tap the head with a rifle and don't move while shooting. Avoid long fights with SMGs and pistols."],
+  ["rifle", "With a rifle", "AK, M4, FAMAS, Galil, AUG, SG", (d) => d.wclass === "rifle", "Rifle duels: work on first-bullet accuracy and the first 5-10 bullets of the spray (Practice tab: recoil maps)."],
+  ["awp", "With the AWP", "", (d) => d.wclass === "awp", "AWP: hold one angle without moving the crosshair, and reposition after every shot."],
+  ["pistol", "With a pistol", "", (d) => d.wclass === "pistol", "Pistol duels: one or two taps at the head beat spraying. Move between shots, stop to shoot."],
+  ["smg", "With an SMG", "", (d) => d.wclass === "smg", "SMGs win up close and on the move; avoid long angles with them."],
+  ["moving_target", "Moving enemies", "they were running", (d) => d.theirSpeed > 130, "Moving targets: lead slightly and keep the crosshair at head height as they cross, instead of flicking after them."],
+  ["still_target", "Enemies holding still", "they were standing", (d) => d.theirSpeed <= 30, "Against players holding an angle, use utility or jiggle-peek for info rather than wide-swinging into them."],
+  ["moving_me", "While you were moving", "you were running", (d) => d.mySpeed > 130, "You shot while moving: counter-strafe (tap the opposite key) so you're still when you fire."],
+  ["above", "You above them", "you had height", (d) => d.height > 64, ""],
+  ["below", "You below them", "they had height", (d) => d.height < -64, "When enemies are above you, pre-aim higher and use utility to take the high ground away."],
+  ["opening", "Opening duels", "the round's first kill", (d) => d.opening, "Opening duels: take them with a flash or a teammate ready to trade; don't dry-peek alone."],
+  ["afterplant", "After the plant", "", (d) => d.afterPlant && d.side === "T", "Afterplants: play crossfires on the bomb with a teammate and use time; you don't need to peek."],
+  ["retake", "Retakes", "", (d) => d.afterPlant && d.side === "C", "Retakes: wait for teammates and use utility together instead of going in one by one."],
+  ["clutch", "Last one alive", "", (d) => d.alone, "In clutches, take one fight at a time and use sound; isolate duels instead of being seen by two."],
+];
+
+async function renderPlaystyle(view, map) {
+  const idx = await loadInsightsIndex();
+  const maps = Object.entries(idx?.maps || {}).filter(([, c]) => c.matches > 0).sort((a, b) => b[1].matches - a[1].matches);
+  if (!maps.length) {
+    const waiting = sum(Object.values(idx?.maps || {}).map((c) => c.waiting || 0));
+    view.innerHTML = `<div class="gn-head"><div><div class="h1">Playstyle</div><div class="sub">Your roles, your duels, your best and worst spots, from every round you played.</div></div></div>
+      <div class="empty">Not ready yet. Veloxify is re-reading your demos for this in the background${waiting ? ` (${waiting} matches to go)` : ""}, while CS2 is closed.</div>`;
+    return;
+  }
+  if (map) ps.map = map;
+  if (ps.map !== "all" && !idx.maps[ps.map]) ps.map = "all";
+  const want = ps.map === "all" ? maps.map(([m]) => m) : [ps.map];
+  const [list, Ls] = await Promise.all([Promise.all(want.map((m) => loadInsights(m))), Promise.all(want.map((m) => loadMapLineups(m))), loadCallouts()]);
+  const sets = list.map((D, i) => (D ? { D, map: want[i], L: Ls[i] || {}, rounds: D.rounds.filter((r) => r.match.me >= 0 && (ps.src === "all" || r.match.source === ps.src) && (ps.side === "all" || r.sides[r.match.me] === ps.side)) } : null)).filter(Boolean);
+  psPage(view, maps, sets);
+}
+
+function psPage(view, maps, sets) {
+  const rerender = () => { savePs(); psPage(view, maps, sets); };
+  const rounds = sets.flatMap((s) => s.rounds);
+  const duels = myDuels(sets);
+  const W = duels.filter((d) => d.won).length, Lo = duels.length - W;
+  const overall = duels.length ? W / duels.length : 0.5;
+  const segBtns = (key, opts, val) => opts.map(([k, l]) => `<button data-${key}="${k}" class="${String(val) === String(k) ? "on" : ""}">${l}</button>`).join("");
+  const roles = psRoles(sets);
+  const sides = ["T", "C"].map((S) => psSide(sets, duels, S));
+  // Buckets: win rate against your average.
+  const buckets = DUEL_BUCKETS.map(([key, name, sub, test, tip]) => {
+    const ds = duels.filter(test), w = ds.filter((d) => d.won).length;
+    return { key, name, sub, tip, ds, w, n: ds.length, rate: ds.length ? w / ds.length : 0 };
+  }).filter((b) => b.n >= 6);
+  const strong = buckets.filter((b) => b.n >= 15 && b.rate >= overall + 0.07).sort((a, b) => b.rate - a.rate);
+  const weak = buckets.filter((b) => b.n >= 15 && b.rate <= overall - 0.07).sort((a, b) => a.rate - b.rate);
+  const sel = buckets.find((b) => b.key === ps.bucket) || null;
+  const better = sides[0].n && sides[1].n ? (sides[0].score > sides[1].score + 0.05 ? "T" : sides[1].score > sides[0].score + 0.05 ? "C" : null) : null;
+  // Your spots (one map): duels won and lost by where you stood.
+  const oneMap = sets.length === 1 ? sets[0] : null;
+  const spots = oneMap ? groupBy(duels.filter((d) => d.place >= 0), (d) => d.place).map(([pl, ds]) => ({ pl, ds, w: ds.filter((d) => d.won).length })).filter((s) => s.ds.length >= 4) : [];
+  const nameOf = (pl) => (oneMap ? areaName(oneMap.L, oneMap.map, oneMap.D.places[pl]) : "");
+  const best = [...spots].filter((s) => s.ds.length >= 8).sort((a, b) => b.w / b.ds.length - a.w / a.ds.length).slice(0, 5);
+  const worst = [...spots].filter((s) => s.ds.length >= 8).sort((a, b) => a.w / a.ds.length - b.w / b.ds.length).slice(0, 5);
+  const fav = oneMap ? psFavorites(oneMap, ps.side) : [];
+  const bar = (rate) => `<span class="ps-bar"><i style="width:${Math.round(rate * 100)}%" class="${rate >= overall + 0.07 ? "good" : rate <= overall - 0.07 ? "bad" : ""}"></i><b style="left:${Math.round(overall * 100)}%"></b></span>`;
+  view.innerHTML = `
+    <div class="ins-head"><div><div class="h1">Playstyle</div>
+      <div class="sub">From ${rounds.length} rounds you played in ${new Set(rounds.map((r) => r.match.id)).size} matches${ps.map !== "all" ? ` on ${esc(mapName(ps.map))}` : ""}. Your roles, how you do on each side, the duels you win and lose, and where you play best.</div></div></div>
+    <div class="ins-maps"><a class="ins-map ${ps.map === "all" ? "on" : ""}" href="#/playstyle/all"><b>All maps</b></a>${maps.map(([m, c]) => `<a class="ins-map ${m === ps.map ? "on" : ""}" href="#/playstyle/${esc(m)}">${mapIcon(m)}<b>${esc(mapName(m))}</b><span class="sub">${c.matches}</span></a>`).join("")}</div>
+    <div class="ln-bar ins-filters"><div class="seg">${segBtns("side", [["all", "Both sides"], ["T", "T side"], ["C", "CT side"]], ps.side)}</div>
+      <div class="seg">${segBtns("src", [["all", "All"], ["faceit", "FACEIT"], ["valve", "Premier"]], ps.src)}</div></div>
+    ${!rounds.length ? `<div class="empty">No rounds with these filters.</div>` : `
+    <div class="ps-grid">
+      <section class="panel"><div class="panel-head"><div class="h3">How you play</div><span class="grow"></span><span class="sub">Compared with everyone else in the same rounds</span></div>
+        <div class="ps-roles">${roles.map((r) => `<div class="ps-role ${r.top ? "top" : ""}" title="${esc(r.how)}"><div class="ps-role-h"><b>${esc(r.name)}</b><span class="sub">${r.n ? `${r.ratio.toFixed(1)}× the average` : "not enough rounds"}</span></div>
+          <span class="ps-meter"><i style="width:${Math.min(100, (r.ratio / 2.5) * 100)}%"></i><b style="left:${100 / 2.5}%"></b></span><div class="sub">${esc(r.detail)}</div></div>`).join("")}</div>
+        <div class="ps-verdict">${psVerdict(roles)}</div></section>
+      <section class="panel"><div class="panel-head"><div class="h3">T or CT?</div><span class="grow"></span>${better ? `<span class="tag main">Better on ${better === "T" ? "T" : "CT"}</span>` : ""}</div>
+        <table class="ins-table ps-sides"><thead><tr><th></th><th>T side</th><th>CT side</th></tr></thead><tbody>
+          ${[["Rounds", (s) => s.n], ["Kills per round", (s) => f2(s.kpr)], ["Deaths per round", (s) => f2(s.dpr)], ["Survived", (s) => `${pctOf(s.survived, s.n)}%`], ["Opening duels won", (s) => (s.open ? `${pctOf(s.openWon, s.open)}% of ${s.open}` : "—")], ["Duels won", (s) => (s.duels ? `${pctOf(s.won, s.duels)}%` : "—")], ["Rounds won", (s) => `${pctOf(s.wins, s.n)}%`]]
+            .map(([l, f]) => `<tr><td>${l}</td><td>${sides[0].n ? f(sides[0]) : "—"}</td><td>${sides[1].n ? f(sides[1]) : "—"}</td></tr>`).join("")}</tbody></table></section>
+    </div>
+    <section class="panel"><div class="panel-head"><div class="h3">Your duels</div><span class="grow"></span><span class="sub">${W} won, ${Lo} lost: ${pctOf(W, duels.length)}% overall (the line on each bar)</span></div>
+      <div class="ps-sw">
+        <div><div class="h3 ps-good">Strengths</div>${strong.slice(0, 4).map((b) => `<div class="ps-sw-item" data-bucket="${b.key}"><b>${esc(b.name)}</b> <span class="sub">won ${pctOf(b.w, b.n)}% of ${b.n}</span></div>`).join("") || `<div class="sub">Nothing clearly above your average yet.</div>`}</div>
+        <div><div class="h3 ps-bad">Weaknesses</div>${weak.slice(0, 4).map((b) => `<div class="ps-sw-item" data-bucket="${b.key}"><b>${esc(b.name)}</b> <span class="sub">won ${pctOf(b.w, b.n)}% of ${b.n}</span>${b.tip ? `<div class="ps-tip">${esc(b.tip)}</div>` : ""}</div>`).join("") || `<div class="sub">Nothing clearly below your average.</div>`}</div>
+      </div>
+      <div class="ps-buckets">${buckets.map((b) => `<button class="ps-bucket ${sel?.key === b.key ? "on" : ""}" data-bucket="${b.key}"><span class="ps-bucket-name"><b>${esc(b.name)}</b>${b.sub ? `<span class="sub">${esc(b.sub)}</span>` : ""}</span>${bar(b.rate)}<span class="ps-bucket-n">${pctOf(b.w, b.n)}%<small>${b.w}-${b.n - b.w}</small></span></button>`).join("")}</div>
+      ${sel ? psDuelList(sel) : `<div class="sub" style="padding:0 20px 16px">Click a kind of duel to see every one of them and open it in the 2D replay.</div>`}
+    </section>
+    ${oneMap ? `<section class="panel"><div class="panel-head"><div class="h3">Your spots on ${esc(mapName(oneMap.map))}</div><span class="grow"></span><span class="sub">Where you stood in your duels (green: kills, red: deaths)</span></div>
+      <div class="ps-spots">
+        <div class="tl-map ps-map"><div class="tl-viewport"><div class="tl-canvas"><img src="${assetUrl(`radars/${oneMap.map}.png`)}" alt="" draggable="false"><svg id="ps-svg" viewBox="0 0 1024 1024"></svg></div></div></div>
+        <div>
+          ${fav.length ? `<div class="h3 ins-sub">Where you usually play <span class="sub">at ${clockOf(250)}</span></div><ul class="ins-list">${fav.slice(0, 6).map((f) => `<li><b>${esc(nameOf(f.pl))}</b> <span class="sub">${pctOf(f.n, f.of)}% of rounds · you win ${pctOf(f.wins, f.n)}% of them</span></li>`).join("")}</ul>` : ""}
+          ${best.length ? `<div class="h3 ins-sub ps-good">Best spots</div><ul class="ins-list">${best.map((s) => `<li><b>${esc(nameOf(s.pl))}</b> <span class="sub">${s.w}-${s.ds.length - s.w} in duels (${pctOf(s.w, s.ds.length)}%)</span></li>`).join("")}</ul>` : ""}
+          ${worst.length ? `<div class="h3 ins-sub ps-bad">Worst spots</div><ul class="ins-list">${worst.map((s) => `<li><b>${esc(nameOf(s.pl))}</b> <span class="sub">${s.w}-${s.ds.length - s.w} in duels (${pctOf(s.w, s.ds.length)}%)</span></li>`).join("")}</ul>` : ""}
+          ${!best.length && !fav.length ? `<div class="sub">Not enough duels on this map yet.</div>` : ""}
+        </div></div></section>` : `<div class="note">Pick a map above to see your spots on it.</div>`}`}
+    <div class="note">Duels are your kills (won) and your deaths to an enemy (lost). Distances are in game units (a player is about 72 tall). Roles compare how often you do something with everyone else in the same rounds, so 1.0× is average. Moving means faster than a walk.</div>`;
+
+  view.querySelectorAll("[data-side]").forEach((b) => (b.onclick = () => { ps.side = b.dataset.side; renderPlaystyle(view, ps.map); }));
+  view.querySelectorAll("[data-src]").forEach((b) => (b.onclick = () => { ps.src = b.dataset.src; renderPlaystyle(view, ps.map); }));
+  view.querySelectorAll("[data-bucket]").forEach((b) => (b.onclick = () => { ps.bucket = ps.bucket === b.dataset.bucket ? null : b.dataset.bucket; rerender(); }));
+  wireRoundList(view);
+  if (oneMap) loadRadar(oneMap.map).then((radar) => {
+    const svg = view.querySelector("#ps-svg");
+    if (!svg || !radar) return;
+    const at = (x, y) => [(x - radar.pos_x) / radar.scale, (radar.pos_y - y) / radar.scale];
+    const shown = sel ? sel.ds : duels;
+    svg.innerHTML = shown.slice(0, 600).map((d) => { const [x, y] = at(d.myPos[0], d.myPos[1]); return `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="4" class="ps-dot ${d.won ? "won" : "lost"}"/>`; }).join("");
+  });
+}
+
+function psDuelList(b) {
+  const rows = [...b.ds].sort((a, x) => x.r.match.ts - a.r.match.ts).slice(0, 40);
+  return `<div class="ps-duels"><div class="h3 ins-sub">${esc(b.name)} <span class="sub">${b.n} duels${b.n > rows.length ? `, newest ${rows.length}` : ""}</span></div>
+    ${rows.map((d) => `<button class="ins-round" data-rmatch="${esc(d.r.match.id)}" data-rnum="${d.r.n}" title="Open the round in the 2D replay">
+      <span class="${d.won ? "up" : "down"}">${d.won ? "Won" : "Lost"}</span><span>${esc(mapName(d.D.map))} · ${new Date(d.r.match.ts * 1000).toLocaleDateString([], { month: "short", day: "numeric" })} · round ${d.r.n} · ${clockOf(d.t)}</span>
+      <span class="sub">${esc(d.myWeapon ? weaponName(d.myWeapon) : "?")} vs ${esc(d.theirWeapon ? weaponName(d.theirWeapon) : "?")} · ${d.dist} units${d.hs ? " · headshot" : ""}${d.theirSpeed > 130 ? " · they were moving" : ""}${d.mySpeed > 130 ? " · you were moving" : ""}</span></button>`).join("")}</div>`;
+}
+
+// Your side's numbers: per round and in duels.
+function psSide(sets, duels, S) {
+  const rounds = sets.flatMap((s) => s.rounds).filter((r) => r.sides[r.match.me] === S);
+  const me = (r) => r.match.me;
+  const kills = sum(rounds.map((r) => r.kills.filter((k) => k[1] === me(r) && k[2] >= 0 && r.sides[k[2]] !== S).length));
+  const deaths = rounds.filter((r) => r.death[me(r)] >= 0).length;
+  const ds = duels.filter((d) => d.side === S);
+  const open = ds.filter((d) => d.opening);
+  const n = rounds.length;
+  const kpr = n ? kills / n : 0, dpr = n ? deaths / n : 0;
+  return { n, kpr, dpr, survived: n - deaths, wins: rounds.filter((r) => r.win === S).length, open: open.length, openWon: open.filter((d) => d.won).length, duels: ds.length, won: ds.filter((d) => d.won).length, score: kpr - dpr };
+}
+
+// Roles: how often you do each thing, against everyone else in the same rounds.
+function psRoles(sets) {
+  const acc = {};
+  const add = (key, mine, all, n) => { const a = (acc[key] = acc[key] || { mine: 0, all: 0, n: 0 }); a.mine += mine; a.all += all; a.n += n; };
+  const clutch = { mine: 0, n: 0, others: 0, on: 0 };
+  for (const { D, rounds } of sets) {
+    const ctx = { D };
+    const tRounds = rounds.filter((r) => r.sides[r.match.me] === "T");
+    const cRounds = rounds.filter((r) => r.sides[r.match.me] === "C");
+    // Entry: first T into a site, and opening duels taken.
+    for (const e of siteEntries(ctx, tRounds)) add("entry", e.p === e.r.match.me ? 1 : 0, 1 / Math.max(1, e.r.team.T.length), 1);
+    for (const r of rounds) {
+      const k = r.firstKill, me = r.match.me;
+      if (!k || k[1] < 0) continue;
+      const S = r.sides[me];
+      if (r.sides[k[1]] !== S && r.sides[k[2]] !== S) continue;
+      add("opener", k[1] === me || k[2] === me ? 1 : 0, 1 / Math.max(1, r.team[S].length), 1);
+    }
+    // Lurking.
+    const ls = lurks(ctx, tRounds);
+    for (const r of tRounds) add("lurk", ls.some((l) => l.r === r && l.p === r.match.me) ? 1 : 0, ls.filter((l) => l.r === r).length / Math.max(1, r.team.T.length), 1);
+    // AWP: share of your team's AWP kills, and your kills with it.
+    for (const r of rounds) {
+      const S = r.sides[r.match.me];
+      const awp = r.kills.filter((k) => k[1] >= 0 && r.sides[k[1]] === S && WCLASS(D.weapons[k[3]]) === "awp");
+      if (awp.length) add("awp", awp.filter((k) => k[1] === r.match.me).length, awp.length / Math.max(1, r.team[S].length), 1);
+    }
+    // Support: flashes and smokes thrown.
+    for (const r of rounds) {
+      const S = r.sides[r.match.me];
+      const util = r.nades.filter((n) => (n[2] === 0 || n[2] === 2) && r.sides[n[1]] === S);
+      add("support", util.filter((n) => n[1] === r.match.me).length, util.length / Math.max(1, r.team[S].length), 1);
+    }
+    // Trades: kills that traded a teammate.
+    for (const r of rounds) {
+      const S = r.sides[r.match.me];
+      const tr = r.kills.filter((k) => k[1] >= 0 && r.sides[k[1]] === S && k[4] & 4);
+      if (tr.length) add("trader", tr.filter((k) => k[1] === r.match.me).length, tr.length / Math.max(1, r.team[S].length), 1);
+    }
+    // CT: anchor (same site from 0:25 to 0:60) or rotator (moved from one site to the other).
+    for (const r of cRounds) {
+      const reg = (p, t) => { const q = posAt(D, r, p, t); return q ? regionOf(D, q[0], q[1]) : null; };
+      const kind = (p) => { const a = reg(p, 250), b = reg(p, 600); return !a || !b ? null : a === b && a !== "Mid" ? "anchor" : a !== b && a !== "Mid" && b !== "Mid" ? "rotate" : null; };
+      const all = r.team.C.map(kind);
+      const mine = kind(r.match.me);
+      add("anchor", mine === "anchor" ? 1 : 0, all.filter((x) => x === "anchor").length / Math.max(1, r.team.C.length), 1);
+      add("rotator", mine === "rotate" ? 1 : 0, all.filter((x) => x === "rotate").length / Math.max(1, r.team.C.length), 1);
+    }
+    // Clutch: rounds won as the last one alive, against everyone else's clutches in them.
+    for (const r of rounds) for (const S of ["T", "C"]) {
+      const team = r.team[S];
+      if (team.length < 2) continue;
+      const deathOf = (p) => (r.death[p] >= 0 ? r.death[p] : 1e9);
+      const [last, next] = [...team].sort((a, b) => deathOf(b) - deathOf(a));
+      if (deathOf(next) >= 1e9) continue; // two or more lived: nobody was alone
+      const won = r.win === S ? 1 : 0;
+      if (last === r.match.me) { clutch.mine += won; clutch.n++; } else { clutch.others += won; clutch.on++; }
+    }
+  }
+  const othersRate = clutch.on ? clutch.others / clutch.on : 0;
+  if (clutch.n) add("clutch", clutch.mine, clutch.n * othersRate, clutch.n);
+  const ROLES = [
+    ["entry", "Entry fragger", "First T into the site", (a) => `First in ${a.mine} of ${a.n} site takes`],
+    ["opener", "Opening duels", "In the round's first kill", (a) => `In the first duel ${pctOf(a.mine, a.n)}% of rounds`],
+    ["lurk", "Lurker", "Alone, far from your team, in the first minute", (a) => `Lurked in ${pctOf(a.mine, a.n)}% of T rounds`],
+    ["awp", "AWPer", "Your share of your team's AWP kills", (a) => `${a.mine} AWP kills`],
+    ["support", "Support", "Smokes and flashes you throw", (a) => `${(a.mine / Math.max(1, a.n)).toFixed(1)} smokes and flashes a round`],
+    ["trader", "Trader", "Kills that avenge a teammate", (a) => `${a.mine} trade kills`],
+    ["anchor", "Anchor", "CT: holding the same site from 1:30 to 1:00", (a) => `Anchored ${pctOf(a.mine, a.n)}% of CT rounds`],
+    ["rotator", "Rotator", "CT: moving from one site to the other", (a) => `Rotated ${pctOf(a.mine, a.n)}% of CT rounds`],
+    ["clutch", "Clutcher", "Rounds won as the last one alive", (a) => `Won ${a.mine} of ${a.n} as the last alive (others: ${pctOf(clutch.others, clutch.on)}%)`],
+  ];
+  const out = ROLES.map(([key, name, how, detail]) => {
+    const a = acc[key] || { mine: 0, all: 0, n: 0 };
+    return { key, name, how, n: a.n, ratio: a.all > 0 ? a.mine / a.all : 0, detail: a.n ? detail(a) : "" };
+  });
+  const ranked = out.filter((r) => r.n >= 15 && r.key !== "clutch").sort((a, b) => b.ratio - a.ratio);
+  ranked.slice(0, 2).forEach((r) => { if (r.ratio >= 1.2) r.top = true; });
+  return out;
+}
+
+function psVerdict(roles) {
+  const top = roles.filter((r) => r.top);
+  if (!top.length) return `<span class="sub">You don't lean strongly to one role: a flexible player.</span>`;
+  const LIKE = { entry: "an entry fragger", opener: "an opening-duel player", lurk: "a lurker", awp: "an AWPer", support: "a support player", trader: "a trader", anchor: "an anchor", rotator: "a rotator" };
+  return `You play most like ${top.map((r) => `<b>${esc(LIKE[r.key] || r.name)}</b>`).join(" and ")}.`;
+}
+
+// Where you usually are 25 seconds in, on one map.
+function psFavorites(set, side) {
+  const by = new Map();
+  const rounds = set.rounds.filter((r) => side === "all" || r.sides[r.match.me] === side);
+  for (const r of rounds) {
+    const pl = placeAt(r, r.match.me, 250);
+    if (pl < 0) continue;
+    const e = by.get(pl) || { pl, n: 0, wins: 0, of: rounds.length };
+    e.n++;
+    if (r.win === r.sides[r.match.me]) e.wins++;
+    by.set(pl, e);
+  }
+  return [...by.values()].sort((a, b) => b.n - a.n);
 }
 
 // ---- ESEA league ------------------------------------------------------------------------------------
@@ -4457,6 +5993,7 @@ const KOFI_CUP = `<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="t
 async function renderSettings(view) {
   document.querySelector('[data-nav="settings"]').classList.add("active");
   settingsData = tauri ? await tauri.core.invoke("get_settings") : JSON.parse(JSON.stringify(PREVIEW_SETTINGS));
+  await loadCrosshairs();
   const s = settingsData.settings, r = settingsData.render;
   const steamid = s.steamid64 || settingsData.detected_steamid;
   const sw = (key, on) => `<label class="switch"><input type="checkbox" data-key="${key}" ${on ? "checked" : ""} ${tauri ? "" : "disabled"}><i></i></label>`;
@@ -4493,7 +6030,8 @@ async function renderSettings(view) {
         ${row("Frame rate", "", seg("fps", r.fps, [[30, "30 fps"], [60, "60 fps"]]))}
         ${row("Between parts", "How the parts of one highlight are joined.", seg("transition", r.transition, [["cut", "Cut"], ["fade", "Fade"]]))}
         ${row("HUD", "Kill feed only is the clean Allstar look.", seg("killfeed_only", r.killfeed_only, [[true, "Kill feed only"], [false, "Full HUD"]]))}
-        ${row("Crosshair", "", seg("own_crosshair", r.own_crosshair, [[false, "Clean default"], [true, "Player's own"]]))}
+        ${row("Crosshair", `A clean small cross, each player's own, or one you picked on the <a class="link" href="#/crosshairs">Crosshairs</a> page.${r.crosshair && !r.own_crosshair ? `<span class="xh-inline" data-xh="${esc(r.crosshair)}">${xhSvg(xhOf(r.crosshair), 30)}</span>` : ""}`,
+          seg("xh_mode", r.own_crosshair ? "own" : r.crosshair ? "picked" : "default", [["default", "Clean default"], ["own", "Player's own"], ...(r.crosshair ? [["picked", "Picked"]] : [])]))}
         ${row("X-ray", "Show players through walls.", sw("xray", r.xray))}
         ${row("Game audio", `CS2's sound only, never Discord or music. <span id="audio-device"></span>`, sw("audio", r.audio))}
       </section>
@@ -4514,6 +6052,12 @@ async function renderSettings(view) {
 
   const RENDER_KEYS = ["height", "fps", "transition", "killfeed_only", "own_crosshair", "xray", "audio"];
   const set = (key, value) => {
+    if (key === "xh_mode") {
+      settingsData.render.own_crosshair = value === "own";
+      if (value === "default") settingsData.render.crosshair = "";
+      saveSettings();
+      return;
+    }
     if (["height", "fps", "max_per_match"].includes(key)) value = Number(value);
     if (["killfeed_only", "own_crosshair"].includes(key) && typeof value === "string") value = value === "true";
     (RENDER_KEYS.includes(key) ? settingsData.render : settingsData.settings)[key] = value;

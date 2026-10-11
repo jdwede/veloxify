@@ -37,10 +37,13 @@ fn ffmpeg() -> Command {
     c
 }
 
-/// A recording with more of it frozen than this is thrown away: CS2 stopped drawing. Lineup
-/// videos' camera always moves; a highlight can hold still a while (an AWP holding an angle).
-pub const FROZEN_MAX: f64 = 0.3;
-pub const FROZEN_MAX_CLIP: f64 = 0.6;
+/// A recording with more of it frozen than this is thrown away: CS2 stopped drawing. Frozen
+/// means the same picture for half a second or more, which catches a slideshow (CS2 drawing a
+/// frame a second while the screen is off) as well as a picture stuck for good. Lineup videos'
+/// camera always moves; a highlight can hold still a moment (an AWP holding an angle), though CS2
+/// still animates something every frame while it draws.
+pub const FROZEN_MAX: f64 = 0.25;
+pub const FROZEN_MAX_CLIP: f64 = 0.35;
 
 /// A recording came out frozen (CS2 stopped drawing): `.0` is the frozen share.
 #[derive(Debug)]
@@ -52,13 +55,13 @@ impl std::fmt::Display for Frozen {
 }
 impl std::error::Error for Frozen {}
 
-/// How much of a video is frozen (the picture not changing for 2 seconds or more), 0 to 1: CS2
+/// How much of a video is frozen (the picture not changing for half a second or more), 0 to 1: CS2
 /// stops drawing when the screen goes to sleep, and the recording then repeats one frame. `None`
 /// if ffmpeg couldn't read it.
 pub fn frozen_share(video: &Path) -> Option<f64> {
     let mut c = Command::new(ffmpeg_exe());
     c.args(["-hide_banner", "-nostats", "-threads", "2", "-i"]).arg(video);
-    c.args(["-vf", "scale=320:-2,freezedetect=n=-50dB:d=2", "-an", "-f", "null", "-"]);
+    c.args(["-vf", "scale=320:-2,freezedetect=n=-50dB:d=0.5", "-an", "-f", "null", "-"]);
     hide_console(&mut c);
     let out = c.output().ok()?;
     let log = String::from_utf8_lossy(&out.stderr);

@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
 /// Bumped whenever what's in a details file changes, so older ones are rebuilt.
-pub const VERSION: u32 = 11;
+pub const VERSION: u32 = 12;
 
 /// Spotted state is sampled every this many ticks.
 const SPOT_STEP: i32 = 2;
@@ -270,6 +270,9 @@ pub struct DPlayer {
     /// The stats as the match page shows them (see [`STATS`]); missing when there's no sample.
     #[serde(default)]
     pub stats: std::collections::BTreeMap<String, f64>,
+    /// Their crosshair share code in this match (the one they used most).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub crosshair: String,
 }
 
 /// Every stat on the match page's Aim, Utility and Activity tabs: key, and whether lower is
@@ -1292,7 +1295,7 @@ pub fn build(demo: &[u8], m: &Match, a: &Analysis, me: u64) -> Result<MatchDetai
         }
         act.rounds_survived = (0..m.rounds.len()).filter(|r| !a.rounds[*r].died.contains(&s)).count() as u32;
 
-        let mut dp = DPlayer { steamid: sid(s), aim, utility: util, activity: act, trades: trades.remove(&s).unwrap_or_default(), stats: Default::default() };
+        let mut dp = DPlayer { steamid: sid(s), aim, utility: util, activity: act, trades: trades.remove(&s).unwrap_or_default(), stats: Default::default(), crosshair: String::new() };
         dp.compute_stats();
         players.push(dp);
     }
@@ -1440,34 +1443,81 @@ pub fn path(root: &std::path::Path, id: &str) -> std::path::PathBuf {
 
 /// Whether a match's details are missing or from an older version.
 pub fn stale(root: &std::path::Path, id: &str) -> bool {
-    #[derive(Deserialize)]
-    struct V {
-        #[serde(default)]
-        version: u32,
-    }
-    std::fs::read_to_string(path(root, id))
-        .ok()
-        .and_then(|t| serde_json::from_str::<V>(&t).ok())
-        .is_none_or(|v| v.version < VERSION)
+    leading_version(&path(root, id)).is_none_or(|v| v < VERSION)
+}
+
+/// The `version` a JSON file starts with (`{"version":12,...`), read from its first bytes only.
+pub fn leading_version(file: &std::path::Path) -> Option<u32> {
+    use std::io::Read as _;
+    let mut head = [0u8; 64];
+    let n = std::fs::File::open(file).ok()?.read(&mut head).ok()?;
+    let head = std::str::from_utf8(&head[..n]).ok()?;
+    let rest = &head[head.find("\"version\":")? + 10..];
+    rest[..rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len())].parse().ok()
 }
 
 /// Builds and saves a match's details and its 2D replay.
 pub fn write(root: &std::path::Path, id: &str, demo: &[u8], m: &Match, a: &Analysis, me: u64) -> Result<()> {
-    let d = build(demo, m, a, me)?;
-    if let Err(e) = write_replay(root, id, demo, m) {
-        eprintln!("replay {id}: {e:#}");
+    let mut d = build(demo, m, a, me)?;
+    match write_replay(root, id, demo, m) {
+        Ok(r) => {
+            for p in d.players.iter_mut() {
+                if let Some(i) = r.players.iter().position(|s| *s == p.steamid) {
+                    p.crosshair = r.crosshairs.get(i).cloned().unwrap_or_default();
+                }
+            }
+            if let Err(e) = record_crosshairs(root, id, &r) {
+                eprintln!("crosshairs {id}: {e:#}");
+            }
+        }
+        Err(e) => eprintln!("replay {id}: {e:#}"),
     }
     std::fs::write(path(root, id), serde_json::to_string(&d)?)?;
+    Ok(())
+}
+
+/// Every crosshair seen in the library (`crosshairs.json`): each match's players' codes, and each
+/// code read into CS2's pixel model with the code CS2 imports today, for the app to draw and copy.
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct CrosshairIndex {
+    /// Match id -> steamid -> code.
+    pub matches: std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>,
+    /// Code -> the crosshair (absent for codes that don't read).
+    pub codes: std::collections::BTreeMap<String, serde_json::Value>,
+}
+
+fn record_crosshairs(root: &std::path::Path, id: &str, r: &Replay) -> Result<()> {
+    let file = root.join("crosshairs.json");
+    let mut index: CrosshairIndex = std::fs::read_to_string(&file).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+    let mut codes = std::collections::BTreeMap::new();
+    for (p, code) in r.players.iter().zip(&r.crosshairs) {
+        if code.is_empty() {
+            continue;
+        }
+        codes.insert(p.clone(), code.clone());
+        if !index.codes.contains_key(code) {
+            if let Some(c) = crate::crosshair::decode(code) {
+                let mut v = serde_json::to_value(&c)?;
+                v["cs2"] = crate::crosshair::encode(&c).into();
+                index.codes.insert(code.clone(), v);
+            }
+        }
+    }
+    index.matches.insert(id.to_string(), codes);
+    let tmp = file.with_extension("json.tmp");
+    std::fs::write(&tmp, serde_json::to_string(&index)?)?;
+    std::fs::rename(tmp, file)?;
     Ok(())
 }
 
 /// Positions are sampled every this many ticks for the 2D replay (8 a second).
 pub const REPLAY_STEP: i32 = 8;
 
-/// Everyone's position, view direction and health through each round, for the 2D replay
-/// (`matches/<id>.replay.json.gz`). Frames hold `[x, y, yaw, hp, weapon]` (`stride` numbers) for
-/// each player in `players` order, every `step` ticks from `start`; hp 0 = dead; weapon is an
-/// index into `weapons` (-1 = unknown). Older files have stride 4 (no weapon).
+/// Everyone's position, view direction and health through each round, for the 2D replay and match
+/// insights (`matches/<id>.replay.json.gz`). Frames hold `[x, y, yaw, hp, weapon, z, place]`
+/// (`stride` numbers) for each player in `players` order, every `step` ticks from `start`; hp 0 =
+/// dead; weapon is an index into `weapons` and place into `places` (-1 = unknown). Older files
+/// have stride 5 (no height or place) or 4 (no weapon either).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Replay {
     pub step: i32,
@@ -1477,6 +1527,12 @@ pub struct Replay {
     pub stride: usize,
     #[serde(default)]
     pub weapons: Vec<String>,
+    /// CS2's callouts for where players stand ("Palace", "BombsiteA").
+    #[serde(default)]
+    pub places: Vec<String>,
+    /// Each player's crosshair code (the one they used most), in `players` order.
+    #[serde(default)]
+    pub crosshairs: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -1484,6 +1540,13 @@ pub struct ReplayRound {
     pub number: u32,
     pub start: i32,
     pub frames: Vec<Vec<i32>>,
+    /// Each player's equipment value once the round is live (what they bought), `players` order.
+    #[serde(default)]
+    pub equip: Vec<i32>,
+    /// Damage: `[ticks from start, attacker (-1 = the world), victim, health removed, weapon]`,
+    /// players and weapons as indexes.
+    #[serde(default)]
+    pub hurts: Vec<[i32; 5]>,
 }
 
 pub fn build_replay(demo: &[u8], m: &Match) -> Result<Replay> {
@@ -1499,11 +1562,13 @@ pub fn build_replay(demo: &[u8], m: &Match) -> Result<Replay> {
     for &(a, b) in &spans {
         ticks.extend((a..=b).step_by(REPLAY_STEP as usize));
     }
-    let vals = raw::players_values(demo, &["X", "Y", "yaw", "health", "active_weapon_name"], &ticks)?;
+    let vals = raw::players_values(
+        demo,
+        &["X", "Y", "Z", "yaw", "health", "active_weapon_name", "last_place_name", "current_equip_value", "crosshair_code"],
+        &ticks,
+    )?;
     let mut weapons: Vec<String> = vec![];
-    let mut weapon_index = |s: u64, t: i32| -> i32 {
-        let Some(Val::Strs(w)) = vals.get(&(s, t)).and_then(|v| v.get("active_weapon_name")) else { return -1 };
-        let Some(name) = w.first() else { return -1 };
+    let mut weapon_of = |name: &str| -> i32 {
         let name = weapon_icon_name(name);
         match weapons.iter().position(|x| *x == name) {
             Some(i) => i as i32,
@@ -1513,39 +1578,83 @@ pub fn build_replay(demo: &[u8], m: &Match) -> Result<Replay> {
             }
         }
     };
+    let str_of = |s: u64, t: i32, k: &str| -> Option<String> {
+        match vals.get(&(s, t)).and_then(|v| v.get(k)) {
+            Some(Val::Strs(w)) => w.first().filter(|x| !x.is_empty()).cloned(),
+            _ => None,
+        }
+    };
+    let mut places: Vec<String> = vec![];
+    let mut place_of = |s: u64, t: i32| -> i32 {
+        let Some(name) = str_of(s, t, "last_place_name") else { return -1 };
+        match places.iter().position(|x| *x == name) {
+            Some(i) => i as i32,
+            None => {
+                places.push(name);
+                places.len() as i32 - 1
+            }
+        }
+    };
     let num = |s: u64, t: i32, k: &str| match vals.get(&(s, t)).and_then(|v| v.get(k)) {
         Some(Val::Num(x)) => Some(*x),
         _ => None,
     };
-    let rounds = m
-        .rounds
+    let index_of: HashMap<u64, i32> = m.players.iter().enumerate().map(|(i, p)| (p.steamid, i as i32)).collect();
+    let mut rounds = vec![];
+    for (ri, (r, &(a, b))) in m.rounds.iter().zip(&spans).enumerate() {
+        let frames = (a..=b)
+            .step_by(REPLAY_STEP as usize)
+            .map(|t| {
+                m.players
+                    .iter()
+                    .flat_map(|p| {
+                        let s = p.steamid;
+                        let hp = num(s, t, "health").unwrap_or(0.0).max(0.0);
+                        let alive = hp > 0.0;
+                        [
+                            num(s, t, "X").unwrap_or(0.0).round() as i32,
+                            num(s, t, "Y").unwrap_or(0.0).round() as i32,
+                            num(s, t, "yaw").unwrap_or(0.0).round() as i32,
+                            hp as i32,
+                            if alive { str_of(s, t, "active_weapon_name").map_or(-1, |w| weapon_of(&w)) } else { -1 },
+                            num(s, t, "Z").unwrap_or(0.0).round() as i32,
+                            if alive { place_of(s, t) } else { -1 },
+                        ]
+                    })
+                    .collect()
+            })
+            .collect();
+        // What they bought: the equipment value a second into the round.
+        let at = (a + TICKRATE as i32).min(b);
+        let at = at - (at - a).rem_euclid(REPLAY_STEP);
+        let equip = m.players.iter().map(|p| num(p.steamid, at, "current_equip_value").unwrap_or(0.0) as i32).collect();
+        let hurts = m
+            .damages
+            .iter()
+            .filter(|d| d.round == ri && d.tick >= a && d.tick <= b)
+            .filter_map(|d| {
+                let victim = *index_of.get(&d.victim)?;
+                let attacker = d.attacker.and_then(|s| index_of.get(&s).copied()).unwrap_or(-1);
+                Some([d.tick - a, attacker, victim, d.health_removed.max(0), weapon_of(&d.weapon)])
+            })
+            .collect();
+        rounds.push(ReplayRound { number: r.number, start: a, frames, equip, hurts });
+    }
+    // Each player's crosshair: the code seen most often.
+    let crosshairs = m
+        .players
         .iter()
-        .zip(&spans)
-        .map(|(r, &(a, b))| ReplayRound {
-            number: r.number,
-            start: a,
-            frames: (a..=b)
-                .step_by(REPLAY_STEP as usize)
-                .map(|t| {
-                    m.players
-                        .iter()
-                        .flat_map(|p| {
-                            let s = p.steamid;
-                            let hp = num(s, t, "health").unwrap_or(0.0).max(0.0);
-                            [
-                                num(s, t, "X").unwrap_or(0.0).round() as i32,
-                                num(s, t, "Y").unwrap_or(0.0).round() as i32,
-                                num(s, t, "yaw").unwrap_or(0.0).round() as i32,
-                                hp as i32,
-                                if hp > 0.0 { weapon_index(s, t) } else { -1 },
-                            ]
-                        })
-                        .collect()
-                })
-                .collect(),
+        .map(|p| {
+            let mut seen: HashMap<String, usize> = HashMap::new();
+            for &t in ticks.iter().step_by(64) {
+                if let Some(c) = str_of(p.steamid, t, "crosshair_code") {
+                    *seen.entry(c).or_default() += 1;
+                }
+            }
+            seen.into_iter().max_by_key(|(_, n)| *n).map(|(c, _)| c).unwrap_or_default()
         })
         .collect();
-    Ok(Replay { step: REPLAY_STEP, players: m.players.iter().map(|p| sid(p.steamid)).collect(), rounds, stride: 5, weapons })
+    Ok(Replay { step: REPLAY_STEP, players: m.players.iter().map(|p| sid(p.steamid)).collect(), rounds, stride: 7, weapons, places, crosshairs })
 }
 
 /// The icon file (`library/weapons/<name>.svg`) for a weapon as the demo names it ("AK-47",
@@ -1604,12 +1713,27 @@ fn weapon_icon_name(display: &str) -> String {
     mapped.to_string()
 }
 
-pub fn write_replay(root: &std::path::Path, id: &str, demo: &[u8], m: &Match) -> Result<()> {
+pub fn write_replay(root: &std::path::Path, id: &str, demo: &[u8], m: &Match) -> Result<Replay> {
     use std::io::Write as _;
     let r = build_replay(demo, m)?;
-    let file = std::fs::File::create(root.join("matches").join(format!("{id}.replay.json.gz")))?;
+    let file = std::fs::File::create(replay_path(root, id))?;
     let mut gz = flate2::write::GzEncoder::new(file, flate2::Compression::default());
     gz.write_all(serde_json::to_string(&r)?.as_bytes())?;
     gz.finish()?;
-    Ok(())
+    Ok(r)
+}
+
+pub fn replay_path(root: &std::path::Path, id: &str) -> std::path::PathBuf {
+    root.join("matches").join(format!("{id}.replay.json.gz"))
+}
+
+/// A match's saved 2D replay.
+pub fn load_replay(root: &std::path::Path, id: &str) -> Option<Replay> {
+    let file = std::fs::File::open(replay_path(root, id)).ok()?;
+    serde_json::from_reader(std::io::BufReader::new(flate2::read::GzDecoder::new(file))).ok()
+}
+
+/// A match's saved details.
+pub fn load(root: &std::path::Path, id: &str) -> Option<MatchDetails> {
+    serde_json::from_str(&std::fs::read_to_string(path(root, id)).ok()?).ok()
 }

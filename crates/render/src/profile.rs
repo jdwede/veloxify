@@ -106,6 +106,15 @@ impl Profile {
             .with_context(|| format!("parsing {}", path.display()))?;
         p.video.retain(|k, _| !k.starts_with('_'));
         p.console.retain(|k, _| !k.starts_with('_'));
+        // CS2's crosshair is in pixels since September 2026: a profile from before sets the old
+        // variables, which CS2 converts in ways that can't be put back. Use the pixel ones instead
+        // (the clean default unless the profile already has them).
+        p.console.retain(|k, _| !cs2hl_core::crosshair::LEGACY_CVARS.contains(&k.as_str()));
+        if !p.console.contains_key("cl_crosshair_length") {
+            for (k, v) in cs2hl_core::crosshair::convars(&cs2hl_core::crosshair::CLEAN) {
+                p.console.insert(k.to_string(), v);
+            }
+        }
         Ok(p)
     }
 }

@@ -176,6 +176,8 @@ impl Worker {
         let mut faceit_dirty = true;
         // Clips recorded without sound are found once per launch.
         let mut clips_audio_checked = false;
+        // Match insights to (re)build: checked once at start, then after imports and rebuilds.
+        let mut insights_pending = true;
         // Right tray color from the start (the first import can take a while).
         self.set(if system::cs2_running() { "waiting" } else { "idle" }, "Starting", 0, 0);
         loop {
@@ -286,6 +288,40 @@ impl Worker {
             if can_film && !pending_lineups.is_empty() && !system::cs2_running() {
                 self.render_lineups(&settings, me, Some(std::mem::take(&mut pending_lineups)));
             }
+            // Older matches' details (match page, insights, crosshairs) before automatic filming:
+            // a minute at a time, until none are left (an update can make all of them stale).
+            let (rebuilt, more_details) = self.backfill_details(&settings, me);
+            if rebuilt {
+                self.library_changed();
+            }
+            insights_pending |= rebuilt || imported;
+            if insights_pending && !system::cs2_running() {
+                match cs2hl_core::insights::update(&settings.library_dir, Duration::from_secs(30)) {
+                    Ok(0) => insights_pending = false,
+                    Ok(n) => {
+                        vlog!("match insights: {n} matches added");
+                        self.library_changed();
+                    }
+                    Err(e) => {
+                        vlog!("match insights: {e:#}");
+                        insights_pending = false;
+                    }
+                }
+            }
+            if more_details && pending_render.is_empty() {
+                // Still take what was asked for meanwhile (clips to render come first next time).
+                while let Ok(job) = jobs.try_recv() {
+                    match job {
+                        Job::Render(ids) => pending_render.extend(ids),
+                        Job::RenderClips(items) => pending_clips.extend(items),
+                        Job::Faceit => last_faceit = None,
+                        Job::Import(files) => self.forget(&files),
+                        Job::RenderLineups(ids) => pending_lineups.extend(ids),
+                        _ => {}
+                    }
+                }
+                continue;
+            }
             if can_film && (settings.auto_render || !pending_render.is_empty()) {
                 let scope =
                     if pending_render.is_empty() { Scope::LatestSession } else { Scope::Matches(std::mem::take(&mut pending_render)) };
@@ -310,10 +346,6 @@ impl Worker {
                 let _ = ingest::rebuild_index(&settings.library_dir, me);
                 self.library_changed();
             }
-            // Older matches: their match-page details (aim, utility, ...), a minute at a time.
-            if self.backfill_details(&settings, me) {
-                self.library_changed();
-            }
             if self.status.lock().unwrap().state != "error" {
                 self.set("idle", "Up to date", 0, 0);
             }
@@ -331,12 +363,12 @@ impl Worker {
 
     /// Builds missing (or outdated) match-page details for matches whose demo is still on disk,
     /// newest first, for up to a minute; stops when CS2 opens or Get demos starts. Returns whether
-    /// any were built (benchmarks are refreshed then).
-    fn backfill_details(&self, settings: &Settings, me: u64) -> bool {
+    /// any were built (benchmarks are refreshed then) and whether some are still left.
+    fn backfill_details(&self, settings: &Settings, me: u64) -> (bool, bool) {
         let lib = &settings.library_dir;
         let Ok(index) = std::fs::read_to_string(lib.join("index.json")).map_err(anyhow::Error::from).and_then(|t| Ok(serde_json::from_str::<Index>(&t)?))
         else {
-            return false;
+            return (false, false);
         };
         let mut todo: Vec<(i64, String)> = index
             .matches
@@ -348,8 +380,10 @@ impl Worker {
         let total = todo.len();
         let started = Instant::now();
         let mut built = 0;
+        let mut left = false;
         for (i, (_, id)) in todo.into_iter().enumerate() {
             if started.elapsed() > Duration::from_secs(60) || system::cs2_running() || crate::demos::downloading(&self.app) {
+                left = true;
                 break;
             }
             let Some(entry) = std::fs::read_to_string(lib.join("matches").join(format!("{id}.json")))
@@ -377,7 +411,7 @@ impl Worker {
             let _ = cs2hl_core::details::write_benchmarks(lib, Some(me));
             let _ = batch::migrate_lineup_clips(lib);
         }
-        built > 0
+        (built > 0, left && built > 0)
     }
 
     /// Names the user may go by on FACEIT: the one set in Settings, the names they played under

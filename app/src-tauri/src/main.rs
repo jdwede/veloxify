@@ -279,6 +279,36 @@ fn save_callouts(state: State<AppState>, callouts: serde_json::Value) -> Result<
     std::fs::write(lib.join("callouts.json"), serde_json::to_string_pretty(&callouts).map_err(|e| e.to_string())?).map_err(|e| e.to_string())
 }
 
+/// Saves the user's favorite crosshairs (`crosshair_favorites.json` in the library).
+#[tauri::command]
+fn save_crosshair_favorites(state: State<AppState>, favorites: serde_json::Value) -> Result<(), String> {
+    let lib = state.settings.lock().unwrap().library_dir.clone();
+    std::fs::write(lib.join("crosshair_favorites.json"), serde_json::to_string_pretty(&favorites).map_err(|e| e.to_string())?).map_err(|e| e.to_string())
+}
+
+/// Puts a crosshair in the user's CS2 settings (their saved console variables), for the next time
+/// they start CS2. Only while CS2 is closed (it writes its settings when it quits); the file is
+/// backed up the first time.
+#[tauri::command]
+fn apply_crosshair(state: State<AppState>, code: String) -> Result<(), String> {
+    let c = cs2hl_core::crosshair::decode(&code).ok_or("That isn't a crosshair code Veloxify can read.")?;
+    if system::cs2_running() {
+        return Err("CS2 is open (or Veloxify is filming in it). Close it and try again, or copy the code and import it in CS2's crosshair settings.".into());
+    }
+    let me = state.settings.lock().unwrap().steamid64.or_else(system::active_steam_user).ok_or("Couldn't find your Steam account.")?;
+    let dir = cs2hl_render::steam::user_cfg_dir(me);
+    let file = dir.join("cs2_user_convars_0_slot0.vcfg");
+    let text = std::fs::read_to_string(&file).map_err(|e| format!("Couldn't read your CS2 settings ({e}). Start CS2 once so it makes them."))?;
+    let backup = dir.join("cs2_user_convars_0_slot0.vcfg.veloxify-backup");
+    if !backup.exists() {
+        std::fs::write(&backup, &text).map_err(|e| e.to_string())?;
+    }
+    let out = cs2hl_core::crosshair::set_in_vcfg(&text, &cs2hl_core::crosshair::convars(&c));
+    std::fs::write(&file, out).map_err(|e| e.to_string())?;
+    vlog!("crosshair {code} put in {}", file.display());
+    Ok(())
+}
+
 /// The silent output device CS2's sound is recorded through, if this PC has one.
 #[tauri::command]
 fn silent_audio_device(state: State<AppState>) -> Option<String> {
@@ -573,7 +603,9 @@ fn main() {
             league_division,
             silent_audio_device,
             rerender_silent_clips,
-            save_callouts
+            save_callouts,
+            save_crosshair_favorites,
+            apply_crosshair
         ])
         .setup(move |app| {
             // Clips, thumbnails and match data are served from the library folder only.

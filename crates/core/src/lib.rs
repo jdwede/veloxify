@@ -1,10 +1,12 @@
 pub mod analysis;
+pub mod crosshair;
 pub mod curation;
 pub mod demo_io;
 pub mod details;
 pub mod faceit;
 pub mod highlights;
 pub mod ingest;
+pub mod insights;
 pub mod library;
 pub mod lineups;
 pub mod lowlights;

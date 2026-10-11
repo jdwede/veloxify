@@ -104,10 +104,17 @@ impl Protector {
         let journaled: Vec<(String, String)> =
             std::fs::read_to_string(self.journal()).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
         let mut originals = vec![];
-        for (name, _) in wanted {
+        let same = |a: &str, b: &str| match (a.trim().parse::<f64>(), b.trim().parse::<f64>()) {
+            (Ok(x), Ok(y)) => (x - y).abs() < 1e-4,
+            _ => a.trim().eq_ignore_ascii_case(b.trim()),
+        };
+        for (name, want) in wanted {
+            let now = vc.read_cvar(name);
+            // A crashed run's original stands only while CS2 still has that run's value; if it
+            // doesn't, the user changed it since and the current value is theirs.
             let value = match journaled.iter().find(|(n, _)| n == name) {
-                Some((_, v)) => Some(v.clone()),
-                None => vc.read_cvar(name),
+                Some((_, v)) if now.as_deref().is_none_or(|n| same(n, want)) => Some(v.clone()),
+                _ => now,
             };
             if let Some(v) = value {
                 originals.push((name.clone(), v));

@@ -137,9 +137,14 @@ pub struct RenderOptions {
     pub killfeed_only: bool,
     /// The recorded player's own crosshair instead of the profile's.
     pub own_crosshair: bool,
+    /// A crosshair share code to record with instead (empty = the clean default).
+    #[serde(default)]
+    pub crosshair: String,
     pub xray: bool,
     pub audio: bool,
 }
+
+
 
 fn read_profile(path: &Path) -> Value {
     std::fs::read_to_string(path).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_else(|| serde_json::from_str(DEFAULT_PROFILE).unwrap())
@@ -155,6 +160,7 @@ impl RenderOptions {
             transition: p["output"]["transition"].as_str().unwrap_or("cut").into(),
             killfeed_only: c("cl_draw_only_deathnotices") != "0",
             own_crosshair: c("cl_show_observer_crosshair") == "2",
+            crosshair: c("_crosshair_code"),
             xray: c("spec_show_xray") == "1",
             audio: p["audio"]["enabled"].as_bool().unwrap_or(true),
         }
@@ -175,6 +181,16 @@ impl RenderOptions {
         p["output"]["hide_fps_counter"] = false.into();
         p["console"]["cl_draw_only_deathnotices"] = (if self.killfeed_only { "1" } else { "0" }).into();
         p["console"]["cl_show_observer_crosshair"] = (if self.own_crosshair { "2" } else { "0" }).into();
+        // The crosshair recordings use, in CS2's pixel variables: a chosen code, else the clean
+        // default. (Never the CS:GO-era ones: see LEGACY_CVARS.)
+        let chosen = cs2hl_core::crosshair::decode(&self.crosshair);
+        p["console"]["_crosshair_code"] = (if chosen.is_some() { self.crosshair.trim() } else { "" }).into();
+        for (k, v) in cs2hl_core::crosshair::convars(chosen.as_ref().unwrap_or(&cs2hl_core::crosshair::CLEAN)) {
+            p["console"][k] = v.into();
+        }
+        if let Some(console) = p["console"].as_object_mut() {
+            console.retain(|k, _| !cs2hl_core::crosshair::LEGACY_CVARS.contains(&k.as_str()));
+        }
         p["console"]["spec_show_xray"] = (if self.xray { "1" } else { "0" }).into();
         p["audio"]["enabled"] = self.audio.into();
         std::fs::write(path, serde_json::to_string_pretty(&p).unwrap_or_default())
