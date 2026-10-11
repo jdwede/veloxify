@@ -98,8 +98,11 @@ pub fn plan(lib: &Path, scope: &Scope) -> Result<Vec<(String, String)>> {
         let mut out = vec![];
         for (mid, id) in items {
             let Ok(m) = load(&lib.join("matches").join(format!("{mid}.json"))) else { continue };
-            let pending = m.highlights.iter().any(|h| &h.id == id && h.clip.is_none() && h.render_error.is_none())
-                || m.lowlights.iter().any(|l| &l.id == id && l.clip.is_none() && l.render_error.is_none());
+            // Asked for by name: worth another try after a failure (but not on a demo CS2 can no
+            // longer play).
+            let retry = |e: &Option<String>| e.as_deref().is_none_or(|e| !e.contains("older CS2 version"));
+            let pending = m.highlights.iter().any(|h| &h.id == id && h.clip.is_none() && retry(&h.render_error))
+                || m.lowlights.iter().any(|l| &l.id == id && l.clip.is_none() && retry(&l.render_error));
             if pending && !curation.deleted.contains(id) {
                 out.push((mid.clone(), id.clone()));
             }
@@ -303,6 +306,12 @@ pub fn render(
                         m.lowlights[i].thumb = thumb;
                         m.lowlights[i].no_audio = no_audio;
                     }
+                    _ => {}
+                }
+                // A retry that worked: the earlier failure no longer applies.
+                match (hi, li) {
+                    (Some(i), _) => m.highlights[i].render_error = None,
+                    (None, Some(i)) => m.lowlights[i].render_error = None,
                     _ => {}
                 }
                 // Rendered again on request: no longer "removed for space".
