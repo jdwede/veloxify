@@ -90,7 +90,8 @@ fn copy_file(state: State<AppState>, rel: String) -> Result<(), String> {
 struct SettingsView {
     settings: Settings,
     /// The account logged in to Steam right now (used when no account is pinned in settings).
-    detected_steamid: Option<u64>,
+    /// As text: a SteamID64 is too big for a JavaScript number (it would show rounded).
+    detected_steamid: Option<String>,
     steam_name: Option<String>,
     render: RenderOptions,
     clips: usize,
@@ -114,7 +115,7 @@ fn get_settings(state: State<AppState>) -> SettingsView {
     let (clips, clip_bytes) = clip_usage(&s.library_dir);
     SettingsView {
         render: RenderOptions::load(&s.profile),
-        detected_steamid: system::active_steam_user(),
+        detected_steamid: s.steamid64.or_else(system::active_steam_user).map(|id| id.to_string()),
         steam_name: system::steam_persona_name(),
         clips,
         clip_bytes,

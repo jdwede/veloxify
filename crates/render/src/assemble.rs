@@ -214,7 +214,10 @@ pub fn assemble(parts: &[Part], out: &Path, o: &Output, audio: Option<&Audio>) -
     let mut maps = vec!["-map".to_string(), vlast];
     let mut audio_codec: Vec<String> = vec![];
     if let (true, Some(a)) = (with_audio, audio) {
-        graph += &format!(";{alast}loudnorm=I={}:TP=-1.5:LRA=11,aresample=48000[aout]", a.loudness_lufs);
+        // loudnorm turns a short, silent stretch into NaN (it measures over 3 s), which the AAC
+        // encoder refuses: those samples become silence.
+        const NAN_GUARD: &str = "aeval=exprs='if(isnan(val(0))+isinf(val(0)),0,val(0))|if(isnan(val(1))+isinf(val(1)),0,val(1))':c=same";
+        graph += &format!(";{alast}loudnorm=I={}:TP=-1.5:LRA=11,{NAN_GUARD},aresample=48000[aout]", a.loudness_lufs);
         maps.extend(["-map".into(), "[aout]".into()]);
         audio_codec.extend(["-c:a".into(), "aac".into(), "-b:a".into(), format!("{}k", a.bitrate_kbps)]);
     } else {

@@ -283,6 +283,10 @@ pub fn render(
             }
             _ => Ok(()),
         });
+        // Nor what a failed one left behind (ffmpeg writes part of the file before failing).
+        if recorded.is_err() {
+            let _ = std::fs::remove_file(lib.join(&rel));
+        }
         match recorded {
             Ok(()) => {
                 let thumb = format!("clips/{hid}.jpg");
