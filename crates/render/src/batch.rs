@@ -842,7 +842,9 @@ pub fn render_lineups(
             let rel = format!("lineups/{}.mp4", job.id);
             let ts = Instant::now();
             on(Event::Filming { title: job.title.clone() });
-            let recorded = r.record_lineup(&shot, &lib.join(&rel)).and_then(|()| match crate::assemble::frozen_share(&lib.join(&rel)) {
+            // A flash's white-out where it pops is still footage of it, not CS2 stopping.
+            let still_s = if job.kind == "flash" { 4.0 } else { 2.0 };
+            let recorded = r.record_lineup(&shot, &lib.join(&rel)).and_then(|()| match crate::assemble::frozen_share_with(&lib.join(&rel), still_s) {
                 Some(f) if f > crate::assemble::FROZEN_MAX => {
                     let _ = std::fs::remove_file(lib.join(&rel));
                     Err(crate::assemble::Frozen(f).into())

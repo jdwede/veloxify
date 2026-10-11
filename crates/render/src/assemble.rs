@@ -58,6 +58,12 @@ impl std::error::Error for Frozen {}
 /// stops drawing when the screen goes to sleep, and the recording then repeats one frame. `None`
 /// if ffmpeg couldn't read it.
 pub fn frozen_share(video: &Path) -> Option<f64> {
+    frozen_share_with(video, 2.0)
+}
+
+/// [`frozen_share`], with one still stretch counting only from `still_s` seconds: a flashbang
+/// whites the picture out for a couple of seconds where it pops, which is still footage of it.
+pub fn frozen_share_with(video: &Path, still_s: f64) -> Option<f64> {
     let mut c = Command::new(ffmpeg_exe());
     c.args(["-hide_banner", "-nostats", "-threads", "2", "-i"]).arg(video);
     c.args(["-vf", "scale=320:-2,freezedetect=n=-50dB:d=0.5", "-an", "-f", "null", "-"]);
@@ -75,20 +81,20 @@ pub fn frozen_share(video: &Path) -> Option<f64> {
     let value = |key: &str| -> Vec<f64> { log.lines().filter_map(|l| l.split(key).nth(1)).filter_map(|v| v.trim().parse().ok()).collect() };
     let (starts, ends) = (value("freeze_start:"), value("freeze_end:"));
     let spans: Vec<(f64, f64)> = starts.iter().enumerate().map(|(i, &s)| (s, ends.get(i).copied().unwrap_or(total))).collect();
-    (total > 0.0).then(|| (counted_freeze(&spans) / total).clamp(0.0, 1.0))
+    (total > 0.0).then(|| (counted_freeze(&spans, still_s) / total).clamp(0.0, 1.0))
 }
 
 /// Of the still stretches (half a second or more each) in a recording, the time that means CS2
 /// wasn't drawing: a picture stuck for 2 seconds or more, or a slideshow (still stretches back to
 /// back, the picture changing about once a second). One still moment between moving ones (a
 /// scoped AWP holding an angle) doesn't count.
-pub fn counted_freeze(spans: &[(f64, f64)]) -> f64 {
+pub fn counted_freeze(spans: &[(f64, f64)], still_s: f64) -> f64 {
     let close = |a: f64, b: f64| b - a <= 0.25;
     spans
         .iter()
         .enumerate()
         .filter(|&(i, &(s, e))| {
-            e - s >= 2.0 || (i > 0 && close(spans[i - 1].1, s)) || spans.get(i + 1).is_some_and(|n| close(e, n.0))
+            e - s >= still_s || (i > 0 && close(spans[i - 1].1, s)) || spans.get(i + 1).is_some_and(|n| close(e, n.0))
         })
         .map(|(_, &(s, e))| e - s)
         .sum()
@@ -102,11 +108,13 @@ mod freeze_tests {
     fn slideshow_counts_and_one_still_moment_does_not() {
         // A frame a second: still stretches back to back.
         let slideshow: Vec<(f64, f64)> = (0..5).map(|i| (i as f64 * 1.2 + 0.05, i as f64 * 1.2 + 1.2)).collect();
-        assert!(counted_freeze(&slideshow) > 5.0);
+        assert!(counted_freeze(&slideshow, 2.0) > 5.0);
         // An AWP held still for 1.6 s between moving parts.
-        assert_eq!(counted_freeze(&[(1.0, 2.6)]), 0.0);
+        assert_eq!(counted_freeze(&[(1.0, 2.6)], 2.0), 0.0);
         // Stuck for good.
-        assert_eq!(counted_freeze(&[(0.5, 4.0)]), 3.5);
+        assert_eq!(counted_freeze(&[(0.5, 4.0)], 2.0), 3.5);
+        // A flash whiting the picture out for 2.5 s is fine for a flash lineup.
+        assert_eq!(counted_freeze(&[(3.0, 5.5)], 4.0), 0.0);
     }
 }
 
