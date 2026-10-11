@@ -1590,3 +1590,5 @@ ul.ins-list { list-style: none; padding-left: 0; }
 .ins-tip { background: var(--accent-soft); border: 1px solid var(--accent-line); border-radius: var(--radius-sm); padding: 8px 10px; font-size: 13px; line-height: 1.45; }
 .ins-examples { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 .ins-examples .chip { font-size: 12px; padding: 3px 10px; }
+.tag.gn-miss { background: rgba(255, 61, 61, 0.15); color: #ff8a8a; margin-left: 6px; }
+.gn-miss-note { color: #ff8a8a; margin-top: 4px; }

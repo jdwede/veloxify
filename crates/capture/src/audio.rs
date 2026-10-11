@@ -125,7 +125,10 @@ pub fn record_process(pid: u32, out: &str, stop: Arc<AtomicBool>) -> Result<Inst
         }
         while queue.len() >= 4 {
             let b: Vec<u8> = queue.drain(..4).collect();
-            wav.write_sample(f32::from_le_bytes([b[0], b[1], b[2], b[3]]))?;
+            // CS2 now and then hands over a broken sample (NaN or infinity), which the AAC
+            // encoder refuses: silence it and keep clean ones within range.
+            let v = f32::from_le_bytes([b[0], b[1], b[2], b[3]]);
+            wav.write_sample(if v.is_finite() { v.clamp(-1.0, 1.0) } else { 0.0 })?;
         }
         let written_frames = wav.len() as u64 / CHANNELS as u64;
         // Application loopback delivers nothing while the app is silent: pad with silence so the

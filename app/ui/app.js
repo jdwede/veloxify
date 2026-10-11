@@ -3085,6 +3085,27 @@ function lineupNames(d, map) {
   return out;
 }
 
+// Where players stand on a map (from Match insights), to spot grenades that land anywhere else.
+async function loadStandGrid(map) {
+  state.standGrids = state.standGrids || new Map();
+  if (!state.standGrids.has(map)) {
+    let g = null;
+    try { g = await (await fetch(assetUrl(`insights/${map}.grid.json`), { cache: "no-store" })).json(); } catch (e) { /* not built yet */ }
+    state.standGrids.set(map, g && g.matches >= 15 && g.grid?.w ? g.grid : null);
+  }
+  return state.standGrids.get(map);
+}
+// A smoke or molotov landing where nobody stands (a roof, a ledge): likely a miss.
+function offGround(grid, l) {
+  if (!grid || !["smoke", "molotov"].includes(l.kind)) return false;
+  const cx = Math.floor((l.to[0] - grid.x0) / grid.cell), cy = Math.floor((l.to[1] - grid.y0) / grid.cell);
+  for (let dx = -2; dx <= 2; dx++) for (let dy = -2; dy <= 2; dy++) {
+    const x = cx + dx, y = cy + dy;
+    if (x >= 0 && y >= 0 && x < grid.w && y < grid.h && grid.data[y * grid.w + x] >= 0) return false;
+  }
+  return true;
+}
+
 async function loadMapLineups(map) {
   state.mapLineups = state.mapLineups || new Map();
   if (!state.mapLineups.has(map)) {
@@ -3122,8 +3143,8 @@ async function renderGrenades(view, map) {
     return;
   }
   if (map && L.maps[map]) {
-    const [d] = await Promise.all([loadMapLineups(map), loadCallouts()]);
-    if (d) return renderGrenadeMap(view, d, map);
+    const [d, , stand] = await Promise.all([loadMapLineups(map), loadCallouts(), loadStandGrid(map)]);
+    if (d) { d.stand = stand; return renderGrenadeMap(view, d, map); }
   }
   // Every map: its picture, how many lineups of each grenade, videos ready.
   const maps = Object.entries(L.maps).map(([m, d]) => ({ m, d, total: Object.values(d.counts).reduce((a, b) => a + b, 0) })).sort((a, b) => b.total - a.total);
@@ -3241,6 +3262,7 @@ function renderGrenadeMap(view, d, map) {
             ${tauri ? `<button class="btn ghost small" id="gn-rename">${grenades.renaming ? "Save" : "Rename"}</button>${mapCallouts(map).names[sel.id] && !grenades.renaming ? `<button class="btn ghost small" id="gn-rename-reset" title="Back to the automatic name">Reset</button>` : ""}` : ""}</div>
           <div class="sub">${sub(sel)} · ${sel.side} · thrown ${sel.count} time${sel.count === 1 ? "" : "s"} in ${sel.matches} match${sel.matches === 1 ? "" : "es"} by ${sel.throwers} player${sel.throwers === 1 ? "" : "s"} · about ${Math.round(sel.t)} seconds into the round</div>
           <div class="gn-tags">${tagList(sel).map(([t, n]) => `<span class="tag ${t === sel.technique ? "main" : ""}">${esc(t)}${n < sel.count ? ` ${n}×` : ""}</span>`).join("")}<span class="tag">${esc(({ left: "Left click", right: "Right click", both: "Left + right click" })[sel.click] || sel.click)}</span></div>
+          ${offGround(d.stand, sel) ? `<div class="note gn-miss-note">This lands where no player ever stands in your matches (a roof or a ledge), so it's probably a miss. If it is, press Remove below.</div>` : ""}
           ${sel.aim_count ? `<div class="sub gn-aim">Most common crosshair placement: <b>${sel.aim_count} of ${sel.count}</b> throws${sel.other_aims ? ` · ${sel.other_aims} other placement${sel.other_aims === 1 ? "" : "s"} seen` : ""}. The aim below, and the video, are that one.</div>` : ""}
           <div class="ln-cmd"><code>${esc(setpos)}</code><button class="btn" id="gn-copy">Copy</button></div>
           <div class="sub">Paste in the console on a practice server (sv_cheats 1) to stand and aim exactly like this.</div>
@@ -3249,7 +3271,7 @@ function renderGrenadeMap(view, d, map) {
             ${tauri ? `<button class="btn ghost" id="gn-remove" title="${isRemoved(sel) ? "Show it in the list again" : "Hide a lineup that's really a miss (or one you don't want); you can put it back"}">${isRemoved(sel) ? "Put back" : "Remove"}</button>` : ""}</div></div>` : ""}
         <div class="gn-list">${shown.map((l) => `<button class="gn-item ${sel?.id === l.id ? "on" : ""}" data-gl="${esc(l.id)}">
           ${lineupThumb(l)}
-          <div class="gn-item-body"><div class="gn-item-title">${kindIcon(l.kind)}${isFav(l) ? `<span class="gn-fav-mark" title="Favorite">${ICONS.star}</span>` : ""}<b>${esc(nm(l))}</b>${l.spawn ? `<span class="gn-spawnchip">Spawn #${l.spawn}</span>` : ""}<span class="gn-x">×${l.count}</span></div>
+          <div class="gn-item-body"><div class="gn-item-title">${kindIcon(l.kind)}${isFav(l) ? `<span class="gn-fav-mark" title="Favorite">${ICONS.star}</span>` : ""}<b>${esc(nm(l))}</b>${offGround(d.stand, l) ? `<span class="tag gn-miss" title="It lands where no player ever stands (a roof or a ledge): probably a miss. Open it and press Remove if so.">Maybe a miss</span>` : ""}${l.spawn ? `<span class="gn-spawnchip">Spawn #${l.spawn}</span>` : ""}<span class="gn-x">×${l.count}</span></div>
             <div class="sub">${sub(l)} · ${l.side}</div><div class="gn-item-tag">${esc(l.technique)}</div></div></button>`).join("") || `<div class="empty small">No lineups with these filters.</div>`}</div>
       </section>
     </div>
@@ -4553,7 +4575,9 @@ function entryChecks(ctx, rounds) {
       for (let c = 0; c < r.sides.length; c++) {
         if (!(e[5] & (1 << c))) continue;
         const q = posAt(D, r, c, e[2]);
-        if (q) holds.push({ r, x: q[0], y: q[1], checked: !!(e[4] & (1 << c)), killed: e[3] === c });
+        // Defenders of this site: within reach of it (not a player far across the map).
+        const mid = D.sites[site];
+        if (q && (!mid || Math.hypot(q[0] - mid[0], q[1] - mid[1]) < 1300)) holds.push({ r, x: q[0], y: q[1], checked: !!(e[4] & (1 << c)), killed: e[3] === c });
       }
     }
     // Spots: holds within ~160 units of each other.
@@ -4564,13 +4588,25 @@ function entryChecks(ctx, rounds) {
     }
     const out = spots.filter((s) => s.list.length >= 3).map((s) => ({ ...s, n: s.list.length, checked: s.list.filter((h) => h.checked).length, killed: s.list.filter((h) => h.killed).length }))
       .sort((a, b) => b.n - a.n);
+    // Named by callout; spots sharing one get the side of the site they're on ("A Site (north-west)").
+    const COMPASS = ["east", "north-east", "north", "north-west", "west", "south-west", "south", "south-east"];
+    const mid = D.sites[site] || [0, 0];
+    for (const s of out) {
+      s.mine = named.find((n) => Math.hypot(n.x - s.x, n.y - s.y) < 150);
+      s.base = s.mine ? s.mine.name : nameOf(D.placeAt(s.x, s.y));
+    }
+    const count = new Map();
+    for (const s of out) count.set(s.base, (count.get(s.base) || 0) + 1);
     const seen = new Map();
     for (const s of out) {
-      const mine = named.find((n) => Math.hypot(n.x - s.x, n.y - s.y) < 150);
-      const base = mine ? mine.name : nameOf(D.placeAt(s.x, s.y));
-      const k = (seen.get(base) || 0) + 1;
-      seen.set(base, k);
-      s.name = !mine && k > 1 ? `${base} (${k})` : base;
+      let name = s.base;
+      if (!s.mine && count.get(s.base) > 1) {
+        const a = Math.atan2(s.y - mid[1], s.x - mid[0]);
+        name = `${s.base} (${COMPASS[((Math.round(a / (Math.PI / 4)) % 8) + 8) % 8]})`;
+      }
+      const k = (seen.get(name) || 0) + 1;
+      seen.set(name, k);
+      s.name = k > 1 ? `${name} ${k}` : name;
     }
     return out;
   });

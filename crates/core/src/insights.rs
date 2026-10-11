@@ -562,6 +562,15 @@ fn write_maps(root: &Path, index: &Index) -> Result<()> {
     }
     for (map, mut out) in by_map {
         out.grid = grid(labels.get(&map).map(Vec::as_slice).unwrap_or(&[]));
+        // The grid alone, small, for the Grenades page (where players stand: a smoke landing
+        // anywhere else is likely a miss).
+        #[derive(Serialize)]
+        struct GridFile<'a> {
+            matches: usize,
+            places: &'a [String],
+            grid: &'a PlaceGrid,
+        }
+        std::fs::write(dir.join(format!("{map}.grid.json")), serde_json::to_string(&GridFile { matches: out.matches.len(), places: &out.places, grid: &out.grid })?)?;
         let tmp = dir.join(format!("{map}.json.tmp"));
         std::fs::write(&tmp, serde_json::to_string(&out)?)?;
         std::fs::rename(&tmp, dir.join(format!("{map}.json")))?;

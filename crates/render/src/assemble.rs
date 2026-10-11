@@ -41,7 +41,8 @@ fn ffmpeg() -> Command {
 /// [`frozen_share`]). Lineup videos' camera always moves; a highlight can hold still a while (an
 /// AWP holding an angle).
 pub const FROZEN_MAX: f64 = 0.25;
-pub const FROZEN_MAX_CLIP: f64 = 0.5;
+// A slideshow measures 90% and up; an AWP holding an angle for a few seconds can reach 58%.
+pub const FROZEN_MAX_CLIP: f64 = 0.6;
 
 /// A recording came out frozen (CS2 stopped drawing): `.0` is the frozen share.
 #[derive(Debug)]
