@@ -59,6 +59,30 @@ FACEIT, Allstar or Valve.</sub>
 - Tags for how it's thrown: jump throw, jump throw + W, running jump throw, crouch, walk, left or right click.
 - A **video of each lineup**, filmed from a demo in CS2: the thrower lining it up in first person, then the camera follows the grenade until it pops and holds on it.
 - Every map with its lineup count, then a radar with every arc; a `setpos` to stand and aim exactly like the thrower on a practice server.
+- Star your favorites and filter the map to them; remove a lineup that's really a miss (and put it back if you change your mind).
+
+**Match Insights** (how players in your matches play each map)
+- Built from every round of every match: where each player was, twice a second, with CS2's own callouts, plus what each team bought, the kills, damage, grenades and the bomb.
+- Filter by side, round type (pistol, eco, force buy, full buy), whose rounds (your opponents, your team, everyone) and FACEIT or Premier.
+- **Overview**: the strongest patterns first. Pistol round splits, "tells" ("when the T are in Apps by 1:25, they plant B 40% of the time"), timings, plant spots, executes and site entries.
+- **Ask**: build a situation and see what follows. "Someone of the T in Palace by 1:30 and a Window smoke by 1:40": where the bomb goes, who wins, first contact, where the first kill happens, with every matching round one click from its 2D replay.
+- **Positions**: a heat map over the round clock (press play), and for any callout how often it's taken, when, when contact happens there and what it means for the round.
+- **Strats**: how the 5 split up and where the round went ("4-man A → rush A", "Split 2 A / 2 B → B"), executes (the smokes thrown together), CT setups.
+- **Plants**: plant spots by name (the default, "Long plant"...) and where the T play after the plant.
+- **Paths**: where the first T into a site comes from, the defender spots they check and the ones they miss, lurks, and a line you draw across a door or choke to see who crosses it, when, where along it and whether they jump.
+- **Utility**: when players reach an area and how many are there second by second, so you know when a molotov or HE catches the most.
+
+**Playstyle** (you, from every round you played)
+- Your roles against everyone else in the same rounds: entry fragger, opening duels, lurker, AWPer, support, trader, anchor, rotator, clutcher.
+- T or CT: per-side kills, deaths, survival, opening duels and duels won.
+- Your duels by kind (range, weapon, moving or still targets, shooting on the move, height, openings, afterplants, retakes, clutches), with your strengths, weaknesses and a tip for each weakness. Click a kind to see every one of those duels and open it in the 2D replay.
+- Your spots on each map: where you usually play, and where you win and lose your fights.
+
+**Crosshairs**
+- Every player's crosshair on the match page: a preview and a copy button, as the scoreboard's last column.
+- Your crosshair history (every crosshair you've played with, by date), favorites, and the crosshairs most popular in your matches.
+- "Use in my CS2" puts one in your CS2 settings for the next time you start it (while CS2 is closed; your settings are backed up first), and you can record your clips with any crosshair.
+- Reads CS2's new pixel crosshair codes and the old `CSGO-` ones (converted, since CS2 no longer imports those).
 
 **Match page** (every match, for all 10 players)
 - Overview: HLTV Rating 3.0, Round Swing, RWS, KAST, ADR, HLTV-style summary and top highlights.
@@ -99,6 +123,10 @@ FACEIT, Allstar or Valve.</sub>
 | **Lineups**: set grenades from the match | **Aim**: Leetify-style aim stats with benchmarks |
 | <img src="docs/screenshots/map-zones.png" alt="Map zones" width="440"> | <img src="docs/screenshots/head-to-head.png" alt="Head to head" width="440"> |
 | **Map Zones**: where you win and lose fights | **Head to Head**: every matchup in the game |
+| <img src="docs/screenshots/insights.png" alt="Match Insights: pistol round splits, tells and timings on Mirage" width="440"> | <img src="docs/screenshots/insights-ask.png" alt="Match Insights Ask: what happens when someone of the T is in Palace" width="440"> |
+| **Match Insights**: how players in your matches play the map | **Ask**: what usually follows a situation |
+| <img src="docs/screenshots/playstyle.png" alt="Playstyle: roles, T or CT, duel strengths and weaknesses" width="440"> | <img src="docs/screenshots/crosshairs.png" alt="Crosshairs: history, favorites and popular crosshairs" width="440"> |
+| **Playstyle**: your roles, duels and best spots | **Crosshairs**: history, favorites, copy and apply |
 
 ## Support
 

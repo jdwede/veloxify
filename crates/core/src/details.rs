@@ -1472,7 +1472,11 @@ pub fn write(root: &std::path::Path, id: &str, demo: &[u8], m: &Match, a: &Analy
         }
         Err(e) => eprintln!("replay {id}: {e:#}"),
     }
-    std::fs::write(path(root, id), serde_json::to_string(&d)?)?;
+    // Whole or not at all: a half-written file would read as current.
+    let file = path(root, id);
+    let tmp = file.with_extension("json.tmp");
+    std::fs::write(&tmp, serde_json::to_string(&d)?)?;
+    std::fs::rename(tmp, file)?;
     Ok(())
 }
 
@@ -1716,10 +1720,12 @@ fn weapon_icon_name(display: &str) -> String {
 pub fn write_replay(root: &std::path::Path, id: &str, demo: &[u8], m: &Match) -> Result<Replay> {
     use std::io::Write as _;
     let r = build_replay(demo, m)?;
-    let file = std::fs::File::create(replay_path(root, id))?;
-    let mut gz = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+    let dest = replay_path(root, id);
+    let tmp = dest.with_extension("gz.tmp");
+    let mut gz = flate2::write::GzEncoder::new(std::fs::File::create(&tmp)?, flate2::Compression::default());
     gz.write_all(serde_json::to_string(&r)?.as_bytes())?;
     gz.finish()?;
+    std::fs::rename(tmp, dest)?;
     Ok(r)
 }
 

@@ -16,7 +16,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 /// Bumped whenever what's in an insight file changes, so they're rebuilt (from the saved files).
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 
 /// Paths keep a point every this many replay frames (8 a second): twice a second.
 const PATH_EVERY: usize = 4;
@@ -24,6 +24,8 @@ const PATH_EVERY: usize = 4;
 pub const PATH_UNIT: i32 = 4;
 /// The place grid's cell size (units).
 const CELL: i32 = 48;
+/// A map's file keeps its newest this many matches (about 240 KB each), so the pages stay quick.
+const MAX_MATCHES_PER_MAP: usize = 150;
 
 /// One match's rounds, in the shape the pages read.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -93,6 +95,12 @@ pub struct IRound {
     pub nades: Vec<[i32; 8]>,
     /// `[time, player, x, y]`.
     pub jumps: Vec<[i32; 4]>,
+    /// The first T into each bombsite: `[site (0 = A, 1 = B), entrant, time, killer (-1 = none
+    /// within 3 s), checked, present]`; checked and present are bit masks of players (by index):
+    /// the defenders within 1,800 units when they came in, and the ones they aimed at (within 18
+    /// degrees) in their first 2 seconds there.
+    #[serde(default)]
+    pub entries: Vec<[i32; 6]>,
 }
 
 /// Everything for one map: the pages load this.
@@ -363,6 +371,45 @@ pub fn build(entry: &MatchEntry, d: &MatchDetails, r: &Replay, me: &str) -> Opti
         } else {
             "elim"
         };
+        // The first T into each site: who they looked at coming in, and who killed them.
+        let mut entries = vec![];
+        for (site, name) in [(0, "BombsiteA"), (1, "BombsiteB")] {
+            let Some(site_pl) = r.places.iter().position(|p| p == name).map(|i| i as i32) else { continue };
+            let mut first: Option<(usize, usize)> = None; // (frame, player)
+            for p in (0..np).filter(|&p| sides.as_bytes()[p] == b'T') {
+                if let Some(f) = (0..frames.len()).find(|&f| alive(f, p) && at(f, p, 6) == site_pl) {
+                    if first.is_none_or(|(g, _)| f < g) {
+                        first = Some((f, p));
+                    }
+                }
+            }
+            let Some((fe, e)) = first else { continue };
+            if fe < 8 {
+                continue; // spawned there
+            }
+            let (ex, ey) = (at(fe, e, 0), at(fe, e, 1));
+            let (mut present, mut checked) = (0i32, 0i32);
+            for c in (0..np).filter(|&c| sides.as_bytes()[c] == b'C' && alive(fe, c)) {
+                let (cx, cy) = (at(fe, c, 0), at(fe, c, 1));
+                if ((cx - ex) as f64).hypot((cy - ey) as f64) > 1800.0 {
+                    continue;
+                }
+                present |= 1 << c;
+                let looked = (fe..(fe + 16).min(frames.len())).take_while(|&f| alive(f, e)).any(|f| {
+                    let (x, y) = (at(f, e, 0), at(f, e, 1));
+                    let (tx, ty) = (at(f, c, 0), at(f, c, 1));
+                    let want = ((ty - y) as f64).atan2((tx - x) as f64).to_degrees();
+                    let diff = (want - at(f, e, 2) as f64 + 540.0).rem_euclid(360.0) - 180.0;
+                    diff.abs() < 18.0
+                });
+                if looked {
+                    checked |= 1 << c;
+                }
+            }
+            let t_entry = tenth(fe);
+            let killer = kills.iter().find(|k| k[2] == e as i32 && k[0] >= t_entry - 5 && k[0] <= t_entry + 30).map_or(-1, |k| k[1]);
+            entries.push([site, e as i32, t_entry, killer, checked, present]);
+        }
         // When the bomb was defused: the round ends then.
         let defuse = dr.defused.then(|| (((dr.end_tick - dr.live_tick) as f64 / tick_rate) * 10.0).round() as i32);
         rounds.push(IRound {
@@ -382,6 +429,7 @@ pub fn build(entry: &MatchEntry, d: &MatchDetails, r: &Replay, me: &str) -> Opti
             hurts,
             nades,
             jumps,
+            entries,
         });
     }
     Some(MatchInsight {
@@ -421,7 +469,9 @@ pub fn update(root: &Path, budget: std::time::Duration) -> Result<usize> {
         let entry: Option<MatchEntry> = std::fs::read_to_string(root.join("matches").join(format!("{}.json", m.id))).ok().and_then(|t| serde_json::from_str(&t).ok());
         let (Some(entry), Some(d), Some(r)) = (entry, details::load(root, &m.id), details::load_replay(root, &m.id)) else { continue };
         if let Some(ins) = build(&entry, &d, &r, &index.me) {
-            std::fs::write(path(root, &m.id), serde_json::to_string(&ins)?)?;
+            let tmp = path(root, &m.id).with_extension("json.tmp");
+            std::fs::write(&tmp, serde_json::to_string(&ins)?)?;
+            std::fs::rename(tmp, path(root, &m.id))?;
             built += 1;
         }
     }
@@ -460,7 +510,12 @@ fn write_maps(root: &Path, index: &Index) -> Result<()> {
     let mut by_map: BTreeMap<String, MapInsights> = BTreeMap::new();
     let mut labels: BTreeMap<String, Vec<[i32; 3]>> = BTreeMap::new();
     let mut counts: BTreeMap<String, MapCount> = BTreeMap::new();
-    for m in &index.matches {
+    let mut newest: Vec<&crate::library::MatchSummary> = index.matches.iter().collect();
+    newest.sort_by_key(|m| std::cmp::Reverse(m.played_ts));
+    for m in newest {
+        if by_map.get(&m.map).is_some_and(|o| o.matches.len() >= MAX_MATCHES_PER_MAP) {
+            continue;
+        }
         let ins: Option<MatchInsight> = current(root, &m.id).then(|| std::fs::read_to_string(path(root, &m.id)).ok().and_then(|t| serde_json::from_str(&t).ok())).flatten();
         let Some(ins) = ins else {
             counts.entry(m.map.clone()).or_default().waiting += 1;
