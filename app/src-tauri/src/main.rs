@@ -17,6 +17,7 @@ mod players;
 mod practice;
 mod settings;
 mod system;
+mod tracking;
 mod worker;
 
 use serde::{Deserialize, Serialize};
@@ -280,6 +281,13 @@ fn save_callouts(state: State<AppState>, callouts: serde_json::Value) -> Result<
     std::fs::write(lib.join("callouts.json"), serde_json::to_string_pretty(&callouts).map_err(|e| e.to_string())?).map_err(|e| e.to_string())
 }
 
+/// Saves the user's notes and tags for their sessions (`session_notes.json` in the library).
+#[tauri::command]
+fn save_session_notes(state: State<AppState>, notes: serde_json::Value) -> Result<(), String> {
+    let lib = state.settings.lock().unwrap().library_dir.clone();
+    std::fs::write(lib.join("session_notes.json"), serde_json::to_string_pretty(&notes).map_err(|e| e.to_string())?).map_err(|e| e.to_string())
+}
+
 /// Saves the user's favorite crosshairs (`crosshair_favorites.json` in the library).
 #[tauri::command]
 fn save_crosshair_favorites(state: State<AppState>, favorites: serde_json::Value) -> Result<(), String> {
@@ -438,6 +446,8 @@ async fn launch_practice(app: tauri::AppHandle, launch: practice::Launch) -> Res
         return Ok(serde_json::json!({ "launched": false, "console": console }));
     }
     practice::start(&args)?;
+    let lib = state.settings.lock().unwrap().library_dir.clone();
+    tracking::log_practice(&lib, &launch.kind, &launch.target, &launch.mode);
     Ok(serde_json::json!({ "launched": true, "console": console }))
 }
 
@@ -606,7 +616,8 @@ fn main() {
             rerender_silent_clips,
             save_callouts,
             save_crosshair_favorites,
-            apply_crosshair
+            apply_crosshair,
+            save_session_notes
         ])
         .setup(move |app| {
             // Clips, thumbnails and match data are served from the library folder only.

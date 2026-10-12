@@ -90,3 +90,51 @@ pub fn set_start_with_windows(enabled: bool) -> Result<(), String> {
     };
     r.ok().map_err(|e| e.message())
 }
+
+/// The mice plugged in, by their product names ("G Pro X Superlight"), else by USB vendor and
+/// product id. Virtual ones (remote desktop) are left out.
+pub fn mice() -> Vec<String> {
+    use windows::Win32::Devices::HumanInterfaceDevice::HidD_GetProductString;
+    use windows::Win32::Storage::FileSystem::{CreateFileW, FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING};
+    use windows::Win32::UI::Input::{GetRawInputDeviceInfoW, GetRawInputDeviceList, RAWINPUTDEVICELIST, RIDI_DEVICENAME, RIM_TYPEMOUSE};
+    let mut out: Vec<String> = vec![];
+    unsafe {
+        let size = std::mem::size_of::<RAWINPUTDEVICELIST>() as u32;
+        let mut n = 0u32;
+        GetRawInputDeviceList(None, &mut n, size);
+        let mut list = vec![RAWINPUTDEVICELIST::default(); n as usize];
+        let got = GetRawInputDeviceList(Some(list.as_mut_ptr()), &mut n, size);
+        if got == u32::MAX {
+            return out;
+        }
+        for d in list.iter().take(got as usize).filter(|d| d.dwType == RIM_TYPEMOUSE) {
+            let mut len = 0u32;
+            GetRawInputDeviceInfoW(Some(d.hDevice), RIDI_DEVICENAME, None, &mut len);
+            let mut path = vec![0u16; len as usize + 1];
+            if GetRawInputDeviceInfoW(Some(d.hDevice), RIDI_DEVICENAME, Some(path.as_mut_ptr().cast()), &mut len) == u32::MAX {
+                continue;
+            }
+            let p = String::from_utf16_lossy(&path[..path.iter().position(|&c| c == 0).unwrap_or(path.len())]).to_uppercase();
+            if p.contains("RDP") || p.contains("ROOT#") || !p.contains("VID_") {
+                continue;
+            }
+            let mut name = String::new();
+            if let Ok(h) = CreateFileW(PCWSTR(path.as_ptr()), 0, FILE_SHARE_READ | FILE_SHARE_WRITE, None, OPEN_EXISTING, FILE_FLAGS_AND_ATTRIBUTES(0), None) {
+                let mut buf = [0u16; 128];
+                if HidD_GetProductString(h, buf.as_mut_ptr().cast(), (buf.len() * 2) as u32) {
+                    name = String::from_utf16_lossy(&buf[..buf.iter().position(|&c| c == 0).unwrap_or(buf.len())]).trim().to_string();
+                }
+                let _ = CloseHandle(h);
+            }
+            if name.is_empty() {
+                let id = |key: &str| p.split(key).nth(1).map(|r| r.chars().take(4).collect::<String>()).unwrap_or_default();
+                name = format!("Mouse {}:{}", id("VID_"), id("PID_"));
+            }
+            if !out.contains(&name) {
+                out.push(name);
+            }
+        }
+    }
+    out.sort();
+    out
+}

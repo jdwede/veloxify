@@ -218,6 +218,7 @@ const deltaHtml = (d) => (d == null ? "" : `<span class="delta ${d >= 0 ? "up" :
 const ICONS = {
   party: '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="9" cy="8" r="3.2"/><circle cx="16.5" cy="9" r="2.6"/><path d="M3 19c0-3.3 2.7-5.5 6-5.5s6 2.2 6 5.5zM14.6 13.7c3.2-.4 6.4 1.4 6.4 5.3h-4.4c0-2-.7-3.9-2-5.3z"/></svg>',
   clock: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></svg>',
+  calendar: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3.5" y="5" width="17" height="15" rx="2"/><path d="M3.5 10h17M8 3v4M16 3v4"/></svg>',
   check: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>',
   cross: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M7 7l10 10M17 7L7 17"/></svg>',
   star: '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 2.5l2.9 6.1 6.6.8-4.9 4.6 1.3 6.6L12 17.3l-5.9 3.3 1.3-6.6-4.9-4.6 6.6-.8z"/></svg>',
@@ -309,6 +310,10 @@ async function route() {
   if (parts[0] === "latest") {
     const last = state.days[state.days.length - 1];
     if (last) { location.hash = `#/session/${last.date}/${last.sessions.length - 1}`; return; }
+  }
+  if (parts[0] === "sessions") {
+    document.querySelector('[data-nav="latest"]').classList.add("active");
+    return renderSessionCalendar(view);
   }
   if (parts[0] === "session" && parts[1]) {
     document.querySelector('[data-nav="latest"]').classList.add("active");
@@ -4924,6 +4929,7 @@ async function renderPlaystyle(view, map) {
   const want = ps.map === "all" ? maps.map(([m]) => m) : [ps.map];
   const [list, Ls] = await Promise.all([Promise.all(want.map((m) => loadInsights(m))), Promise.all(want.map((m) => loadMapLineups(m))), loadCallouts()]);
   const sets = list.map((D, i) => (D ? { D, map: want[i], L: Ls[i] || {}, rounds: D.rounds.filter((r) => r.match.me >= 0 && (ps.src === "all" || r.match.source === ps.src) && (ps.side === "all" || r.sides[r.match.me] === ps.side)) } : null)).filter(Boolean);
+  ps.sdata = await loadSessionData();
   psPage(view, maps, sets);
 }
 
@@ -4959,6 +4965,7 @@ function psPage(view, maps, sets) {
     <div class="ins-maps"><a class="ins-map ${ps.map === "all" ? "on" : ""}" href="#/playstyle/all"><b>All maps</b></a>${maps.map(([m, c]) => `<a class="ins-map ${m === ps.map ? "on" : ""}" href="#/playstyle/${esc(m)}">${mapIcon(m)}<b>${esc(mapName(m))}</b><span class="sub">${c.matches}</span></a>`).join("")}</div>
     <div class="ln-bar ins-filters"><div class="seg">${segBtns("side", [["all", "Both sides"], ["T", "T side"], ["C", "CT side"]], ps.side)}</div>
       <div class="seg">${segBtns("src", [["all", "All"], ["faceit", "FACEIT"], ["valve", "Premier"]], ps.src)}</div></div>
+    ${psLately(ps.sdata)}
     ${!rounds.length ? `<div class="empty">No rounds with these filters.</div>` : `
     <div class="ps-grid">
       <section class="panel"><div class="panel-head"><div class="h3">How you play</div><span class="grow"></span><span class="sub">Compared with everyone else in the same rounds</span></div>
@@ -5000,6 +5007,26 @@ function psPage(view, maps, sets) {
     const shown = sel ? sel.ds : duels;
     svg.innerHTML = shown.slice(0, 600).map((d) => { const [x, y] = at(d.myPos[0], d.myPos[1]); return `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="4" class="ps-dot ${d.won ? "won" : "lost"}"/>`; }).join("");
   });
+}
+
+// Lately (your last 15 matches against the ones before) and what goes with you playing better:
+// across all your matches, whatever the filters above.
+function psLately(data) {
+  if (!data || data.rows.length < 25) return "";
+  const recent = [...data.rows].sort((a, b) => b.ts - a.ts).slice(0, 15).map((r) => r.id);
+  const j = judgeSession(data, recent);
+  const notice = noticed(data).slice(0, 6);
+  const list = (ps) => ps.slice(0, 3).map((p) => `${p.words}${SIZE_WORD(p.z)}`).join(", ");
+  const head = !j || j.few ? "" : j.verdict === "good" ? `You're playing <b class="up">${j.pct}% better</b> lately than before.` : j.verdict === "bad" ? `You're playing <b class="down">${Math.abs(j.pct)}% worse</b> lately than before.` : `Lately you're playing about the same as before${Math.abs(j.pct) >= 1 ? ` (${j.pct > 0 ? "+" : ""}${j.pct}%)` : ""}.`;
+  return `<div class="ps-grid"><section class="panel"><div class="panel-head"><div class="h3">Lately</div><span class="grow"></span><span class="sub">Your last 15 matches against the ones before (all maps)</span></div>
+      <div class="ps-lately">${head ? `<div class="ps-lately-head">${head} <span class="sub">HLTV 3.0 ${f2(j.rating.v)}, before ${f2(j.rating.b)}</span></div>` : ""}
+        ${j && !j.few && j.better.length ? `<div><span class="up">Improving:</span> ${list(j.better)}.</div>` : ""}
+        ${j && !j.few && j.worse.length ? `<div><span class="down">Slipping:</span> ${list(j.worse)}.</div>` : ""}
+        ${j && !j.few && !j.better.length && !j.worse.length ? `<div class="sub">No part of your game has moved clearly either way.</div>` : ""}
+        ${j && !j.few ? j.worse.filter((p) => p.z <= -1.5 && SESS_TIPS[p.key]).slice(0, 2).map((p) => `<div class="ps-tip"><b>Work on ${esc(p.words)}:</b> ${esc(SESS_TIPS[p.key])}</div>`).join("") : ""}</div></section>
+    <section class="panel"><div class="panel-head"><div class="h3">What helps you</div><span class="grow"></span><span class="sub">What goes with you playing better or worse</span></div>
+      <ul class="ps-helps">${notice.map((n) => `<li>${noticedText(n)}</li>`).join("") || `<li class="sub">Nothing stands out clearly yet.</li>`}</ul>
+      <div class="note" style="padding:0 20px 14px;margin:0">Compares your HLTV 3.0 across your matches by time of day, how far into a session, who you queued with, map and crosshair. From now on Veloxify also records your resolution, sensitivity and mouse each time you close CS2, and practice you start from the Practice tab; tag sessions in their Notes ("Tired", "New mouse"...) and those show up here too.</div></section></div>`;
 }
 
 function psDuelList(b) {
@@ -5650,6 +5677,13 @@ async function renderSession(view, date, idx) {
   if (!sess) { view.innerHTML = `<div class="empty">No session on ${esc(date)}</div>`; return; }
   const summaries = sess.match_ids.map(summaryOf);
   const withDemo = summaries.filter((m) => !m.stats_only);
+  // How you played against your usual, and what goes with it.
+  const sdata = await loadSessionData();
+  const skey = sess.match_ids[0];
+  const sobj = sdata.sessions.find((x) => x.key === skey);
+  const judged = judgeSession(sdata, sess.match_ids);
+  const here = new Set(sess.match_ids.map((id) => sdata.byId.get(id)).filter(Boolean).flatMap((r) => Object.entries(matchFactors(sdata, r)).map(([f, v]) => `${f}|${v}`)));
+  const notice = noticed(sdata).filter((n) => here.has(`${n.f}|${n.v}`)).slice(0, 3);
   const entries = await Promise.all(withDemo.map((m) => loadMatch(m.id)));
   const me = state.index.me;
   const players = sumPlayers(entries, me);
@@ -5736,8 +5770,13 @@ async function renderSession(view, date, idx) {
       <div class="sess-box"><b>${fmtDate(date)}</b><span class="sub">${fmtTime(first.played_at)}–${fmtTime(last.played_at)} · ${fmtSpan(minutes)}</span></div>
       <span class="grow"></span>
       ${prevSess ? `<a class="btn ghost" href="${prevSess}">◀ Previous session</a>` : ""}
+      <a class="btn ghost" href="#/sessions" title="Every session on a calendar, colored by how you played">${ICONS.calendar} Calendar</a>
       ${nextSess ? `<a class="btn ghost" href="${nextSess}">Next session ▶</a>` : ""}
     </div>
+    ${verdictHtml(judged)}
+    ${sobj ? setupHtml(sdata, sobj) : ""}
+    ${notice.length ? `<section class="panel sv-noticed"><div class="panel-head"><div class="h3">What we noticed</div><span class="grow"></span><span class="sub">From all your matches: things that were true of this session too</span></div>
+      <ul>${notice.map((n) => `<li>${noticedText(n)}</li>`).join("")}</ul></section>` : ""}
     ${cards.length ? `<div class="sc-row">${cards.map(card).join("")}</div>` : `<div class="empty">No demos for this session yet.</div>`}
     ${statsOnly ? `<div class="ml-note" style="margin:0 0 14px">${statsOnly} match${statsOnly === 1 ? "" : "es"} without a demo yet (FACEIT stats only) aren't in these totals. ${demoButton(missingDemos(summaries, 3650), "btn")}</div>` : ""}
     <section class="panel" style="margin-bottom:20px">
@@ -5748,6 +5787,8 @@ async function renderSession(view, date, idx) {
       </table></div>
       <div class="note">Your party: who FACEIT says queued with you, or (Premier, which doesn't record parties) teammates in two or more of the session's matches. HLTV 3.0, RWS, ADR, KAST and Swing are per round, so session values weight each match by its rounds. Eco kills: on players with under $2,000 of equipment (not pistol rounds).</div>
     </section>
+    ${baselineHtml(judged, sdata)}
+    ${notesHtml(sdata, skey)}
     <section class="fc-card" style="margin-bottom:20px">
       <div class="fc-head"><div class="h3">Matches</div></div>
       ${historyTable(historyRows().filter((r) => sess.match_ids.includes(r.id)).sort((a, b) => a.when - b.when), histCols())}
@@ -5759,12 +5800,357 @@ async function renderSession(view, date, idx) {
     renderSession(view, date, idx);
   }));
   wireColDrag([...view.querySelectorAll(".ml-head [data-col]")], histCols, (list) => { savePickedCols("veloxify.historyCols", HIST_COLS, list); renderSession(view, date, idx); });
+  wireNotes(view, sdata, skey);
   view.querySelectorAll(".ml-row").forEach((row) => (row.onclick = (e) => {
     const act = e.target.closest("[data-act]")?.dataset.act;
     if (act === "room") return openFaceitRoom(row.dataset.room);
     if (act === "demo") return getDemos([row.dataset.room]);
     location.hash = act === "hl" ? `${row.dataset.href}/highlights` : row.dataset.href;
   }));
+}
+
+// ---- sessions: how you played, against your own baseline ------------------------------------------
+
+// Everything a session's verdict is made from: your per-match stats (aim, movement, utility...),
+// your duels (insights/me.json), crosshairs, the setup you played with, practice and your notes.
+async function loadSessionData(force = false) {
+  if (state.sessData && !force) return state.sessData;
+  const json = async (rel, fallback) => { try { const r = await fetch(assetUrl(rel), { cache: "no-store" }); return r.ok ? await r.json() : fallback; } catch (e) { return fallback; } };
+  const [myStats, bench, me, , setups, practice, notes] = await Promise.all([
+    loadMyStats(), loadBenchmarks(), json("insights/me.json", null), loadCrosshairs(),
+    json("settings_log.json", []), json("practice_log.json", []), json("session_notes.json", {}),
+  ]);
+  const duels = me?.matches || {};
+  const statsById = new Map((myStats || []).map((m) => [m.id, m]));
+  const meId = state.index.me;
+  // One row per match you have a demo for, with what it says about the session it was in.
+  const sessions = allSessions();
+  const rows = [];
+  for (const s of sessions) s.ids.forEach((id, i) => {
+    const ms = statsById.get(id), sum = summaryOf(id);
+    if (!ms || !sum) return;
+    rows.push({ id, ts: ms.ts, rounds: ms.rounds || 1, stats: ms.stats || {}, duels: duels[id] || null, map: sum.map, result: sum.result, party: sum.party_size || 0,
+      xh: state.xh?.matches?.[id]?.[meId] || "", session: s.key, nInSession: i + 1, hour: new Date((sum.played_ts || ms.ts) * 1000).getHours() });
+  });
+  state.sessData = { rows, byId: new Map(rows.map((r) => [r.id, r])), sessions, bench: bench || {}, setups: setups || [], practice: practice || [], notes: notes && typeof notes === "object" ? notes : {} };
+  return state.sessData;
+}
+
+// Every session (oldest first): its matches, when, and a key that stays the same (its first match).
+function allSessions() {
+  const out = [];
+  for (const d of state.days) d.sessions.forEach((s, idx) => {
+    const ms = s.match_ids.map(summaryOf).filter(Boolean);
+    if (!ms.length) return;
+    const last = ms[ms.length - 1];
+    out.push({ key: s.match_ids[0], date: d.date, idx, ids: s.match_ids, wins: s.wins, losses: s.losses, start: ms[0].played_ts, end: last.played_ts + (last.duration_s || 2400) });
+  });
+  return out;
+}
+
+// What a session is judged on: groups of stats (lower-is-better ones count the other way).
+const SESS_GROUPS = [
+  ["aim", "aim", ["spotted_accuracy", "ttd_ms", "crosshair_deg", "head_accuracy", "first_bullet", "spray_accuracy"]],
+  ["movement", "movement", ["counter_strafe", "accurate_movement", "air_shot_pct"]],
+  ["utility", "utility", ["nades_per_round", "utility_damage_pr", "enemies_per_flash", "flash_assist_pct", "friends_per_flash", "unused_utility"]],
+  ["opening", "opening duels", ["entry_success"]],
+  ["trading", "trading", ["trade_kills_pr", "traded_deaths_pct"]],
+  ["fragging", "fragging", ["kpr", "adr", "multikill_pr", "hs_pct"]],
+  ["survival", "staying alive", ["dpr", "rounds_survived_pct", "kast"]],
+];
+// Duel kinds from your duels: [key, words, how to read it from a match's duels].
+const SESS_DUELS = [
+  ["rifle", "rifle duels", (d) => d.by_weapon?.rifle], ["awp", "AWP duels", (d) => d.by_weapon?.awp], ["pistol", "pistol duels", (d) => d.by_weapon?.pistol],
+  ["afterplant", "afterplants", (d) => d.afterplant], ["retake", "retakes", (d) => d.retake], ["moving", "duels on the move", (d) => d.moving],
+];
+const SESS_TIPS = {
+  aim: "Warm up before you queue: 10 minutes of aim_botz or a deathmatch (Practice tab), and keep your crosshair at head height.",
+  movement: "Counter-strafe: tap the opposite key so you're standing still when you shoot.",
+  utility: "Use your grenades: a flash for every entry, smokes to cross, and don't die with utility in your pockets.",
+  opening: "Take opening duels with a flash or a teammate ready to trade, or let someone else open and trade them.",
+  trading: "Play close enough to a teammate to trade them, and swing right after they die.",
+  fragging: "Look for fights you start on your terms: pre-aim common spots and peek with a teammate.",
+  survival: "Too many early deaths: hold safer angles and don't take duels you don't need, especially on CT.",
+  rifle: "Rifle duels: stop fully, tap or burst at range, and control the first 5–10 bullets of your spray.",
+  awp: "AWP: hold one angle without moving the crosshair, and reposition after every shot.",
+  pistol: "Pistols: one or two taps at the head beat spraying; move between shots, stop to shoot.",
+  afterplant: "Afterplants: play crossfires on the bomb with a teammate and use the time; you don't need to peek.",
+  retake: "Retakes: wait for your teammates and go in together with utility.",
+  moving: "You lost duels while running: stop before you shoot.",
+};
+
+const wmean = (rows, k) => {
+  let w = 0, s = 0;
+  for (const r of rows) { const v = r.stats[k]; if (v == null || Number.isNaN(v)) continue; w += r.rounds; s += v * r.rounds; }
+  return w ? s / w : null;
+};
+const sdOf = (rows, k) => {
+  const vs = rows.map((r) => r.stats[k]).filter((v) => v != null && !Number.isNaN(v));
+  if (vs.length < 3) return null;
+  const m = sum(vs) / vs.length;
+  return Math.sqrt(sum(vs.map((v) => (v - m) ** 2)) / (vs.length - 1)) || null;
+};
+const duelSum = (rows, get) => rows.reduce((a, r) => { const x = r.duels ? get(r.duels) : null; return x ? [a[0] + x[0], a[1] + x[1]] : a; }, [0, 0]);
+
+// A session against your baseline (every other match of yours): the overall verdict, each part
+// of your game, and the facts behind them.
+function judgeSession(data, ids) {
+  const mine = ids.map((id) => data.byId.get(id)).filter(Boolean);
+  if (!mine.length) return null;
+  const others = data.rows.filter((r) => !ids.includes(r.id));
+  if (others.length < 5) return { mine, few: true };
+  const n = mine.length;
+  const lower = (k) => !!data.bench[k]?.lower_is_better;
+  const stat = (k) => {
+    const v = wmean(mine, k), b = wmean(others, k), sd = sdOf(others, k);
+    if (v == null || b == null || !sd) return null;
+    const z = Math.max(-4, Math.min(4, ((v - b) / (sd / Math.sqrt(n))) * (lower(k) ? -1 : 1)));
+    return { k, v, b, z };
+  };
+  const rating = stat("rating3");
+  const pct = rating ? Math.round(((rating.v / rating.b) - 1) * 100) : 0;
+  const verdict = !rating ? "even" : rating.z >= 1 && pct >= 5 ? "good" : rating.z <= -1 && pct <= -5 ? "bad" : "even";
+  // Each part of your game: the average of its stats' scores.
+  const parts = [];
+  for (const [key, words, keys] of SESS_GROUPS) {
+    const ss = keys.map(stat).filter(Boolean);
+    if (!ss.length) continue;
+    parts.push({ key, words, z: sum(ss.map((x) => x.z)) / ss.length, stats: ss });
+  }
+  for (const [key, words, get] of SESS_DUELS) {
+    const [w, l] = duelSum(mine, get), [bw, bl] = duelSum(others, get);
+    if (w + l < 5 || bw + bl < 20) continue;
+    const p = w / (w + l), bp = bw / (bw + bl);
+    const z = Math.max(-4, Math.min(4, (p - bp) / Math.sqrt((bp * (1 - bp)) / (w + l))));
+    parts.push({ key, words, z, duel: { w, l, p, bp } });
+  }
+  const better = parts.filter((p) => p.z >= 1).sort((a, b) => b.z - a.z);
+  const worse = parts.filter((p) => p.z <= -1).sort((a, b) => a.z - b.z);
+  // The facts: the numbers behind the biggest differences.
+  const facts = [];
+  const pc = (x) => `${Math.round(x)}%`;
+  const fact = (key, z, text) => facts.push({ key, z, text });
+  const D = (get) => duelSum(mine, get), B = (get) => duelSum(others, get);
+  const [ow, ol] = D((d) => d.opening), [bow, bol] = B((d) => d.opening);
+  if (ow + ol >= 3) {
+    const lostRounds = sum(mine.map((r) => r.duels?.opening_lost_round_lost || 0)), wonRounds = sum(mine.map((r) => r.duels?.opening_won_round_won || 0));
+    const z = parts.find((p) => p.key === "opening")?.z ?? 0;
+    fact("opening", z, `You won <b>${ow} of ${ow + ol}</b> opening duels (${pc((100 * ow) / (ow + ol))}; you usually win ${pc((100 * bow) / Math.max(1, bow + bol))}).${ol >= 3 && lostRounds >= 2 ? ` ${lostRounds} of the ${ol} you lost cost your team the round.` : ""}${ow >= 3 && wonRounds >= 2 ? ` ${wonRounds} of your ${ow} opening kills became round wins.` : ""}`);
+  }
+  const awp = sum(mine.map((r) => r.duels?.awp_kills || 0)), awpOpen = sum(mine.map((r) => r.duels?.awp_opening_kills || 0));
+  const awpBase = sum(others.map((r) => r.duels?.awp_kills || 0)) / Math.max(1, others.length);
+  if (awp >= 5) fact("awp", (awp / n - awpBase) / Math.max(1, Math.sqrt(awpBase || 1)), `Your AWP got <b>${awp} kills</b>${awpOpen ? `, ${awpOpen} of them opening kills` : ""} (you usually get ${awpBase.toFixed(1)} a match).`);
+  const s = Object.fromEntries(parts.flatMap((p) => p.stats || []).map((x) => [x.k, x]));
+  if (s.spotted_accuracy || s.ttd_ms) {
+    const a = s.spotted_accuracy, t = s.ttd_ms;
+    fact("aim", parts.find((p) => p.key === "aim")?.z ?? 0, [a && `You hit <b>${pc(a.v)}</b> of your shots at enemies you could see (usually ${pc(a.b)})`, t && `found your targets in <b>${Math.round(t.v)} ms</b> (usually ${Math.round(t.b)} ms)`].filter(Boolean).join(" and ") + ".");
+  }
+  if (s.counter_strafe) {
+    const [mw, ml] = D((d) => d.moving);
+    fact("movement", parts.find((p) => p.key === "movement")?.z ?? 0, `You counter-strafed <b>${pc(s.counter_strafe.v)}</b> of your rifle shots (usually ${pc(s.counter_strafe.b)})${ml >= 3 ? `, and were running in ${ml} of the duels you lost` : ""}.`);
+  }
+  if (s.nades_per_round) fact("utility", parts.find((p) => p.key === "utility")?.z ?? 0, `You threw <b>${s.nades_per_round.v.toFixed(1)}</b> grenades a round (usually ${s.nades_per_round.b.toFixed(1)})${s.utility_damage_pr ? ` for ${s.utility_damage_pr.v.toFixed(1)} utility damage a round (usually ${s.utility_damage_pr.b.toFixed(1)})` : ""}.`);
+  if (s.kpr && s.adr) fact("fragging", parts.find((p) => p.key === "fragging")?.z ?? 0, `<b>${s.kpr.v.toFixed(2)}</b> kills a round and <b>${s.adr.v.toFixed(0)}</b> ADR (usually ${s.kpr.b.toFixed(2)} and ${s.adr.b.toFixed(0)}).`);
+  if (s.trade_kills_pr) fact("trading", parts.find((p) => p.key === "trading")?.z ?? 0, `${s.trade_kills_pr.v.toFixed(2)} trade kills a round (usually ${s.trade_kills_pr.b.toFixed(2)})${s.traded_deaths_pct ? `, and ${pc(s.traded_deaths_pct.v)} of your deaths were traded (usually ${pc(s.traded_deaths_pct.b)})` : ""}.`);
+  for (const p of parts.filter((p) => p.duel)) fact(p.key, p.z, `You won <b>${p.duel.w} of ${p.duel.w + p.duel.l}</b> ${p.words} (${pc(100 * p.duel.p)}; usually ${pc(100 * p.duel.bp)}).`);
+  const [cw, ca] = D((d) => d.clutch);
+  if (ca >= 2) fact("clutch", cw >= 2 ? 1.5 : 0, `You were the last one alive ${ca} times and won ${cw}.`);
+  facts.sort((a, b) => Math.abs(b.z) - Math.abs(a.z));
+  return { mine, n, rating, pct, verdict, parts, better, worse, facts, baseline: others };
+}
+
+const SIZE_WORD = (z) => (Math.abs(z) >= 3 ? " (by a lot)" : Math.abs(z) >= 2 ? "" : " (slightly)");
+function verdictHtml(j) {
+  if (!j) return `<div class="sv-box"><div class="sv-head">No demos for this session yet</div><div class="sub">Get the demos and Veloxify tells you how you played compared with your usual.</div></div>`;
+  if (j.few) return `<div class="sv-box"><div class="sv-head">Not enough matches yet</div><div class="sub">After a few more matches with demos, Veloxify compares each session with your usual.</div></div>`;
+  const r = j.rating;
+  const head = j.verdict === "good" ? `You played <b>${j.pct}% better</b> than your average session.`
+    : j.verdict === "bad" ? `You played <b>${Math.abs(j.pct)}% worse</b> than your average session.`
+    : `About your average session${Math.abs(j.pct) >= 1 ? ` (${j.pct > 0 ? "+" : ""}${j.pct}%)` : ""}: within your normal ups and downs.`;
+  const list = (ps) => ps.slice(0, 3).map((p) => `${p.words}${SIZE_WORD(p.z)}`);
+  const join = (xs) => (xs.length > 1 ? `${xs.slice(0, -1).join(", ")} and ${xs[xs.length - 1]}` : xs[0] || "");
+  const parts = [
+    j.better.length ? `<span class="up">Better than usual:</span> ${join(list(j.better))}.` : "",
+    j.worse.length ? `<span class="down">Worse than usual:</span> ${join(list(j.worse))}.` : "",
+    !j.better.length && !j.worse.length ? "Every part of your game was close to your usual." : "",
+  ].filter(Boolean);
+  const facts = j.facts.filter((f) => Math.abs(f.z) >= 1).slice(0, 4);
+  const shown = facts.length ? facts : j.facts.slice(0, 2);
+  const tips = j.worse.filter((p) => p.z <= -1.5 && SESS_TIPS[p.key]).slice(0, 2);
+  return `<div class="sv-box ${j.verdict}">
+    <div class="sv-dot ${j.verdict}"></div>
+    <div class="sv-body"><div class="sv-head">${head}</div>
+      <div class="sv-sub">HLTV 3.0 <b>${f2(r.v)}</b> against your usual ${f2(r.b)}, over ${j.n} match${j.n === 1 ? "" : "es"}${j.n < 3 ? " (one or two matches swing a lot)" : ""}.</div>
+      <div class="sv-parts">${parts.map((p) => `<div>${p}</div>`).join("")}</div>
+      ${shown.length ? `<ul class="sv-facts">${shown.map((f) => `<li class="${f.z >= 1 ? "good" : f.z <= -1 ? "bad" : ""}">${f.text}</li>`).join("")}</ul>` : ""}
+      ${tips.length ? `<div class="sv-tips">${tips.map((p) => `<div><b>Work on ${esc(p.words)}:</b> ${esc(SESS_TIPS[p.key])}</div>`).join("")}</div>` : ""}
+    </div></div>`;
+}
+
+// Your usual numbers next to this session's.
+const BASE_STATS = [["rating3", "HLTV 3.0", f2], ["kpr", "Kills / round", f2], ["dpr", "Deaths / round", f2], ["adr", "ADR", (v) => v.toFixed(0)], ["kast", "KAST", (v) => `${Math.round(v)}%`],
+  ["hs_pct", "Headshot %", (v) => `${Math.round(v)}%`], ["entry_success", "Opening duels won", (v) => `${Math.round(v)}%`], ["trade_kills_pr", "Trade kills / round", f2],
+  ["spotted_accuracy", "Accuracy at visible enemies", (v) => `${Math.round(v)}%`], ["ttd_ms", "Time to damage", (v) => `${Math.round(v)} ms`], ["crosshair_deg", "Crosshair placement", (v) => `${v.toFixed(1)}°`],
+  ["counter_strafe", "Counter-strafing", (v) => `${Math.round(v)}%`], ["nades_per_round", "Grenades / round", (v) => v.toFixed(1)], ["utility_damage_pr", "Utility damage / round", (v) => v.toFixed(1)]];
+function baselineHtml(j, data) {
+  if (!j || j.few) return "";
+  const lower = (k) => !!data.bench[k]?.lower_is_better;
+  const row = ([k, label, fmt]) => {
+    const v = wmean(j.mine, k), b = wmean(j.baseline, k);
+    if (v == null || b == null) return "";
+    const better = lower(k) ? v < b : v > b, rel = b ? Math.abs(v - b) / Math.abs(b) : 0;
+    return tile(label, fmt(b), fmt(v), rel < 0.03 ? "" : better ? "up" : "down");
+  };
+  const tile = (label, usual, now, cls, extra = "") => `<div class="sv-tile"><span>${label}</span><b class="${cls}">${now}${extra ? ` <small>${extra}</small>` : ""}</b><small>usually ${usual}</small></div>`;
+  const duelRow = (label, get) => {
+    const [w, l] = duelSum(j.mine, get), [bw, bl] = duelSum(j.baseline, get);
+    if (w + l < 3 || bw + bl < 10) return "";
+    const p = w / (w + l), bp = bw / (bw + bl);
+    return tile(label, `${Math.round(100 * bp)}%`, `${Math.round(100 * p)}%`, Math.abs(p - bp) < 0.03 ? "" : p > bp ? "up" : "down", `${w}-${l}`);
+  };
+  const wins = j.mine.filter((r) => r.result === "win").length, bwins = j.baseline.filter((r) => r.result === "win").length;
+  return `<section class="panel sv-base"><div class="panel-head"><div class="h3">Your baseline</div><span class="grow"></span><span class="sub">This session (big number) against your usual over ${j.baseline.length} other matches</span></div>
+    <div class="sv-tiles">
+      ${tile("Matches won", `${Math.round((100 * bwins) / j.baseline.length)}%`, `${Math.round((100 * wins) / j.n)}%`, wins / j.n > bwins / j.baseline.length ? "up" : "down", `${wins}-${j.n - wins}`)}
+      ${BASE_STATS.map(row).join("")}
+      ${duelRow("Rifle duels won", (d) => d.by_weapon?.rifle)}${duelRow("AWP duels won", (d) => d.by_weapon?.awp)}${duelRow("Pistol duels won", (d) => d.by_weapon?.pistol)}
+      ${duelRow("Afterplant duels won", (d) => d.afterplant)}${duelRow("Retake duels won", (d) => d.retake)}
+    </div></section>`;
+}
+
+// ---- what we noticed: what goes with you playing better or worse ----
+// Each match gets its factors (time of day, how far into the session, party, crosshair, map, your
+// setup, practice before, your session tags); a factor value that's clearly better or worse than
+// your usual is worth telling.
+const NOTE_TAGS = ["Warmed up", "No warm-up", "Tired", "Tilted", "Focused", "New mouse", "New settings", "New crosshair", "Played with friends"];
+function setupAt(data, ts) {
+  // The setup recorded when CS2 closed after this session (or the latest before it).
+  let best = null;
+  for (const e of data.setups) if (e.ts <= ts + 6 * 3600) best = e;
+  return best && ts - best.ts < 14 * 86400 ? best : null;
+}
+function matchFactors(data, r) {
+  const sess = data.sessions.find((s) => s.key === r.session);
+  const notes = data.notes[r.session] || {};
+  const setup = sess ? setupAt(data, sess.end) : null;
+  const practiced = sess && data.practice.some((p) => p.ts <= sess.start && p.ts >= sess.start - 3 * 3600);
+  const hour = r.hour;
+  return {
+    time: hour >= 5 && hour < 12 ? "in the morning" : hour < 18 && hour >= 12 ? "in the afternoon" : hour >= 18 && hour < 24 ? "in the evening" : "late at night (after midnight)",
+    match: r.nInSession <= 2 ? "in your first two matches" : r.nInSession <= 4 ? "in matches 3 and 4" : "from your 5th match on",
+    party: r.party ? ["", "solo", "in a duo", "in a 3-stack", "in a 4-stack", "in a 5-stack"][r.party] : null,
+    map: `on ${mapName(r.map)}`,
+    crosshair: r.xh ? r.xh : null,
+    resolution: setup?.resolution ? `at ${setup.resolution}${setup.aspect && setup.aspect !== "16:9" ? ` (${setup.aspect})` : ""}` : null,
+    sensitivity: setup?.sensitivity ? `at sensitivity ${setup.sensitivity}` : null,
+    mouse: setup?.mice?.length ? `with your ${setup.mice.join(" / ")}` : null,
+    practice: sess && data.practice.length ? (practiced ? "after practicing in Veloxify's Practice tab" : "without practicing first") : null,
+    ...Object.fromEntries((notes.tags || []).map((t) => [`tag:${t}`, `in sessions you tagged "${t}"`])),
+  };
+}
+function noticed(data) {
+  const rows = data.rows.filter((r) => r.stats.rating3 != null);
+  if (rows.length < 15) return [];
+  const all = wmean(rows, "rating3"), sd = sdOf(rows, "rating3") || 0.3;
+  const groups = new Map();
+  for (const r of rows) for (const [f, v] of Object.entries(matchFactors(data, r))) {
+    if (v == null) continue;
+    const key = `${f}|${v}`;
+    if (!groups.has(key)) groups.set(key, { f, v, rows: [] });
+    groups.get(key).rows.push(r);
+  }
+  // Tags: compare tagged sessions with untagged ones.
+  const out = [];
+  for (const g of groups.values()) {
+    const n = g.rows.length;
+    if (n < 4 || n > rows.length - 4) continue;
+    const rest = rows.filter((r) => !g.rows.includes(r));
+    const m = wmean(g.rows, "rating3"), o = wmean(rest, "rating3");
+    const z = (m - o) / (sd * Math.sqrt(1 / n + 1 / rest.length));
+    const pct = Math.round((m / o - 1) * 100);
+    if (Math.abs(z) < 1.6 || Math.abs(pct) < 5) continue;
+    out.push({ ...g, n, m, o, z, pct, all });
+  }
+  return out.sort((a, b) => Math.abs(b.z) - Math.abs(a.z));
+}
+function noticedText(x) {
+  const how = x.pct > 0 ? `<b class="up">${x.pct}% better</b>` : `<b class="down">${Math.abs(x.pct)}% worse</b>`;
+  if (x.f === "crosshair") return `You play ${how} with this crosshair <span class="xh-inline" data-xh="${esc(x.v)}">${xhSvg(xhOf(x.v), 26, 2)}</span> <span class="sub">(HLTV 3.0 ${f2(x.m)} over ${x.n} matches, ${f2(x.o)} otherwise)</span>`;
+  return `You play ${how} ${esc(x.v)} <span class="sub">(HLTV 3.0 ${f2(x.m)} over ${x.n} matches, ${f2(x.o)} otherwise)</span>`;
+}
+
+// Your notes and tags for a session.
+function notesHtml(data, key) {
+  const n = data.notes[key] || {};
+  return `<section class="panel sv-notes"><div class="panel-head"><div class="h3">Notes</div><span class="grow"></span><span class="sub">Anything that might have mattered: a new mouse, new settings, how you felt</span></div>
+    <div class="sv-notes-body"><div class="chips">${NOTE_TAGS.map((t) => `<button class="chip ${(n.tags || []).includes(t) ? "on" : ""}" data-tag="${esc(t)}">${esc(t)}</button>`).join("")}</div>
+      <textarea id="sv-note" rows="3" placeholder="Switched to a new mouse, tried 4:3 stretched, played after the gym…" ${tauri ? "" : "disabled"}>${esc(n.text || "")}</textarea>
+      <div class="sub">Tags show up in "What we noticed" once you've used them on a few sessions.</div></div></section>`;
+}
+function wireNotes(view, data, key) {
+  const save = async () => { if (tauri) await tauri.core.invoke("save_session_notes", { notes: data.notes }); };
+  const entry = () => (data.notes[key] = data.notes[key] || { tags: [], text: "" });
+  view.querySelectorAll(".sv-notes [data-tag]").forEach((b) => (b.onclick = async () => {
+    const e = entry(), t = b.dataset.tag;
+    e.tags = e.tags.includes(t) ? e.tags.filter((x) => x !== t) : [...e.tags, t];
+    b.classList.toggle("on", e.tags.includes(t));
+    await save();
+  }));
+  const ta = view.querySelector("#sv-note");
+  if (ta) ta.onchange = async () => { entry().text = ta.value.trim(); await save(); };
+}
+
+// The setup you played this session with (from when you closed CS2 after it).
+function setupHtml(data, sess) {
+  const s = setupAt(data, sess.end);
+  const xhs = [...new Set(sess.ids.map((id) => data.byId.get(id)?.xh).filter(Boolean))];
+  if (!s && !xhs.length) return "";
+  return `<div class="sv-setup">${xhs.map((c) => `<span class="sv-chip" data-xh="${esc(c)}" title="Your crosshair this session">${xhSvg(xhOf(c), 22, 2)} Crosshair</span>`).join("")}
+    ${s ? `<span class="sv-chip">${esc(s.resolution)}${s.aspect !== "16:9" ? ` ${esc(s.aspect)}` : ""} · ${esc(s.display)}${s.refresh_hz ? ` · ${s.refresh_hz} Hz` : ""}</span><span class="sv-chip">Sensitivity ${esc(s.sensitivity)}</span>${s.mice?.length ? `<span class="sv-chip">${esc(s.mice.join(" / "))}</span>` : ""}` : ""}</div>`;
+}
+
+// ---- Previous sessions: a calendar with a dot per session ----
+const calView = { month: null };
+async function renderSessionCalendar(view) {
+  const data = await loadSessionData();
+  const sessions = data.sessions;
+  if (!sessions.length) { view.innerHTML = `<div class="empty">No sessions yet.</div>`; return; }
+  const last = new Date(sessions[sessions.length - 1].start * 1000);
+  const month = calView.month || [last.getFullYear(), last.getMonth()];
+  calView.month = month;
+  const [y, mo] = month;
+  const first = new Date(y, mo, 1), days = new Date(y, mo + 1, 0).getDate();
+  const byDay = new Map();
+  for (const s of sessions) {
+    const d = new Date(s.start * 1000);
+    if (d.getFullYear() !== y || d.getMonth() !== mo) continue;
+    const k = d.getDate();
+    if (!byDay.has(k)) byDay.set(k, []);
+    byDay.get(k).push(s);
+  }
+  const verdictOf = (s) => { const j = judgeSession(data, s.ids); return !j ? { cls: "none", t: "No demos" } : j.few ? { cls: "none", t: "Not enough matches yet" } : { cls: j.verdict, t: j.verdict === "even" ? "About your average" : `${j.pct > 0 ? "+" : ""}${j.pct}% vs your average`, j }; };
+  const cells = [];
+  for (let i = 0; i < first.getDay(); i++) cells.push(`<div class="cal-cell empty"></div>`);
+  const counts = { good: 0, even: 0, bad: 0 };
+  for (let d = 1; d <= days; d++) {
+    const list = byDay.get(d) || [];
+    const dots = list.map((s) => { const v = verdictOf(s); if (counts[v.cls] != null) counts[v.cls]++; return `<a class="cal-sess ${v.cls}" href="#/session/${s.date}/${s.idx}" title="${s.wins}W ${s.losses}L · ${esc(v.t)}"><i></i><span>${s.wins}-${s.losses}</span></a>`; }).join("");
+    cells.push(`<div class="cal-cell ${list.length ? "has" : ""}"><span class="cal-day">${d}</span>${dots}</div>`);
+  }
+  const step = (dm) => { const t = new Date(y, mo + dm, 1); calView.month = [t.getFullYear(), t.getMonth()]; renderSessionCalendar(view); };
+  const firstS = new Date(sessions[0].start * 1000);
+  const canPrev = y > firstS.getFullYear() || (y === firstS.getFullYear() && mo > firstS.getMonth());
+  const canNext = y < last.getFullYear() || (y === last.getFullYear() && mo < last.getMonth());
+  const total = counts.good + counts.even + counts.bad;
+  view.innerHTML = `
+    <div class="ins-head"><div><div class="h1">Sessions</div><div class="sub">Every session, colored by how you played against your usual: <b class="up">better</b>, <b style="color:var(--gold)">about average</b>, <b class="down">worse</b>. Click one to open it.</div></div><span class="grow"></span><a class="btn" href="#/latest">Latest session</a></div>
+    <section class="panel cal">
+      <div class="cal-nav"><button class="btn ghost" id="cal-prev" ${canPrev ? "" : "disabled"}>◀</button><div class="h2">${MONTHS[mo]} ${y}</div><button class="btn ghost" id="cal-next" ${canNext ? "" : "disabled"}>▶</button>
+        <span class="grow"></span>${total ? `<span class="sub">${counts.good} better · ${counts.even} average · ${counts.bad} worse</span>` : ""}</div>
+      <div class="cal-grid">${["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((d) => `<div class="cal-h">${d}</div>`).join("")}${cells.join("")}</div>
+    </section>`;
+  view.querySelector("#cal-prev").onclick = () => step(-1);
+  view.querySelector("#cal-next").onclick = () => step(1);
 }
 
 // ---- lowlights ----------------------------------------------------------------------------------

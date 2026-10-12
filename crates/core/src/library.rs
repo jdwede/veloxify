@@ -332,6 +332,9 @@ pub struct MatchSummary {
     /// The owner's line from the scoreboard, so match lists don't need every match file.
     #[serde(default)]
     pub line: Option<Line>,
+    /// You plus your party on your team (1 = solo .. 5 = full stack).
+    #[serde(default)]
+    pub party_size: u32,
     /// FACEIT: ELO after the match, its change, and the level that ELO is.
     #[serde(default)]
     pub elo: Option<u32>,
@@ -677,6 +680,7 @@ pub fn build_index(me: u64, matches: &mut [MatchEntry], date_of: impl Fn(i64) ->
                 .iter()
                 .find(|p| p.steamid == me_s && p.rank_type == 11 && p.rank > 0 && p.rank_after > 0)
                 .map(|p| p.rank_after - p.rank),
+            party_size: (1 + m.players.iter().filter(|p| p.steamid != me_s && p.side == "mine" && p.party).count() as u32).min(5),
             line: m.players.iter().find(|p| p.steamid == me_s).map(|p| Line {
                 kills: p.counts.kills,
                 assists: p.counts.assists,

@@ -178,6 +178,8 @@ impl Worker {
         let mut clips_audio_checked = false;
         // Match insights to (re)build: checked once at start, then after imports and rebuilds.
         let mut insights_pending = true;
+        // The user's CS2 setup (resolution, sensitivity, mouse) is recorded once per launch too.
+        let mut setup_checked = false;
         // Right tray color from the start (the first import can take a while).
         self.set(if system::cs2_running() { "waiting" } else { "idle" }, "Starting", 0, 0);
         loop {
@@ -270,6 +272,14 @@ impl Worker {
                     faceit_dirty = false;
                 }
                 last_faceit = Some(Instant::now());
+            }
+            // What they played with (CS2 has just written its settings): once at start, then each
+            // time they close CS2 after playing.
+            if was_playing || !setup_checked {
+                setup_checked = true;
+                if crate::tracking::record(&settings.library_dir, me) {
+                    vlog!("your CS2 setup changed (or was recorded for the first time)");
+                }
             }
             was_playing = false;
             // CS2 stopped drawing last time (monitor off...): film again once someone's at the PC

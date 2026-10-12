@@ -475,7 +475,7 @@ pub fn update(root: &Path, budget: std::time::Duration) -> Result<usize> {
             built += 1;
         }
     }
-    let maps_missing = !root.join("insights").join("index.json").exists();
+    let maps_missing = !root.join("insights").join("index.json").exists() || !root.join("insights").join("me.json").exists();
     if built > 0 || maps_missing {
         write_maps(root, &index)?;
     }
@@ -502,6 +502,110 @@ pub struct MapCount {
     pub waiting: usize,
 }
 
+/// The library owner's duels in one match (`insights/me.json`), for sessions and trends: won and
+/// lost (`[won, lost]`) by their weapon, openings, afterplants, retakes, while moving, clutches.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MyDuels {
+    pub ts: i64,
+    pub rounds: u32,
+    /// By weapon class: rifle, awp, scout, pistol, smg, heavy, other.
+    pub by_weapon: BTreeMap<String, [u32; 2]>,
+    pub opening: [u32; 2],
+    /// Rounds lost after losing the opening duel / won after winning it.
+    pub opening_lost_round_lost: u32,
+    pub opening_won_round_won: u32,
+    pub afterplant: [u32; 2],
+    pub retake: [u32; 2],
+    /// Shooting while running (over 130 units a second).
+    pub moving: [u32; 2],
+    pub long_range: [u32; 2],
+    pub close_range: [u32; 2],
+    /// Last one alive: `[won, attempts]`.
+    pub clutch: [u32; 2],
+    pub awp_kills: u32,
+    pub awp_opening_kills: u32,
+    pub multikill_rounds: u32,
+}
+
+pub fn weapon_class(w: &str) -> &'static str {
+    match w {
+        "ak47" | "m4a1" | "m4a1_silencer" | "famas" | "galilar" | "aug" | "sg556" => "rifle",
+        "awp" => "awp",
+        "ssg08" | "g3sg1" | "scar20" => "scout",
+        "glock" | "usp_silencer" | "hkp2000" | "p250" | "fiveseven" | "tec9" | "cz75a" | "deagle" | "elite" | "revolver" => "pistol",
+        "mp9" | "mac10" | "mp7" | "mp5sd" | "ump45" | "p90" | "bizon" => "smg",
+        "nova" | "xm1014" | "sawedoff" | "mag7" | "m249" | "negev" => "heavy",
+        _ => "other",
+    }
+}
+
+fn my_duels(ins: &MatchInsight) -> Option<MyDuels> {
+    let me = usize::try_from(ins.me).ok()?;
+    let mut d = MyDuels { ts: ins.ts, rounds: ins.rounds.len() as u32, ..Default::default() };
+    let weapon = |i: i32| usize::try_from(i).ok().and_then(|i| ins.weapons.get(i)).map_or("other", |w| weapon_class(w));
+    for r in &ins.rounds {
+        let sides = r.sides.as_bytes();
+        let Some(&mine) = sides.get(me) else { continue };
+        let my_kills = r.kills.iter().filter(|k| k[1] == me as i32).count();
+        if my_kills >= 2 {
+            d.multikill_rounds += 1;
+        }
+        for k in &r.kills {
+            let (a, v) = (k[1], k[2]);
+            let won = a == me as i32 && v >= 0 && sides.get(v as usize).is_some_and(|&s| s != mine);
+            let lost = v == me as i32 && a >= 0 && sides.get(a as usize).is_some_and(|&s| s != mine);
+            if !won && !lost {
+                continue;
+            }
+            let i = if won { 0 } else { 1 };
+            d.by_weapon.entry(weapon(if won { k[3] } else { k[13] }).to_string()).or_default()[i] += 1;
+            if k[4] & 2 != 0 {
+                d.opening[i] += 1;
+                let round_won = r.win.as_bytes().first() == Some(&mine);
+                if won && round_won {
+                    d.opening_won_round_won += 1;
+                }
+                if lost && !round_won {
+                    d.opening_lost_round_lost += 1;
+                }
+                if won && weapon(k[3]) == "awp" {
+                    d.awp_opening_kills += 1;
+                }
+            }
+            if won && weapon(k[3]) == "awp" {
+                d.awp_kills += 1;
+            }
+            if let Some(p) = r.plant {
+                if k[0] > p[0] {
+                    if mine == b'T' {
+                        d.afterplant[i] += 1;
+                    } else {
+                        d.retake[i] += 1;
+                    }
+                }
+            }
+            if (if won { k[11] } else { k[12] }) > 130 {
+                d.moving[i] += 1;
+            }
+            if k[10] >= 1500 {
+                d.long_range[i] += 1;
+            } else if k[10] > 0 && k[10] < 600 {
+                d.close_range[i] += 1;
+            }
+        }
+        // A clutch: everyone else on the team died while the owner was alive.
+        let death = |p: usize| if r.death[p] >= 0 { r.death[p] } else { i32::MAX };
+        let mates: Vec<usize> = (0..sides.len()).filter(|&p| p != me && sides[p] == mine).collect();
+        if !mates.is_empty() && mates.iter().all(|&p| death(p) < death(me)) {
+            d.clutch[1] += 1;
+            if r.win.as_bytes().first() == Some(&mine) {
+                d.clutch[0] += 1;
+            }
+        }
+    }
+    Some(d)
+}
+
 /// Gathers the per-match insights into `insights/<map>.json` (places and weapons renumbered to
 /// one list per map) with the map's place grid.
 fn write_maps(root: &Path, index: &Index) -> Result<()> {
@@ -510,6 +614,7 @@ fn write_maps(root: &Path, index: &Index) -> Result<()> {
     let mut by_map: BTreeMap<String, MapInsights> = BTreeMap::new();
     let mut labels: BTreeMap<String, Vec<[i32; 3]>> = BTreeMap::new();
     let mut counts: BTreeMap<String, MapCount> = BTreeMap::new();
+    let mut mine: BTreeMap<String, MyDuels> = BTreeMap::new();
     let mut newest: Vec<&crate::library::MatchSummary> = index.matches.iter().collect();
     newest.sort_by_key(|m| std::cmp::Reverse(m.played_ts));
     for m in newest {
@@ -521,6 +626,9 @@ fn write_maps(root: &Path, index: &Index) -> Result<()> {
             counts.entry(m.map.clone()).or_default().waiting += 1;
             continue;
         };
+        if let Some(d) = my_duels(&ins) {
+            mine.insert(ins.id.clone(), d);
+        }
         let out = by_map.entry(ins.map.clone()).or_insert_with(|| MapInsights { version: VERSION, map: ins.map.clone(), path_unit: PATH_UNIT, ..Default::default() });
         let renumber = |list: &mut Vec<String>, names: &[String]| -> Vec<i32> {
             names
@@ -577,6 +685,7 @@ fn write_maps(root: &Path, index: &Index) -> Result<()> {
     }
     let idx = InsightsIndex { version: VERSION, maps: counts };
     std::fs::write(dir.join("index.json"), serde_json::to_string(&idx)?)?;
+    std::fs::write(dir.join("me.json"), serde_json::to_string(&serde_json::json!({ "version": VERSION, "matches": mine }))?)?;
     Ok(())
 }
 
