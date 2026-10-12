@@ -98,7 +98,7 @@ fn rendered_clips(root: &Path) -> Result<Vec<(String, String, i64, String, Optio
         if !library::is_entry_file(&f) {
             continue;
         }
-        let m: MatchEntry = serde_json::from_str(&std::fs::read_to_string(&f)?)?;
+        let Ok(m) = std::fs::read_to_string(&f).map_err(anyhow::Error::from).and_then(|t| Ok(serde_json::from_str::<MatchEntry>(&t)?)) else { continue };
         for h in &m.highlights {
             if let Some(c) = &h.clip {
                 out.push((m.id.clone(), h.id.clone(), m.played_ts, c.clone(), h.thumb.clone()));
@@ -233,7 +233,11 @@ pub fn rebuild_index(root: &Path, me: u64) -> Result<Index> {
     for f in std::fs::read_dir(&dir)? {
         let f = f?.path();
         if library::is_entry_file(&f) {
-            all.push(serde_json::from_str(&std::fs::read_to_string(&f)?)?);
+            // One unreadable file mustn't keep every other match out of the list.
+            match std::fs::read_to_string(&f).map_err(anyhow::Error::from).and_then(|t| Ok(serde_json::from_str::<MatchEntry>(&t)?)) {
+                Ok(e) => all.push(e),
+                Err(e) => eprintln!("skipping {}: {e:#}", f.display()),
+            }
         }
     }
     // Highlights and lowlights you deleted stay deleted, even after re-analysis.

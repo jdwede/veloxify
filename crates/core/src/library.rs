@@ -112,7 +112,22 @@ pub struct HighlightDetails {
 /// A match entry file in `matches/` (`<id>.json`, not `<id>.details.json`).
 pub fn is_entry_file(p: &std::path::Path) -> bool {
     let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    name.ends_with(".json") && !name.ends_with(".details.json")
+    // `<id>.json`: match ids have no dots, the files kept beside them do (`.details.json`,
+    // `.insight.json`, `.replay.json.gz`).
+    name.strip_suffix(".json").is_some_and(|stem| !stem.is_empty() && !stem.contains('.'))
+}
+
+#[cfg(test)]
+mod entry_file_tests {
+    #[test]
+    fn only_match_entries() {
+        let is = |n: &str| super::is_entry_file(std::path::Path::new(n));
+        assert!(is("faceit-0a6ac30a-21ed-44c5-a86e-0226c370861e-m1.json"));
+        assert!(!is("faceit-0a6ac30a-21ed-44c5-a86e-0226c370861e-m1.details.json"));
+        assert!(!is("faceit-0a6ac30a-21ed-44c5-a86e-0226c370861e-m1.insight.json"));
+        assert!(!is("faceit-0a6ac30a-21ed-44c5-a86e-0226c370861e-m1.replay.json.gz"));
+        assert!(!is("faceit-0a6ac30a-21ed-44c5-a86e-0226c370861e-m1.details.json.tmp"));
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -346,6 +361,43 @@ pub struct Line {
     pub rating3: f64,
     #[serde(default)]
     pub swing: f64,
+    /// The rest of the match's line, for the match history's optional columns.
+    #[serde(default)]
+    pub rounds: u32,
+    #[serde(default)]
+    pub rating1: f64,
+    #[serde(default)]
+    pub hs_pct: f64,
+    #[serde(default)]
+    pub kpr: f64,
+    #[serde(default)]
+    pub kd: f64,
+    #[serde(default)]
+    pub mvps: u32,
+    /// Rounds with exactly n kills (index 0 unused).
+    #[serde(default)]
+    pub multi: [u32; 6],
+    #[serde(default)]
+    pub opening_kills: u32,
+    #[serde(default)]
+    pub opening_deaths: u32,
+    #[serde(default)]
+    pub trade_kills: u32,
+    #[serde(default)]
+    pub damage: i64,
+    #[serde(default)]
+    pub utility_damage: i64,
+    #[serde(default)]
+    pub enemies_flashed: u32,
+    #[serde(default)]
+    pub flash_assists: u32,
+    #[serde(default)]
+    pub clutches: u32,
+    #[serde(default)]
+    pub clutches_won: u32,
+    /// Gun hits / shots, percent.
+    #[serde(default)]
+    pub accuracy: f64,
 }
 
 /// Builds the library entry for one match from the perspective of `me`. `played_ts` comes from
@@ -635,6 +687,23 @@ pub fn build_index(me: u64, matches: &mut [MatchEntry], date_of: impl Fn(i64) ->
                 rating2: p.derived.rating2,
                 rating3: p.derived.rating3,
                 swing: p.derived.swing,
+                rounds: p.counts.rounds,
+                rating1: p.derived.rating1,
+                hs_pct: p.derived.hs_pct,
+                kpr: p.derived.kpr,
+                kd: p.derived.kd,
+                mvps: p.counts.mvps,
+                multi: p.counts.multikill_rounds,
+                opening_kills: p.counts.opening_kills,
+                opening_deaths: p.counts.opening_deaths,
+                trade_kills: p.counts.trade_kills,
+                damage: p.counts.damage,
+                utility_damage: p.counts.utility_damage,
+                enemies_flashed: p.counts.enemies_flashed,
+                flash_assists: p.counts.flash_assists,
+                clutches: p.counts.clutches_attempted[1..].iter().sum(),
+                clutches_won: p.counts.clutches_won[1..].iter().sum(),
+                accuracy: p.derived.accuracy,
             }),
         })
         .collect();

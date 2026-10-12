@@ -78,7 +78,8 @@ function mergeFaceit() {
       id, stats_only: true, source: "faceit", map: fm.map, played_ts: ts, played_at: localIso(ts),
       duration_s: fm.started_ts && fm.finished_ts > fm.started_ts ? fm.finished_ts - fm.started_ts : 0,
       score_mine: fm.score_mine, score_theirs: fm.score_theirs, result: fm.result, highlight_count: 0,
-      elo: fm.elo ?? null, elo_delta: fm.elo_delta ?? null, line: { kills: fm.kills, assists: fm.assists, deaths: fm.deaths, adr: fm.adr }, faceit: fm,
+      elo: fm.elo ?? null, elo_delta: fm.elo_delta ?? null, faceit: fm,
+      line: { kills: fm.kills, assists: fm.assists, deaths: fm.deaths, adr: fm.adr, hs_pct: fm.hs_pct, kpr: fm.kr, kd: fm.kd, mvps: fm.mvps, faceit_only: true },
     });
   }
   all.sort((a, b) => a.played_ts - b.played_ts);
@@ -578,11 +579,89 @@ const rankValue = (p, roster) => (roster ? roster[p.steamid]?.elo ?? -1 : p.rank
 // ---- match page (Leetify-style): header, scoreboard and the match's sections ------------------
 
 const matchHref = (id, tab) => `#/match/${encodeURIComponent(id)}${tab ? `/${tab}` : ""}`;
+// ---- table columns you pick -----------------------------------------------------------------------
+
+// A table's columns: the ones you picked, in your order (saved per table), else its defaults.
+// `catalog` is [[key, label], ...]. Columns added to a catalog's defaults after you saved show up
+// where they are by default; other new ones start hidden (add them from Columns).
+function pickedCols(store, catalog, defaults) {
+  const known = new Set(catalog.map(([k]) => k));
+  let saved = null;
+  try { saved = JSON.parse(localStorage.getItem(store) || "null"); } catch (e) { /* defaults */ }
+  if (Array.isArray(saved)) saved = { cols: saved, seen: saved }; // the old format: every column, in order
+  if (!saved || !Array.isArray(saved.cols)) return defaults.filter((k) => known.has(k));
+  const cols = saved.cols.filter((k) => known.has(k));
+  const seen = new Set(saved.seen || saved.cols);
+  defaults.forEach((k, i) => { if (!seen.has(k) && !cols.includes(k)) cols.splice(Math.min(i, cols.length), 0, k); });
+  return cols;
+}
+function savePickedCols(store, catalog, cols) {
+  try { localStorage.setItem(store, JSON.stringify({ cols, seen: catalog.map(([k]) => k) })); } catch (e) { /* not saved */ }
+}
+const COLS_ICON = `<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 5h16M4 12h16M4 19h16"/><circle cx="9" cy="5" r="1.6" fill="currentColor"/><circle cx="15" cy="12" r="1.6" fill="currentColor"/><circle cx="8" cy="19" r="1.6" fill="currentColor"/></svg>`;
+
+// The Columns button's menu: tick to show, untick to hide, Reset for the defaults.
+// `groups` is [[group name, [keys...]], ...] over the catalog.
+function openColPicker(btn, { catalog, groups, cols, onChange, onReset }) {
+  document.getElementById("col-picker")?.remove();
+  const label = new Map(catalog);
+  const el = document.createElement("div");
+  el.id = "col-picker";
+  el.className = "col-picker";
+  el.innerHTML = `<div class="col-picker-head"><b>Columns</b><span class="sub">Tick to show. Drag a column's header to move it.</span></div>
+    <div class="col-picker-groups">${groups.map(([g, keys]) => `<div class="col-group"><div class="col-group-h">${esc(g)}</div>
+      ${keys.filter((k) => label.has(k)).map((k) => `<label class="col-opt"><input type="checkbox" data-col="${esc(k)}" ${cols.includes(k) ? "checked" : ""}> ${esc(label.get(k))}</label>`).join("")}</div>`).join("")}</div>
+    <div class="col-picker-foot"><button class="btn small ghost" data-reset>Reset to default</button><button class="btn small" data-done>Done</button></div>`;
+  document.body.appendChild(el);
+  const r = btn.getBoundingClientRect();
+  el.style.top = `${Math.round(r.bottom + window.scrollY + 6)}px`;
+  el.style.left = `${Math.round(Math.max(12, Math.min(r.right - el.offsetWidth, window.innerWidth - el.offsetWidth - 12)) + window.scrollX)}px`;
+  el.querySelectorAll("[data-col]").forEach((c) => (c.onchange = () => {
+    const k = c.dataset.col;
+    onChange(c.checked ? [...cols.filter((x) => x !== k), k] : cols.filter((x) => x !== k));
+    cols = c.checked ? [...cols.filter((x) => x !== k), k] : cols.filter((x) => x !== k);
+  }));
+  el.querySelector("[data-reset]").onclick = () => { onReset(); el.remove(); };
+  el.querySelector("[data-done]").onclick = () => el.remove();
+  setTimeout(() => document.addEventListener("pointerdown", function away(e) {
+    if (!document.body.contains(el)) return document.removeEventListener("pointerdown", away);
+    if (!el.contains(e.target) && e.target !== btn && !btn.contains(e.target)) { el.remove(); document.removeEventListener("pointerdown", away); }
+  }), 0);
+}
+
+// Header drag and drop: moving `from` onto `to` (before or after it, the way it was dragged).
+function moveCol(cols, from, to) {
+  if (!from || from === to) return cols;
+  const order = cols.filter((k) => k !== from);
+  const after = cols.indexOf(from) < cols.indexOf(to);
+  order.splice(order.indexOf(to) + (after ? 1 : 0), 0, from);
+  return order;
+}
+function wireColDrag(cells, getCols, setCols) {
+  cells.forEach((th) => {
+    th.draggable = true;
+    th.ondragstart = (e) => { e.dataTransfer.setData("text/plain", th.dataset.col); e.dataTransfer.effectAllowed = "move"; th.classList.add("dragging"); };
+    th.ondragend = () => th.classList.remove("dragging");
+    th.ondragover = (e) => { e.preventDefault(); th.classList.add("drop"); };
+    th.ondragleave = () => th.classList.remove("drop");
+    th.ondrop = (e) => {
+      e.preventDefault();
+      th.classList.remove("drop");
+      setCols(moveCol(getCols(), e.dataTransfer.getData("text/plain"), th.dataset.col));
+    };
+  });
+}
+
 const MATCH_SORTS = {
   name: (p) => p.name.toLowerCase(), kills: (p) => p.counts.kills, assists: (p) => p.counts.assists, deaths: (p) => p.counts.deaths,
   kd: (p) => p.derived.kd, adr: (p) => p.derived.adr, kast: (p) => p.derived.kast,
   k2: (p) => p.counts.multikill_rounds[2], k3: (p) => p.counts.multikill_rounds[3], k4: (p) => p.counts.multikill_rounds[4], k5: (p) => p.counts.multikill_rounds[5],
   rws: (p) => p.derived.rws, swing: (p) => p.derived.swing || 0, rating: (p) => r3(p.derived), kr: (p) => p.derived.kpr,
+  rating2: (p) => p.derived.rating2, rating1: (p) => p.derived.rating1, hs: (p) => p.derived.hs_pct, dpr: (p) => p.derived.dpr,
+  mvps: (p) => p.counts.mvps, dmg: (p) => p.counts.damage, fk: (p) => p.counts.opening_kills, fd: (p) => p.counts.opening_deaths,
+  trades: (p) => p.counts.trade_kills, clutch: (p) => sum(p.counts.clutches_won.slice(1)), ud: (p) => p.counts.utility_damage,
+  ef: (p) => p.counts.enemies_flashed, fa: (p) => p.counts.flash_assists, acc: (p) => p.derived.accuracy, hacc: (p) => p.derived.head_accuracy,
+  plants: (p) => p.counts.bomb_plants, defuses: (p) => p.counts.bomb_defuses,
 };
 const matchSort = { key: "rating", desc: true };
 
@@ -641,17 +720,19 @@ async function renderMatchPage(view, id, tab) {
   await renderMatchSummary(body.querySelector("#mp-summary"), m, id);
 }
 
-// The scoreboard's columns in their default order; drag a header to reorder (saved).
+// Every column the scoreboard can show; Columns picks which, dragging a header moves one (saved).
 const BOARD_COLS = [["rank", "Rank"], ["rating", "HLTV 3.0"], ["rws", "RWS"], ["swing", "Swing"], ["kills", "Kills"], ["assists", "Assists"], ["deaths", "Deaths"], ["kd", "K/D"],
-  ["adr", "ADR"], ["kr", "K/R"], ["kast", "KAST"], ["k2", "2K"], ["k3", "3K"], ["k4", "4K"], ["k5", "5K"], ["xhair", "Crosshair"]];
+  ["adr", "ADR"], ["kr", "K/R"], ["kast", "KAST"], ["k2", "2K"], ["k3", "3K"], ["k4", "4K"], ["k5", "5K"], ["xhair", "Crosshair"],
+  ["rating2", "Rating 2.0"], ["rating1", "Rating 1.0"], ["hs", "HS%"], ["dpr", "D/R"], ["mvps", "MVPs"], ["dmg", "Damage"], ["fk", "First kills"], ["fd", "First deaths"],
+  ["trades", "Trade kills"], ["clutch", "Clutches"], ["ud", "Utility dmg"], ["ef", "Flashed"], ["fa", "Flash assists"], ["acc", "Accuracy"], ["hacc", "Head accuracy"],
+  ["plants", "Plants"], ["defuses", "Defuses"]];
+const BOARD_DEFAULT = ["rank", "rating", "rws", "swing", "kills", "assists", "deaths", "kd", "adr", "kr", "kast", "k2", "k3", "k4", "k5", "xhair"];
+const BOARD_GROUPS = [["Ratings", ["rating", "rating2", "rating1", "rws", "swing", "rank"]], ["Kills and damage", ["kills", "assists", "deaths", "kd", "kr", "dpr", "hs", "adr", "dmg", "kast", "mvps"]],
+  ["Multi-kills", ["k2", "k3", "k4", "k5"]], ["Openings, trades, clutches", ["fk", "fd", "trades", "clutch"]], ["Utility", ["ud", "ef", "fa"]], ["Aim", ["acc", "hacc"]],
+  ["Bomb", ["plants", "defuses"]], ["Other", ["xhair"]]];
 function boardCols() {
-  let saved = [];
-  try { saved = JSON.parse(localStorage.getItem("veloxify.boardCols") || "[]"); } catch (e) { /* default order */ }
   const known = new Map(BOARD_COLS);
-  const order = saved.filter((k) => known.has(k));
-  // Columns added since the order was saved go where they are by default.
-  BOARD_COLS.forEach(([k], i) => { if (!order.includes(k)) order.splice(Math.min(i, order.length), 0, k); });
-  return order.map((k) => [k, known.get(k)]);
+  return pickedCols("veloxify.boardCols", BOARD_COLS, BOARD_DEFAULT).map((k) => [k, known.get(k)]);
 }
 
 // Both teams, Leetify's match-details columns (no Leetify rating), sortable by any column.
@@ -681,6 +762,23 @@ function renderMatchScoreboard(body, m) {
       case "rating": return `<td><span class="mp-rating ${ratingClass(r3(d))}">${f2(r3(d))}</span></td>`;
       case "rank": return `<td class="mp-rank">${rankHtml(p, m._roster)}</td>`;
       case "xhair": return xhCell(codes[p.steamid], p.name);
+      case "rating2": return `<td class="${gradeClass("rating", d.rating2)}">${f2(d.rating2)}</td>`;
+      case "rating1": return `<td class="${gradeClass("rating", d.rating1)}">${f2(d.rating1)}</td>`;
+      case "hs": return `<td>${Math.round(d.hs_pct)}%</td>`;
+      case "dpr": return `<td>${f2(d.dpr)}</td>`;
+      case "mvps": return `<td class="${c.mvps ? "" : "zero"}">${c.mvps}</td>`;
+      case "dmg": return `<td>${c.damage}</td>`;
+      case "fk": return `<td class="${c.opening_kills ? "" : "zero"}">${c.opening_kills}</td>`;
+      case "fd": return `<td class="${c.opening_deaths ? "" : "zero"}">${c.opening_deaths}</td>`;
+      case "trades": return `<td class="${c.trade_kills ? "" : "zero"}">${c.trade_kills}</td>`;
+      case "clutch": { const w = sum(c.clutches_won.slice(1)), a = sum(c.clutches_attempted.slice(1)); return `<td class="${a ? "" : "zero"}" title="Clutches won of the 1vX situations">${w}/${a}</td>`; }
+      case "ud": return `<td class="${c.utility_damage ? "" : "zero"}">${c.utility_damage}</td>`;
+      case "ef": return `<td class="${c.enemies_flashed ? "" : "zero"}">${c.enemies_flashed}</td>`;
+      case "fa": return `<td class="${c.flash_assists ? "" : "zero"}">${c.flash_assists}</td>`;
+      case "acc": return `<td>${Math.round(d.accuracy)}%</td>`;
+      case "hacc": return `<td>${Math.round(d.head_accuracy)}%</td>`;
+      case "plants": return `<td class="${c.bomb_plants ? "" : "zero"}">${c.bomb_plants}</td>`;
+      case "defuses": return `<td class="${c.bomb_defuses ? "" : "zero"}">${c.bomb_defuses}</td>`;
       default: return `<td class="${c.multikill_rounds[Number(k[1])] ? "" : "zero"}">${c.multikill_rounds[Number(k[1])]}</td>`;
     }
   };
@@ -691,13 +789,14 @@ function renderMatchScoreboard(body, m) {
     ${COLS.map(([k]) => cell(p, k)).join("")}</tr>`;
   const mineWon = m.result === "win", theirsWon = m.result === "loss";
   body.innerHTML = `
+    <div class="mp-board-tools"><button class="btn ghost small" id="mp-cols" title="Pick the stats this table shows">${COLS_ICON} Columns</button></div>
     <div class="mp-board-wrap"><table class="mp-board">
       <thead>${head("My Team", mineWon)}</thead>
       <tbody>${sorted("mine").map((p) => row(p, mineWon)).join("")}</tbody>
       <thead>${head("Enemy Team", theirsWon)}</thead>
       <tbody>${sorted("enemy").map((p) => row(p, theirsWon)).join("")}</tbody>
     </table></div>
-    <div class="note">Kills, assists and deaths come from CS2's end-of-match scoreboard. HLTV 3.0 is estimated from the demo. Click a column to sort, drag it to move it (your order is saved; <a class="link" href="#" id="mp-cols-reset">reset</a>).</div>`;
+    <div class="note">Kills, assists and deaths come from CS2's end-of-match scoreboard. HLTV 3.0 is estimated from the demo. Click a column to sort, drag it to move it, and pick stats with Columns (saved; <a class="link" href="#" id="mp-cols-reset">reset</a>).</div>`;
   body.querySelectorAll("th[data-sort]").forEach((th) => {
     th.onclick = () => {
       const k = th.dataset.sort;
@@ -715,13 +814,16 @@ function renderMatchScoreboard(body, m) {
       e.preventDefault();
       const from = e.dataTransfer.getData("text/plain"), to = th.dataset.sort;
       if (!from || from === to) return;
-      const order = COLS.map(([k]) => k).filter((k) => k !== from);
-      order.splice(order.indexOf(to) + (COLS.findIndex(([k]) => k === from) < COLS.findIndex(([k]) => k === to) ? 1 : 0), 0, from);
-      try { localStorage.setItem("veloxify.boardCols", JSON.stringify(order)); } catch (err) { /* not saved */ }
+      savePickedCols("veloxify.boardCols", BOARD_COLS, moveCol(COLS.map(([k]) => k), from, to));
       renderMatchScoreboard(body, m);
     };
   });
   body.querySelector("#mp-cols-reset").onclick = (e) => { e.preventDefault(); try { localStorage.removeItem("veloxify.boardCols"); } catch (err) { /* nothing saved */ } renderMatchScoreboard(body, m); };
+  body.querySelector("#mp-cols").onclick = (e) => openColPicker(e.currentTarget, {
+    catalog: BOARD_COLS, groups: BOARD_GROUPS, cols: COLS.map(([k]) => k),
+    onChange: (cols) => { savePickedCols("veloxify.boardCols", BOARD_COLS, cols); renderMatchScoreboard(body, m); },
+    onReset: () => { try { localStorage.removeItem("veloxify.boardCols"); } catch (err) { /* nothing saved */ } renderMatchScoreboard(body, m); },
+  });
 }
 
 // ---- match details: HLTV-style summary, Aim, Utility, Activity, Opening duels, Clutches ----------
@@ -5251,7 +5353,7 @@ function historyRows() {
     const fm = m.faceit;
     return {
       id: m.id, demo: !m.stats_only, date: m.played_at.slice(0, 10), source: m.source, map: m.map, result: m.result,
-      when: parseLocal(m.played_at), mine: m.score_mine, theirs: m.score_theirs, line: m.line, hl: m.highlight_count,
+      when: parseLocal(m.played_at), mine: m.score_mine, theirs: m.score_theirs, line: m.line, hl: m.highlight_count, duration: m.duration_s || 0,
       elo: m.elo ?? fm?.elo ?? null,
       delta: m.source === "faceit" ? m.elo_delta ?? fm?.elo_delta ?? null : m.premier_delta ?? null,
       premier: m.premier ?? null, placement: !!fm?.calibrating, competition: fm?.competition || "",
@@ -5260,36 +5362,82 @@ function historyRows() {
   }).sort((a, b) => b.when - a.when);
 }
 
-function historyRow(r) {
+// Every column the match history can show ([key, header, width]); Columns picks which, dragging a
+// header moves one (saved). The buttons stay last.
+const HIST_COLS = [["date", "Date", "112px"], ["score", "Score", "112px"], ["elo", "ELO / Premier", "minmax(170px, 1.3fr)"], ["rating", "HLTV 3.0", "92px"],
+  ["rws", "RWS", "56px"], ["kda", "K/D/A", "108px"], ["adr", "ADR", "64px"], ["map", "Map", "minmax(140px, 1fr)"],
+  ["kills", "Kills", "52px"], ["deaths", "Deaths", "58px"], ["assists", "Assists", "60px"], ["kd", "K/D", "56px"], ["kr", "K/R", "56px"], ["hs", "HS%", "56px"],
+  ["kast", "KAST", "60px"], ["swing", "Swing", "70px"], ["rating2", "Rating 2.0", "84px"], ["rating1", "Rating 1.0", "84px"], ["multi", "2K / 3K / 4K / 5K", "120px"],
+  ["fk", "First kills", "72px"], ["fd", "First deaths", "80px"], ["trades", "Trade kills", "76px"], ["clutch", "Clutches", "70px"], ["ud", "Utility dmg", "80px"],
+  ["ef", "Flashed", "62px"], ["fa", "Flash assists", "86px"], ["mvps", "MVPs", "52px"], ["acc", "Accuracy", "70px"], ["dmg", "Damage", "68px"], ["rounds", "Rounds", "60px"],
+  ["length", "Length", "64px"], ["source", "Source", "82px"]];
+const HIST_DEFAULT = ["date", "score", "elo", "rating", "rws", "kda", "adr", "map"];
+const HIST_GROUPS = [["Match", ["date", "score", "elo", "map", "source", "rounds", "length"]], ["Ratings", ["rating", "rating2", "rating1", "rws", "swing"]],
+  ["Kills and damage", ["kda", "kills", "deaths", "assists", "kd", "kr", "hs", "adr", "dmg", "kast", "mvps"]], ["Multi-kills, openings, clutches", ["multi", "fk", "fd", "trades", "clutch"]],
+  ["Utility and aim", ["ud", "ef", "fa", "acc"]]];
+const histCols = () => pickedCols("veloxify.historyCols", HIST_COLS, HIST_DEFAULT);
+const histTemplate = (cols) => `${cols.map((k) => HIST_COLS.find((c) => c[0] === k)[2]).join(" ")} 96px`;
+// The narrowest a row can be: with many columns the list scrolls sideways, every row as wide.
+const histMinWidth = (cols) => sum(cols.map((k) => parseInt(/(\d+)px/.exec(HIST_COLS.find((c) => c[0] === k)[2])[1], 10))) + 96 + 12 * cols.length + 28;
+const histGridStyle = (cols) => `grid-template-columns:${histTemplate(cols)};min-width:${histMinWidth(cols)}px`;
+
+function historyRow(r, cols) {
   const l = r.line;
-  const elo = r.source === "faceit"
-    ? r.elo ? `${levelBadge(levelFor(r.elo))}<span>${r.elo.toLocaleString("en-US")}</span>${deltaHtml(r.delta)}` : leagueOf(r.competition) ? leagueChip(r.competition) : r.placement ? `<span class="none" title="FACEIT shows no ELO during a new season's placement matches">Placement match</span>` : `<span class="none">–</span>`
-    : r.source === "valve"
-      ? r.premier ? `${premierChip(r.premier)}${deltaHtml(r.delta)}` : `<span class="none">Unranked</span>`
-      : `<span class="none">–</span>`;
-  const rv = l ? r3(l) : null;
-  const rating = rv
-    ? `<span class="rchip ${ratingClass(rv)}" title="HLTV Rating 3.0 (estimated from the demo)">${f2(rv)}<i style="width:${Math.min(100, (rv / 2) * 100)}%"></i></span>`
-    : `<span class="rchip na" title="Needs the demo">–</span>`;
+  const demo = l && !l.faceit_only; // FACEIT's own numbers cover only some columns
+  const na = `<span class="ml-num na">–</span>`;
+  const num = (v, txt, grade) => (v == null || Number.isNaN(v) ? na : `<span class="ml-num ${grade ? gradeClass(grade, v) : ""}">${txt ?? v}</span>`);
+  const cell = (k) => {
+    switch (k) {
+      case "date": return `<div class="ml-date">${fcDate(r.when)}</div>`;
+      case "score": return `<div class="ml-score"><span class="wl ${r.result}">${r.result === "win" ? "W" : r.result === "loss" ? "L" : "T"}</span><span><b class="${r.result}">${r.mine}</b> : <span class="theirs">${r.theirs}</span></span></div>`;
+      case "elo": return `<div class="ml-elo">${r.source === "faceit"
+        ? r.elo ? `${levelBadge(levelFor(r.elo))}<span>${r.elo.toLocaleString("en-US")}</span>${deltaHtml(r.delta)}` : leagueOf(r.competition) ? leagueChip(r.competition) : r.placement ? `<span class="none" title="FACEIT shows no ELO during a new season's placement matches">Placement match</span>` : `<span class="none">–</span>`
+        : r.source === "valve" ? r.premier ? `${premierChip(r.premier)}${deltaHtml(r.delta)}` : `<span class="none">Unranked</span>` : `<span class="none">–</span>`}</div>`;
+      case "rating": { const rv = demo ? r3(l) : null; return `<div>${rv ? `<span class="rchip ${ratingClass(rv)}" title="HLTV Rating 3.0 (estimated from the demo)">${f2(rv)}<i style="width:${Math.min(100, (rv / 2) * 100)}%"></i></span>` : `<span class="rchip na" title="Needs the demo">–</span>`}</div>`; }
+      case "rws": return `<div>${demo ? num(l.rws, f1(l.rws), "rws") : na}</div>`;
+      case "kda": return `<div class="ml-num">${l ? `${l.kills} / ${l.deaths} / ${l.assists}` : "–"}</div>`;
+      case "adr": return `<div>${l?.adr != null ? num(l.adr, f1(l.adr), "adr") : na}</div>`;
+      case "map": return `<div class="ml-map">${mapIcon(r.map)}<span>${esc(mapName(r.map))}</span></div>`;
+      case "kills": return `<div>${l ? num(l.kills) : na}</div>`;
+      case "deaths": return `<div>${l ? num(l.deaths) : na}</div>`;
+      case "assists": return `<div>${l ? num(l.assists) : na}</div>`;
+      case "kd": { const v = l ? l.kd ?? (l.deaths ? l.kills / l.deaths : l.kills) : null; return `<div>${v != null ? num(v, f2(v), "kd") : na}</div>`; }
+      case "kr": return `<div>${l?.kpr ? num(l.kpr, f2(l.kpr), "kpr") : na}</div>`;
+      case "hs": return `<div>${l?.hs_pct != null ? num(l.hs_pct, `${Math.round(l.hs_pct)}%`) : na}</div>`;
+      case "kast": return `<div>${demo ? num(l.kast, `${Math.round(l.kast)}%`, "kast") : na}</div>`;
+      case "swing": return `<div>${demo ? num(l.swing || 0, fmtSwing(l.swing || 0), "swing") : na}</div>`;
+      case "rating2": return `<div>${demo && l.rating2 ? num(l.rating2, f2(l.rating2), "rating") : na}</div>`;
+      case "rating1": return `<div>${demo && l.rating1 ? num(l.rating1, f2(l.rating1), "rating") : na}</div>`;
+      case "multi": return `<div class="ml-num">${demo && l.multi ? l.multi.slice(2).join(" / ") : "–"}</div>`;
+      case "fk": return `<div>${demo && l.rounds ? num(l.opening_kills) : na}</div>`;
+      case "fd": return `<div>${demo && l.rounds ? num(l.opening_deaths) : na}</div>`;
+      case "trades": return `<div>${demo && l.rounds ? num(l.trade_kills) : na}</div>`;
+      case "clutch": return `<div>${demo && l.rounds ? num(l.clutches_won, `${l.clutches_won}/${l.clutches}`) : na}</div>`;
+      case "ud": return `<div>${demo && l.rounds ? num(l.utility_damage) : na}</div>`;
+      case "ef": return `<div>${demo && l.rounds ? num(l.enemies_flashed) : na}</div>`;
+      case "fa": return `<div>${demo && l.rounds ? num(l.flash_assists) : na}</div>`;
+      case "mvps": return `<div>${l?.mvps != null ? num(l.mvps) : na}</div>`;
+      case "acc": return `<div>${demo && l.rounds ? num(l.accuracy, `${Math.round(l.accuracy)}%`) : na}</div>`;
+      case "dmg": return `<div>${demo && l.rounds ? num(l.damage) : na}</div>`;
+      case "rounds": return `<div>${num(r.mine + r.theirs)}</div>`;
+      case "length": return `<div>${r.duration ? num(r.duration, fmtDur(r.duration)) : na}</div>`;
+      case "source": return `<div class="ml-num">${r.source === "faceit" ? "FACEIT" : r.source === "valve" ? "Premier" : esc(r.source)}</div>`;
+      default: return "<div></div>";
+    }
+  };
   const actions = r.demo
     ? `<button class="sqbtn ${r.hl ? "hl" : "dim"}" data-act="hl" title="${r.hl ? `${r.hl} highlight${r.hl === 1 ? "" : "s"}` : "No highlights in this match"}">${ICONS.star}${r.hl}</button>`
     : `<button class="sqbtn" data-act="demo" title="Get the demo: Veloxify opens the match room, you click FACEIT's download, Veloxify does the rest">${ICONS.download}</button>`;
   return `
-    <div class="ml-grid ml-row ${r.result} clickable" data-id="${esc(r.id)}" data-href="${matchHref(r.id)}" ${r.room ? `data-room="${esc(r.room)}"` : ""}>
-      <div class="ml-date">${fcDate(r.when)}</div>
-      <div class="ml-score"><span class="wl ${r.result}">${r.result === "win" ? "W" : r.result === "loss" ? "L" : "T"}</span><span><b class="${r.result}">${r.mine}</b> : <span class="theirs">${r.theirs}</span></span></div>
-      <div class="ml-elo">${elo}</div>
-      <div>${rating}</div>
-      <div>${l?.rws != null ? `<span class="ml-num ${gradeClass("rws", l.rws)}">${f1(l.rws)}</span>` : `<span class="ml-num na">–</span>`}</div>
-      <div class="ml-num">${l ? `${l.kills} / ${l.deaths} / ${l.assists}` : "–"}</div>
-      <div class="ml-num">${l ? f1(l.adr) : "–"}</div>
-      <div class="ml-map">${mapIcon(r.map)}<span>${esc(mapName(r.map))}</span></div>
+    <div class="ml-grid ml-row ${r.result} clickable" style="${histGridStyle(cols)}" data-id="${esc(r.id)}" data-href="${matchHref(r.id)}" ${r.room ? `data-room="${esc(r.room)}"` : ""}>
+      ${cols.map(cell).join("")}
       <div class="ml-actions">${actions}${r.room ? `<button class="sqbtn" data-act="room" title="Open the match room on FACEIT">${ICONS.external}</button>` : ""}</div>
     </div>`;
 }
 
 function renderMatchHistory(view) {
   const all = historyRows();
+  const cols = histCols();
   const rows = all.filter((r) => (mh.source === "all" || r.source === mh.source) && (mh.result === "all" || r.result === mh.result) && (mh.map === "all" || r.map === mh.map));
   const maps = [...new Set(all.map((r) => r.map))].sort();
   const missing = all.filter((r) => !r.demo).length;
@@ -5302,22 +5450,29 @@ function renderMatchHistory(view) {
         <span class="sub">${rows.length} matches</span>
         <span class="grow"></span>
         ${demoButton(missingDemos(state.all), "btn primary")}
+        <button class="btn ghost small" id="mh-cols" title="Pick the stats each match shows">${COLS_ICON} Columns</button>
         <div class="fc-filters">
           ${seg("source", [["all", "All"], ["faceit", "FACEIT"], ["valve", "Premier"]])}
           ${seg("result", [["all", "All"], ["win", "Wins"], ["loss", "Losses"]])}
           <select id="mhmap"><option value="all">All maps</option>${maps.map((m) => `<option value="${m}" ${mh.map === m ? "selected" : ""}>${esc(mapName(m))}</option>`).join("")}</select>
         </div>
       </div>
-      <div class="ml-grid ml-head">
-        <div>Date</div><div>Score</div><div></div><div title="HLTV Rating 3.0, estimated from the demo"><span class="ic">${ICONS.rating}</span>HLTV 3.0</div>
-        <div>RWS</div><div>K/D/A</div><div>ADR</div><div>Map</div><div></div>
+      <div class="ml-table"><div class="ml-grid ml-head" style="${histGridStyle(cols)}">
+        ${cols.map((k) => `<div data-col="${k}" title="Drag to move">${k === "rating" ? `<span class="ic">${ICONS.rating}</span>` : ""}${esc(HIST_COLS.find((c) => c[0] === k)[1])}</div>`).join("")}<div></div>
       </div>
-      ${rows.slice(0, mh.shown).map(historyRow).join("")}
+      ${rows.slice(0, mh.shown).map((r) => historyRow(r, cols)).join("")}</div>
       ${rows.length > mh.shown ? `<div style="text-align:center;margin-top:12px"><button class="btn" id="mhmore">Show more</button></div>` : ""}
       ${missing ? `<div class="ml-note">${missing} FACEIT match${missing === 1 ? "" : "es"} without a demo show FACEIT's stats only. Get the demo (download button) and Veloxify adds the rating, RWS, highlights and lowlights. FACEIT keeps demos for a few weeks.</div>` : ""}
     </section>`;
   view.querySelectorAll(".seg[data-mkey]").forEach((el) => el.querySelectorAll("button").forEach((b) => (b.onclick = () => { mh[el.dataset.mkey] = b.dataset.v; mh.shown = 50; renderMatchHistory(view); })));
   view.querySelector("#mhmap").onchange = (e) => { mh.map = e.target.value; mh.shown = 50; renderMatchHistory(view); };
+  const setCols = (list) => { savePickedCols("veloxify.historyCols", HIST_COLS, list); renderMatchHistory(view); };
+  wireColDrag([...view.querySelectorAll(".ml-head [data-col]")], () => cols, setCols);
+  view.querySelector("#mh-cols").onclick = (e) => openColPicker(e.currentTarget, {
+    catalog: HIST_COLS.map(([k, l]) => [k, l]), groups: HIST_GROUPS, cols,
+    onChange: setCols,
+    onReset: () => { try { localStorage.removeItem("veloxify.historyCols"); } catch (err) { /* nothing saved */ } renderMatchHistory(view); },
+  });
   const more = view.querySelector("#mhmore");
   if (more) more.onclick = () => { mh.shown += 50; renderMatchHistory(view); };
   view.querySelectorAll(".ml-row").forEach((row) => (row.onclick = (e) => {
