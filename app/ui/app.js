@@ -5381,6 +5381,14 @@ const histTemplate = (cols) => `${cols.map((k) => HIST_COLS.find((c) => c[0] ===
 const histMinWidth = (cols) => sum(cols.map((k) => parseInt(/(\d+)px/.exec(HIST_COLS.find((c) => c[0] === k)[2])[1], 10))) + 96 + 12 * cols.length + 28;
 const histGridStyle = (cols) => `grid-template-columns:${histTemplate(cols)};min-width:${histMinWidth(cols)}px`;
 
+// The match list with your columns (Match history, and each session's matches).
+function historyTable(rows, cols) {
+  return `<div class="ml-table"><div class="ml-grid ml-head" style="${histGridStyle(cols)}">
+      ${cols.map((k) => `<div data-col="${k}" title="Drag to move">${k === "rating" ? `<span class="ic">${ICONS.rating}</span>` : ""}${esc(HIST_COLS.find((c) => c[0] === k)[1])}</div>`).join("")}<div></div>
+    </div>
+    ${rows.map((r) => historyRow(r, cols)).join("")}</div>`;
+}
+
 function historyRow(r, cols) {
   const l = r.line;
   const demo = l && !l.faceit_only; // FACEIT's own numbers cover only some columns
@@ -5457,10 +5465,7 @@ function renderMatchHistory(view) {
           <select id="mhmap"><option value="all">All maps</option>${maps.map((m) => `<option value="${m}" ${mh.map === m ? "selected" : ""}>${esc(mapName(m))}</option>`).join("")}</select>
         </div>
       </div>
-      <div class="ml-table"><div class="ml-grid ml-head" style="${histGridStyle(cols)}">
-        ${cols.map((k) => `<div data-col="${k}" title="Drag to move">${k === "rating" ? `<span class="ic">${ICONS.rating}</span>` : ""}${esc(HIST_COLS.find((c) => c[0] === k)[1])}</div>`).join("")}<div></div>
-      </div>
-      ${rows.slice(0, mh.shown).map((r) => historyRow(r, cols)).join("")}</div>
+      ${historyTable(rows.slice(0, mh.shown), cols)}
       ${rows.length > mh.shown ? `<div style="text-align:center;margin-top:12px"><button class="btn" id="mhmore">Show more</button></div>` : ""}
       ${missing ? `<div class="ml-note">${missing} FACEIT match${missing === 1 ? "" : "es"} without a demo show FACEIT's stats only. Get the demo (download button) and Veloxify adds the rating, RWS, highlights and lowlights. FACEIT keeps demos for a few weeks.</div>` : ""}
     </section>`;
@@ -5745,8 +5750,7 @@ async function renderSession(view, date, idx) {
     </section>
     <section class="fc-card" style="margin-bottom:20px">
       <div class="fc-head"><div class="h3">Matches</div></div>
-      <div class="ml-grid ml-head"><div>Date</div><div>Score</div><div></div><div><span class="ic">${ICONS.rating}</span>HLTV 3.0</div><div>RWS</div><div>K/D/A</div><div>ADR</div><div>Map</div><div></div></div>
-      ${historyRows().filter((r) => sess.match_ids.includes(r.id)).sort((a, b) => a.when - b.when).map(historyRow).join("")}
+      ${historyTable(historyRows().filter((r) => sess.match_ids.includes(r.id)).sort((a, b) => a.when - b.when), histCols())}
     </section>`;
   view.querySelectorAll("th[data-sort]").forEach((th) => (th.onclick = () => {
     const k = th.dataset.sort;
@@ -5754,6 +5758,7 @@ async function renderSession(view, date, idx) {
     sessionView.sort = k;
     renderSession(view, date, idx);
   }));
+  wireColDrag([...view.querySelectorAll(".ml-head [data-col]")], histCols, (list) => { savePickedCols("veloxify.historyCols", HIST_COLS, list); renderSession(view, date, idx); });
   view.querySelectorAll(".ml-row").forEach((row) => (row.onclick = (e) => {
     const act = e.target.closest("[data-act]")?.dataset.act;
     if (act === "room") return openFaceitRoom(row.dataset.room);
