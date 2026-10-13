@@ -169,6 +169,9 @@ const GRADES = {
   kd: [1.3, 1.1, 0.9, 0.75], kpr: [0.85, 0.75, 0.62, 0.52], adr: [95, 82, 70, 60], kast: [80, 73, 66, 58],
   // Round Swing, % per round: 0 is neutral (it's zero-sum).
   swing: [1.5, 0.5, -0.5, -1.5],
+  // Generally accepted marks (percent): opening duels and all duels won (the average is 50% by
+  // definition, so 58%+ is excellent), headshot kills.
+  open: [58, 53, 47, 42], duels: [56, 52, 48, 44], hs: [55, 48, 35, 28],
 };
 const GRADE_COLORS = ["#2fd36f", "#9ddb8c", "var(--text)", "#f3a5a0", "#ff5252"];
 // A kind without thresholds is plain (average), never an error that blanks the page.
@@ -4868,31 +4871,52 @@ const WCLASS = (w) => {
 const WCLASS_NAME = { rifle: "Rifles", awp: "AWP", scout: "Scout", pistol: "Pistols", smg: "SMGs", heavy: "Shotguns and machine guns", other: "Other" };
 
 // Your duels: every kill you got (won) and every death to an enemy (lost), with what they were.
-function myDuels(sets) {
+// Every duel in these rounds from both players' side (the winner's and the loser's), so yours can
+// be compared with the average player's: `who` is "me", "mate" or "opp" (relative to you that round).
+function allDuels(sets) {
   const out = [];
   for (const { D, rounds } of sets) for (const r of rounds) {
     const me = r.match.me;
     if (me < 0) continue;
     const mySide = r.sides[me];
-    // Teammates and enemies alive at each kill: to tell clutches and afterplants.
     for (const k of r.kills) {
-      const won = k[1] === me && k[2] >= 0 && r.sides[k[2]] !== mySide;
-      const lost = k[2] === me && k[1] >= 0 && r.sides[k[1]] !== mySide;
-      if (!won && !lost) continue;
-      const myWeapon = D.weapons[won ? k[3] : k[13]] || "";
-      const theirWeapon = D.weapons[won ? k[13] : k[3]] || "";
-      const height = won ? k[9] : -k[9];
-      const mySpeed = won ? k[11] : k[12], theirSpeed = won ? k[12] : k[11];
-      const myPos = won ? [k[5], k[6]] : [k[7], k[8]];
-      const aliveMates = r.team[mySide].filter((p) => p !== me && (r.death[p] < 0 || r.death[p] > k[0])).length;
-      out.push({
-        D, r, k, won, side: mySide, t: k[0], dist: k[10], myWeapon, theirWeapon, wclass: WCLASS(myWeapon), height, mySpeed, theirSpeed,
-        hs: won && !!(k[4] & 1), opening: !!(k[4] & 2), trade: !!(k[4] & 4), smoke: !!(k[4] & 16), myPos, place: D.placeAt(myPos[0], myPos[1]),
-        afterPlant: !!r.plant && k[0] > r.plant[0], alone: aliveMates === 0,
-      });
+      const a = k[1], v = k[2];
+      if (a < 0 || v < 0 || r.sides[a] === r.sides[v]) continue;
+      for (const won of [true, false]) {
+        const p = won ? a : v, side = r.sides[p];
+        const myWeapon = D.weapons[won ? k[3] : k[13]] || "";
+        const myPos = won ? [k[5], k[6]] : [k[7], k[8]];
+        out.push({
+          D, r, k, p, won, side, who: p === me ? "me" : side === mySide ? "mate" : "opp", t: k[0], dist: k[10],
+          myWeapon, theirWeapon: D.weapons[won ? k[13] : k[3]] || "", wclass: WCLASS(myWeapon), height: won ? k[9] : -k[9],
+          mySpeed: won ? k[11] : k[12], theirSpeed: won ? k[12] : k[11], hs: won && !!(k[4] & 1), opening: !!(k[4] & 2), trade: !!(k[4] & 4),
+          smoke: !!(k[4] & 16), myPos, place: p === me ? D.placeAt(myPos[0], myPos[1]) : -1, afterPlant: !!r.plant && k[0] > r.plant[0],
+          alone: r.team[side].every((q) => q === p || (r.death[q] >= 0 && r.death[q] <= k[0])),
+        });
+      }
     }
   }
   return out;
+}
+const myDuels = (sets) => allDuels(sets).filter((d) => d.who === "me");
+
+// A win rate against the average player's: Great .. Poor (needs enough duels to say).
+const RATE_GRADES = { g0: "Excellent", g1: "Good", g2: "Average", g3: "Below average", g4: "Poor" };
+// `standard` (a GRADES key) grades by the generally accepted marks; otherwise by the average player
+// in your matches (and only when the difference is more than chance).
+function gradeRate(w, n, avg, standard = null) {
+  if (n < 15 || (avg == null && !standard)) return null;
+  const a = avg ?? 0.5;
+  const diff = w / n - a, z = diff / Math.sqrt(Math.max(0.01, a * (1 - a)) / n);
+  if (standard && GRADES[standard]) {
+    // Duel marks are for a field where the average wins 50%: measure your edge over the average in
+    // this kind of duel (T-side openings are harder for everyone, for example).
+    const v = (standard === "open" || standard === "duels") && avg != null ? 50 + 100 * (w / n - avg) : (100 * w) / n;
+    const g = `g${gradeOf(standard, v)}`;
+    return { g, word: RATE_GRADES[g], z };
+  }
+  const g = diff >= 0.08 && z >= 2 ? "g0" : diff >= 0.03 && z >= 1 ? "g1" : diff <= -0.08 && z <= -2 ? "g4" : diff <= -0.03 && z <= -1 ? "g3" : "g2";
+  return { g, word: RATE_GRADES[g], z };
 }
 
 // Duel buckets: what kind of fight it was. Each has a test and a tip for when you lose them.
@@ -4936,19 +4960,25 @@ async function renderPlaystyle(view, map) {
 function psPage(view, maps, sets) {
   const rerender = () => { savePs(); psPage(view, maps, sets); };
   const rounds = sets.flatMap((s) => s.rounds);
-  const duels = myDuels(sets);
+  const everyone = allDuels(sets);
+  const duels = everyone.filter((d) => d.who === "me"), others = everyone.filter((d) => d.who !== "me");
   const W = duels.filter((d) => d.won).length, Lo = duels.length - W;
   const overall = duels.length ? W / duels.length : 0.5;
+  const othersOverall = others.length ? others.filter((d) => d.won).length / others.length : 0.5;
   const segBtns = (key, opts, val) => opts.map(([k, l]) => `<button data-${key}="${k}" class="${String(val) === String(k) ? "on" : ""}">${l}</button>`).join("");
   const roles = psRoles(sets);
-  const sides = ["T", "C"].map((S) => psSide(sets, duels, S));
+  const sides = ["T", "C"].map((S) => psSide(sets, duels, S, others));
   // Buckets: win rate against your average.
+  // Each kind of duel: your win rate against the average player's (everyone else in your matches).
   const buckets = DUEL_BUCKETS.map(([key, name, sub, test, tip]) => {
     const ds = duels.filter(test), w = ds.filter((d) => d.won).length;
-    return { key, name, sub, tip, ds, w, n: ds.length, rate: ds.length ? w / ds.length : 0 };
+    const os = others.filter(test), avg = os.length >= 30 ? os.filter((d) => d.won).length / os.length : null;
+    return { key, name, sub, tip, ds, w, n: ds.length, rate: ds.length ? w / ds.length : 0, avg, grade: gradeRate(w, ds.length, avg, key === "opening" ? "open" : null) };
   }).filter((b) => b.n >= 6);
-  const strong = buckets.filter((b) => b.n >= 15 && b.rate >= overall + 0.07).sort((a, b) => b.rate - a.rate);
-  const weak = buckets.filter((b) => b.n >= 15 && b.rate <= overall - 0.07).sort((a, b) => a.rate - b.rate);
+  const strong = buckets.filter((b) => b.grade && (b.grade.g === "g0" || b.grade.g === "g1")).sort((a, b) => b.grade.z - a.grade.z);
+  const weak = buckets.filter((b) => b.grade && (b.grade.g === "g3" || b.grade.g === "g4")).sort((a, b) => a.grade.z - b.grade.z);
+  // When nothing's below average: the kinds of duel where you're closest to (or under) it.
+  const least = weak.length ? [] : buckets.filter((b) => b.grade && b.n >= 30 && b.tip).sort((a, b) => (a.rate - a.avg) - (b.rate - b.avg)).slice(0, 2);
   const sel = buckets.find((b) => b.key === ps.bucket) || null;
   const better = sides[0].n && sides[1].n ? (sides[0].score > sides[1].score + 0.05 ? "T" : sides[1].score > sides[0].score + 0.05 ? "C" : null) : null;
   // Your spots (one map): duels won and lost by where you stood.
@@ -4958,7 +4988,8 @@ function psPage(view, maps, sets) {
   const best = [...spots].filter((s) => s.ds.length >= 8).sort((a, b) => b.w / b.ds.length - a.w / a.ds.length).slice(0, 5);
   const worst = [...spots].filter((s) => s.ds.length >= 8).sort((a, b) => a.w / a.ds.length - b.w / b.ds.length).slice(0, 5);
   const fav = oneMap ? psFavorites(oneMap, ps.side) : [];
-  const bar = (rate) => `<span class="ps-bar"><i style="width:${Math.round(rate * 100)}%" class="${rate >= overall + 0.07 ? "good" : rate <= overall - 0.07 ? "bad" : ""}"></i><b style="left:${Math.round(overall * 100)}%"></b></span>`;
+  const bar = (b) => `<span class="ps-bar" title="Your ${Math.round(b.rate * 100)}%${b.avg != null ? ` · the average player in your matches: ${Math.round(b.avg * 100)}% (the white line)` : ""}"><i style="width:${Math.round(b.rate * 100)}%" class="${b.grade?.g === "g0" || b.grade?.g === "g1" ? "good" : b.grade?.g === "g3" || b.grade?.g === "g4" ? "bad" : ""}"></i>${b.avg != null ? `<b style="left:${Math.round(b.avg * 100)}%"></b>` : ""}</span>`;
+  const gradeChip = (g) => (g ? `<span class="ps-grade ${g.g}">${g.word}</span>` : `<span class="ps-grade na" title="Not enough duels yet to say">–</span>`);
   view.innerHTML = `
     <div class="ins-head"><div><div class="h1">Playstyle</div>
       <div class="sub">From ${rounds.length} rounds you played in ${new Set(rounds.map((r) => r.match.id)).size} matches${ps.map !== "all" ? ` on ${esc(mapName(ps.map))}` : ""}. Your roles, how you do on each side, the duels you win and lose, and where you play best.</div></div></div>
@@ -4974,15 +5005,23 @@ function psPage(view, maps, sets) {
         <div class="ps-verdict">${psVerdict(roles)}</div></section>
       <section class="panel"><div class="panel-head"><div class="h3">T or CT?</div><span class="grow"></span>${better ? `<span class="tag main">Better on ${better === "T" ? "T" : "CT"}</span>` : ""}</div>
         <table class="ins-table ps-sides"><thead><tr><th></th><th>T side</th><th>CT side</th></tr></thead><tbody>
-          ${[["Rounds", (s) => s.n], ["Kills per round", (s) => f2(s.kpr)], ["Deaths per round", (s) => f2(s.dpr)], ["Survived", (s) => `${pctOf(s.survived, s.n)}%`], ["Opening duels won", (s) => (s.open ? `${pctOf(s.openWon, s.open)}% of ${s.open}` : "—")], ["Duels won", (s) => (s.duels ? `${pctOf(s.won, s.duels)}%` : "—")], ["Rounds won", (s) => `${pctOf(s.wins, s.n)}%`]]
-            .map(([l, f]) => `<tr><td>${l}</td><td>${sides[0].n ? f(sides[0]) : "—"}</td><td>${sides[1].n ? f(sides[1]) : "—"}</td></tr>`).join("")}</tbody></table></section>
+          ${[["Rounds", (s) => s.n],
+            ["Kills per round", (s) => vsAvg(s.kpr, s.avg.kpr, f2, false, 0, "kpr")],
+            ["Deaths per round", (s) => vsAvg(s.dpr, s.avg.dpr, f2, true)],
+            ["Survived", (s) => vsAvg(s.n ? s.survived / s.n : null, s.avg.survived, (v) => `${Math.round(v * 100)}%`)],
+            ["Opening duels won", (s) => (s.open ? vsAvg(s.openWon / s.open, s.avg.open, (v) => `${Math.round(v * 100)}%`, false, s.open, "open") : "—")],
+            ["Duels won", (s) => (s.duels ? vsAvg(s.won / s.duels, s.avg.duels, (v) => `${Math.round(v * 100)}%`, false, s.duels, "duels") : "—")],
+            ["Rounds won", (s) => `${pctOf(s.wins, s.n)}%`]]
+            .map(([l, f]) => `<tr><td>${l}</td><td>${sides[0].n ? f(sides[0]) : "—"}</td><td>${sides[1].n ? f(sides[1]) : "—"}</td></tr>`).join("")}</tbody></table>
+        <div class="note" style="padding:0 20px 14px;margin:0">Small numbers: the average player on that side in your matches. Green is better than them, red worse.</div></section>
     </div>
-    <section class="panel"><div class="panel-head"><div class="h3">Your duels</div><span class="grow"></span><span class="sub">${W} won, ${Lo} lost: ${pctOf(W, duels.length)}% overall (the line on each bar)</span></div>
+    <section class="panel"><div class="panel-head"><div class="h3">Your duels</div><span class="grow"></span><span class="sub">${W} won, ${Lo} lost: <b>${pctOf(W, duels.length)}%</b> ${((g) => (g ? `<span class="ps-grade ${g.g}">${g.word}</span>` : ""))(gradeRate(W, duels.length, othersOverall, "duels"))} (the average player in your matches: ${Math.round(othersOverall * 100)}%). The white line on each bar is the average player.</span></div>
       <div class="ps-sw">
-        <div><div class="h3 ps-good">Strengths</div>${strong.slice(0, 4).map((b) => `<div class="ps-sw-item" data-bucket="${b.key}"><b>${esc(b.name)}</b> <span class="sub">won ${pctOf(b.w, b.n)}% of ${b.n}</span></div>`).join("") || `<div class="sub">Nothing clearly above your average yet.</div>`}</div>
-        <div><div class="h3 ps-bad">Weaknesses</div>${weak.slice(0, 4).map((b) => `<div class="ps-sw-item" data-bucket="${b.key}"><b>${esc(b.name)}</b> <span class="sub">won ${pctOf(b.w, b.n)}% of ${b.n}</span>${b.tip ? `<div class="ps-tip">${esc(b.tip)}</div>` : ""}</div>`).join("") || `<div class="sub">Nothing clearly below your average.</div>`}</div>
+        <div><div class="h3 ps-good">Strengths</div>${strong.slice(0, 4).map((b) => `<div class="ps-sw-item" data-bucket="${b.key}">${gradeChip(b.grade)} <b>${esc(b.name)}</b>: you win <b>${pctOf(b.w, b.n)}%</b> <span class="sub">(the average player ${Math.round(b.avg * 100)}%, ${b.n} duels)</span></div>`).join("") || `<div class="sub">Nothing clearly above the average player yet.</div>`}</div>
+        <div><div class="h3 ps-bad">Weaknesses</div>${weak.slice(0, 4).map((b) => `<div class="ps-sw-item" data-bucket="${b.key}">${gradeChip(b.grade)} <b>${esc(b.name)}</b>: you win <b>${pctOf(b.w, b.n)}%</b> <span class="sub">(the average player ${Math.round(b.avg * 100)}%, ${b.n} duels)</span>${b.tip ? `<div class="ps-tip">${esc(b.tip)}</div>` : ""}</div>`).join("")
+          || `<div class="sub">Nothing below the average player. Your least strong, where there's most to gain:</div>${least.map((b) => `<div class="ps-sw-item" data-bucket="${b.key}">${gradeChip(b.grade)} <b>${esc(b.name)}</b>: you win <b>${pctOf(b.w, b.n)}%</b> <span class="sub">(the average player ${Math.round(b.avg * 100)}%, ${b.n} duels)</span>${b.tip ? `<div class="ps-tip">${esc(b.tip)}</div>` : ""}</div>`).join("")}`}</div>
       </div>
-      <div class="ps-buckets">${buckets.map((b) => `<button class="ps-bucket ${sel?.key === b.key ? "on" : ""}" data-bucket="${b.key}"><span class="ps-bucket-name"><b>${esc(b.name)}</b>${b.sub ? `<span class="sub">${esc(b.sub)}</span>` : ""}</span>${bar(b.rate)}<span class="ps-bucket-n">${pctOf(b.w, b.n)}%<small>${b.w}-${b.n - b.w}</small></span></button>`).join("")}</div>
+      <div class="ps-buckets">${buckets.map((b) => `<button class="ps-bucket ${sel?.key === b.key ? "on" : ""}" data-bucket="${b.key}"><span class="ps-bucket-name"><b>${esc(b.name)}</b>${b.sub ? `<span class="sub">${esc(b.sub)}</span>` : ""}</span>${bar(b)}<span class="ps-bucket-n">${pctOf(b.w, b.n)}%<small>${b.avg != null ? `avg ${Math.round(b.avg * 100)}% · ` : ""}${b.w}-${b.n - b.w}</small></span>${gradeChip(b.grade)}</button>`).join("")}</div>
       ${sel ? psDuelList(sel) : `<div class="sub" style="padding:0 20px 16px">Click a kind of duel to see every one of them and open it in the 2D replay.</div>`}
     </section>
     ${oneMap ? `<section class="panel"><div class="panel-head"><div class="h3">Your spots on ${esc(mapName(oneMap.map))}</div><span class="grow"></span><span class="sub">Where you stood in your duels (green: kills, red: deaths)</span></div>
@@ -5029,6 +5068,15 @@ function psLately(data) {
       <div class="note" style="padding:0 20px 14px;margin:0">Compares your HLTV 3.0 across your matches by time of day, how far into a session, who you queued with, map and crosshair. From now on Veloxify also records your resolution, sensitivity and mouse each time you close CS2, and practice you start from the Practice tab; tag sessions in their Notes ("Tired", "New mouse"...) and those show up here too.</div></section></div>`;
 }
 
+// A value next to the average player's: colored when clearly better or worse (with a grade for rates).
+function vsAvg(v, avg, fmt, lowerBetter = false, n = 0, standard = null) {
+  if (v == null) return "—";
+  if (avg == null) return fmt(v);
+  const rel = avg ? (v - avg) / Math.abs(avg) : 0, good = lowerBetter ? rel < -0.05 : rel > 0.05, bad = lowerBetter ? rel > 0.05 : rel < -0.05;
+  const g = n ? gradeRate(Math.round(v * n), n, avg, standard) : standard ? ((x) => ({ g: x, word: RATE_GRADES[x] }))(`g${gradeOf(standard, v)}`) : null;
+  return `<span class="${good ? "up" : bad ? "down" : ""}">${fmt(v)}</span> <small class="sub">avg ${fmt(avg)}</small>${g ? ` <span class="ps-grade ${g.g}">${g.word}</span>` : ""}`;
+}
+
 function psDuelList(b) {
   const rows = [...b.ds].sort((a, x) => x.r.match.ts - a.r.match.ts).slice(0, 40);
   return `<div class="ps-duels"><div class="h3 ins-sub">${esc(b.name)} <span class="sub">${b.n} duels${b.n > rows.length ? `, newest ${rows.length}` : ""}</span></div>
@@ -5038,7 +5086,7 @@ function psDuelList(b) {
 }
 
 // Your side's numbers: per round and in duels.
-function psSide(sets, duels, S) {
+function psSide(sets, duels, S, others = []) {
   const rounds = sets.flatMap((s) => s.rounds).filter((r) => r.sides[r.match.me] === S);
   const me = (r) => r.match.me;
   const kills = sum(rounds.map((r) => r.kills.filter((k) => k[1] === me(r) && k[2] >= 0 && r.sides[k[2]] !== S).length));
@@ -5047,7 +5095,21 @@ function psSide(sets, duels, S) {
   const open = ds.filter((d) => d.opening);
   const n = rounds.length;
   const kpr = n ? kills / n : 0, dpr = n ? deaths / n : 0;
-  return { n, kpr, dpr, survived: n - deaths, wins: rounds.filter((r) => r.win === S).length, open: open.length, openWon: open.filter((d) => d.won).length, duels: ds.length, won: ds.filter((d) => d.won).length, score: kpr - dpr };
+  // The average player on this side: everyone else who played it in your matches.
+  const all = sets.flatMap((s) => s.rounds);
+  let oRounds = 0, oKills = 0, oDeaths = 0;
+  for (const r of all) for (const p of r.team[S]) {
+    if (p === me(r)) continue;
+    oRounds++;
+    oKills += r.kills.filter((k) => k[1] === p && k[2] >= 0 && r.sides[k[2]] !== S).length;
+    if (r.death[p] >= 0) oDeaths++;
+  }
+  const od = others.filter((d) => d.side === S), oo = od.filter((d) => d.opening);
+  const avg = {
+    kpr: oRounds ? oKills / oRounds : null, dpr: oRounds ? oDeaths / oRounds : null, survived: oRounds ? 1 - oDeaths / oRounds : null,
+    open: oo.length ? oo.filter((d) => d.won).length / oo.length : null, duels: od.length ? od.filter((d) => d.won).length / od.length : null,
+  };
+  return { n, kpr, dpr, survived: n - deaths, wins: rounds.filter((r) => r.win === S).length, open: open.length, openWon: open.filter((d) => d.won).length, duels: ds.length, won: ds.filter((d) => d.won).length, score: kpr - dpr, avg };
 }
 
 // Roles: how often you do each thing, against everyone else in the same rounds.
@@ -5999,9 +6061,13 @@ function baselineHtml(j, data) {
     const v = wmean(j.mine, k), b = wmean(j.baseline, k);
     if (v == null || b == null) return "";
     const better = lower(k) ? v < b : v > b, rel = b ? Math.abs(v - b) / Math.abs(b) : 0;
-    return tile(label, fmt(b), fmt(v), rel < 0.03 ? "" : better ? "up" : "down");
+    return tile(label, fmt(b), fmt(v), rel < 0.03 ? "" : better ? "up" : "down", "", gradeOfStat(k, v));
   };
-  const tile = (label, usual, now, cls, extra = "") => `<div class="sv-tile"><span>${label}</span><b class="${cls}">${now}${extra ? ` <small>${extra}</small>` : ""}</b><small>usually ${usual}</small></div>`;
+  const tile = (label, usual, now, cls, extra = "", grade = null) => `<div class="sv-tile"><span>${label}${grade ? ` <i class="ps-grade ${grade}">${RATE_GRADES[grade]}</i>` : ""}</span><b class="${cls}">${now}${extra ? ` <small>${extra}</small>` : ""}</b><small>usually ${usual}</small></div>`;
+  // How good a value is: by the generally accepted marks where there are some, else against every
+  // player-match in your lobbies.
+  const STD = { rating3: "rating", kpr: "kpr", adr: "adr", kast: "kast", hs_pct: "hs", entry_success: "open" };
+  const gradeOfStat = (k, v) => (STD[k] ? `g${gradeOf(STD[k], v)}` : bandOf(standing(k, v)) || null);
   const duelRow = (label, get) => {
     const [w, l] = duelSum(j.mine, get), [bw, bl] = duelSum(j.baseline, get);
     if (w + l < 3 || bw + bl < 10) return "";
@@ -6011,7 +6077,7 @@ function baselineHtml(j, data) {
   const wins = j.mine.filter((r) => r.result === "win").length, bwins = j.baseline.filter((r) => r.result === "win").length;
   return `<section class="panel sv-base"><div class="panel-head"><div class="h3">Your baseline</div><span class="grow"></span><span class="sub">This session (big number) against your usual over ${j.baseline.length} other matches</span></div>
     <div class="sv-tiles">
-      ${tile("Matches won", `${Math.round((100 * bwins) / j.baseline.length)}%`, `${Math.round((100 * wins) / j.n)}%`, wins / j.n > bwins / j.baseline.length ? "up" : "down", `${wins}-${j.n - wins}`)}
+      ${tile("Matches won", `${Math.round((100 * bwins) / j.baseline.length)}%`, `${Math.round((100 * wins) / j.n)}%`, wins / j.n > bwins / j.baseline.length ? "up" : "down", `${wins}-${j.n - wins}`, j.n >= 3 ? `g${gradeOf("win", wins / j.n)}` : null)}
       ${BASE_STATS.map(row).join("")}
       ${duelRow("Rifle duels won", (d) => d.by_weapon?.rifle)}${duelRow("AWP duels won", (d) => d.by_weapon?.awp)}${duelRow("Pistol duels won", (d) => d.by_weapon?.pistol)}
       ${duelRow("Afterplant duels won", (d) => d.afterplant)}${duelRow("Retake duels won", (d) => d.retake)}

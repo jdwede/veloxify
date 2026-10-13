@@ -1660,3 +1660,14 @@ ul.ins-list { list-style: none; padding-left: 0; }
 .ps-lately .up, .ps-lately .down { font-weight: 700; }
 .ps-helps { margin: 0; padding: 0 20px 12px 38px; display: flex; flex-direction: column; gap: 6px; font-size: 14px; }
 .ps-helps .xh-inline { vertical-align: middle; }
+.ps-grade { display: inline-block; font-size: 11px; font-weight: 700; padding: 2px 7px; border-radius: 999px; white-space: nowrap; }
+.ps-grade.g0 { background: rgba(47, 211, 111, 0.2); color: #7cf09a; }
+.ps-grade.g1 { background: rgba(157, 219, 140, 0.14); color: #b8e8ab; }
+.ps-grade.g2 { background: rgba(255, 255, 255, 0.08); color: var(--muted); }
+.ps-grade.g3 { background: rgba(243, 165, 160, 0.14); color: #f6b8b3; }
+.ps-grade.g4 { background: rgba(255, 82, 82, 0.2); color: #ff8a8a; }
+.ps-grade.na { background: transparent; color: var(--faint); }
+.ps-bucket { grid-template-columns: 150px 1fr 92px 96px; }
+.ps-buckets { grid-template-columns: repeat(auto-fill, minmax(420px, 1fr)); }
+.ps-sides td small { font-size: 11px; }
+.sv-tile span .ps-grade { font-style: normal; margin-left: 4px; font-size: 10px; padding: 1px 6px; }
