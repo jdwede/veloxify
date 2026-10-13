@@ -1756,3 +1756,23 @@ ul.ins-list { list-style: none; padding-left: 0; }
 .mc-legend { display: flex; gap: 12px; align-items: center; font-size: 12px; flex-wrap: wrap; }
 .mc-legend i { display: inline-block; width: 14px; height: 3px; border-radius: 2px; margin-right: 5px; vertical-align: middle; }
 .mc-legend i.you { background: #ff4f8b; } .mc-legend i.rec { background: #e0a446; }
+
+/* Sessions: the objective verdict, and this session against your usual as a table */
+.sv-obj { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px 20px; margin-bottom: 14px; display: flex; flex-direction: column; gap: 8px; }
+.sv-obj.fire { border-color: rgba(255, 140, 40, 0.7); background: linear-gradient(120deg, rgba(255, 120, 30, 0.16), var(--card) 60%); }
+.sv-obj.great { border-color: rgba(47, 211, 111, 0.55); }
+.sv-obj.rough { border-color: rgba(255, 82, 82, 0.45); }
+.sv-obj-head { display: flex; align-items: baseline; gap: 10px; font-size: 22px; }
+.sv-obj-head b { font-weight: 800; }
+.sv-obj.fire .sv-obj-head b { color: #ffa040; }
+.sv-obj.great .sv-obj-head b { color: #2fd36f; }
+.sv-obj.rough .sv-obj-head b { color: #ff8a8a; }
+.sv-obj-tag { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
+.sv-obj-chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.sv-obj-chip { display: inline-flex; align-items: center; gap: 6px; background: var(--row); border-radius: 999px; padding: 4px 6px 4px 12px; font-size: 13px; }
+.sv-obj-chip span { color: var(--muted); }
+.sv-obj-chip i { font-style: normal; }
+.sv-cmp { margin: 0 20px 12px; width: calc(100% - 40px); }
+.sv-cmp td:not(:first-child), .sv-cmp th:not(:first-child) { text-align: right; white-space: nowrap; }
+.sv-cmp td b { font-size: 15px; }
+.sv-cmp td i.ps-grade { font-style: normal; margin-left: 6px; font-size: 10px; padding: 1px 6px; }

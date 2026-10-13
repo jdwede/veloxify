@@ -3521,11 +3521,17 @@ function xhSvg(c, size = 40, zoom = 1) {
     rects.push([cx + inner, cy - T / 2, L, T], [cx - inner - L, cy - T / 2, L, T], [cx - T / 2, cy + inner, T, L]);
     if (!c.t_style) rects.push([cx - T / 2, cy - inner - L, T, L]);
   }
+  // Quad (7 dynamic, 9 static): the four lines turned 45 degrees, an X.
+  const quad = style === 7 || style === 9;
+  const lines = rects.length;
   if (c.dot || style === 6) rects.push([cx - T / 2, cy - T / 2, T, T]);
   const r = (x, y, w, h, f) => `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${w.toFixed(1)}" height="${h.toFixed(1)}" fill="${f}"/>`;
-  const outlines = o ? rects.map(([x, y, w, h]) => r(x - o, y - o, w + 2 * o, h + 2 * o, line)).join("") + strokes.map(([rad, w]) => `<circle cx="${cx}" cy="${cy}" r="${rad}" fill="none" stroke="${line}" stroke-width="${w + 2 * o}"/>`).join("") : "";
-  return `<svg class="xh-svg" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" shape-rendering="crispEdges" aria-hidden="true">${outlines}
-    ${rects.map(([x, y, w, h]) => r(x, y, w, h, fill)).join("")}${strokes.map(([rad, w]) => `<circle cx="${cx}" cy="${cy}" r="${rad}" fill="none" stroke="${fill}" stroke-width="${w}"/>`).join("")}</svg>`;
+  const turn = (html) => (quad ? `<g transform="rotate(45 ${cx} ${cy})">${html}</g>` : html);
+  const outline = (list) => list.map(([x, y, w, h]) => r(x - o, y - o, w + 2 * o, h + 2 * o, line)).join("");
+  const outlines = o ? turn(outline(rects.slice(0, lines))) + outline(rects.slice(lines)) + strokes.map(([rad, w]) => `<circle cx="${cx}" cy="${cy}" r="${rad}" fill="none" stroke="${line}" stroke-width="${w + 2 * o}"/>`).join("") : "";
+  const fills = (list) => list.map(([x, y, w, h]) => r(x, y, w, h, fill)).join("");
+  return `<svg class="xh-svg" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" shape-rendering="${quad ? "geometricPrecision" : "crispEdges"}" aria-hidden="true">${outlines}
+    ${turn(fills(rects.slice(0, lines)))}${fills(rects.slice(lines))}${strokes.map(([rad, w]) => `<circle cx="${cx}" cy="${cy}" r="${rad}" fill="none" stroke="${fill}" stroke-width="${w}"/>`).join("")}</svg>`;
 }
 
 // The scoreboard's crosshair cell: the preview (opens the crosshair) and a copy button.
@@ -6410,6 +6416,23 @@ async function renderSession(view, date, idx) {
   const entries = await Promise.all(withDemo.map((m) => loadMatch(m.id)));
   const me = state.index.me;
   const players = sumPlayers(entries, me);
+  // Duels in pistol rounds (each half's first): kills and deaths, from the match details.
+  const dets = await Promise.all(withDemo.map((m) => loadDetails(m.id)));
+  const pistolDuels = new Map();
+  for (const d of dets) {
+    const rs = d?.rounds || [];
+    if (!rs.length) continue;
+    const pistols = new Set([rs[0].number]);
+    const second = rs.find((r) => r.number > rs[0].number && r.number <= 30 && r.mine_side && r.mine_side !== rs[0].mine_side);
+    if (second) pistols.add(second.number);
+    for (const r of rs) if (pistols.has(r.number)) for (const q of r.players || []) {
+      const a = pistolDuels.get(q.steamid) || [0, 0];
+      a[0] += q.kills || 0;
+      a[1] += q.deaths || 0;
+      pistolDuels.set(q.steamid, a);
+    }
+  }
+  for (const q of players) q.pistolDuels = pistolDuels.get(q.steamid) || [0, 0];
   const meRow = players.find((p) => p.is_me);
   // Cards: you and your confirmed party (never teammates who just happened to be in your games).
   const party = players.filter((p) => !p.is_me && p.mine > 0 && p.party);
@@ -6454,11 +6477,18 @@ async function renderSession(view, date, idx) {
 
   // Full session scoreboard.
   const COLS = [
-    ["name", "Player"], ["maps", "Maps"], ["wins", "W-L"], ["rating3", "HLTV 3.0"], ["rws", "RWS"], ["kills", "K"], ["deaths", "D"], ["assists", "A"],
+    ["name", "Player"], ["maps", "Maps"], ["wins", "W-L"], ["rating3", "HLTV 3.0"], ["swing", "Swing"], ["rws", "RWS"], ["kills", "K"], ["deaths", "D"], ["assists", "A"],
     ["diff", "+/-"], ["kd", "K/D"], ["adr", "ADR"], ["kr", "K/R"], ["kast", "KAST"], ["hs", "HS%"], ["k2", "2K"], ["k3", "3K"], ["k4", "4K"], ["k5", "5K"],
-    ["mvps", "MVPs"], ["entries", "Entries"], ["pistol", "Pistol kills"], ["eco", "Eco kills"], ["clutch", "Clutches"],
-    ["c1", "1v1"], ["c2", "1v2"], ["c3", "1v3"], ["c4", "1v4"], ["c5", "1v5"], ["swing", "Swing"],
+    ["mvps", "MVPs"], ["entries", "Entries"], ["pistol", "Pistol rounds"], ["eco", "Eco kills"], ["clutch", "Clutches"],
+    ["c1", "1v1"], ["c2", "1v2"], ["c3", "1v3"], ["c4", "1v4"], ["c5", "1v5"],
   ];
+  // Won-lost with the percentage, colored by the usual marks for duels (`open` or `duels`).
+  const wlCell = (w, l, marks, what) => {
+    const n = w + l;
+    if (!n) return `<td class="zero">–</td>`;
+    const pct = (100 * w) / n;
+    return `<td class="${n >= 3 ? gradeClass(marks, pct) : ""}" title="${esc(what)}: won ${w} of ${n} (${Math.round(pct)}%)">${w}-${l} <small>(${Math.round(pct)}%)</small></td>`;
+  };
   const rates = sdata.clutchRates || CLUTCH_AVG;
   const clutchArr = (p, k) => p.c[k] || [0, 0, 0, 0, 0, 0];
   // One 1vX (or all of them, x = 0): "2/5 (40%)", colored against the average player.
@@ -6473,7 +6503,9 @@ async function renderSession(view, date, idx) {
   const val = (p, k) => ({
     name: p.name.toLowerCase(), kills: p.c.kills || 0, deaths: p.c.deaths || 0, assists: p.c.assists || 0, diff: (p.c.kills || 0) - (p.c.deaths || 0),
     k2: (p.c.multikill_rounds || [])[2] || 0, k3: (p.c.multikill_rounds || [])[3] || 0, k4: (p.c.multikill_rounds || [])[4] || 0, k5: (p.c.multikill_rounds || [])[5] || 0,
-    mvps: p.c.mvps || 0, entries: p.c.opening_kills || 0, pistol: p.c.pistol_kills || 0, eco: p.c.eco_kills || 0, clutch: sum(p.c.clutches_won || []),
+    mvps: p.c.mvps || 0, eco: p.c.eco_kills || 0, clutch: sum(p.c.clutches_won || []),
+    entries: (p.c.opening_kills || 0) + (p.c.opening_deaths || 0) ? (p.c.opening_kills || 0) / ((p.c.opening_kills || 0) + (p.c.opening_deaths || 0)) : -1,
+    pistol: p.pistolDuels && p.pistolDuels[0] + p.pistolDuels[1] ? p.pistolDuels[0] / (p.pistolDuels[0] + p.pistolDuels[1]) : -1,
     ...(/^c[1-5]$/.test(k) ? { [k]: ((x) => (clutchArr(p, "clutches_attempted")[x] ? clutchArr(p, "clutches_won")[x] / clutchArr(p, "clutches_attempted")[x] : -1))(Number(k[1])) } : {}),
   }[k] ?? p[k] ?? 0);
   // Only the players who were in the session with you: you and your party.
@@ -6494,6 +6526,8 @@ async function renderSession(view, date, idx) {
       case "kast": return `<td>${f1(p.kast)}%</td>`;
       case "hs": return `<td>${Math.round(p.hs)}%</td>`;
       case "clutch": return clutchCell(p, 0);
+      case "entries": return wlCell(p.c.opening_kills || 0, p.c.opening_deaths || 0, "open", "Opening duels (the round's first kill)");
+      case "pistol": return wlCell(p.pistolDuels?.[0] || 0, p.pistolDuels?.[1] || 0, "duels", "Duels in pistol rounds");
       case "c1": case "c2": case "c3": case "c4": case "c5": return clutchCell(p, Number(k[1]));
       case "swing": return `<td>${fmtSwing(p.swing)}</td>`;
       default: return `<td>${val(p, k)}</td>`;
@@ -6510,6 +6544,7 @@ async function renderSession(view, date, idx) {
       <a class="btn ghost" href="#/sessions" title="Every session on a calendar, colored by how you played">${ICONS.calendar} Calendar</a>
       ${nextSess ? `<a class="btn ghost" href="${nextSess}">Next session ▶</a>` : ""}
     </div>
+    ${objectiveHtml(meRow, sdata)}
     ${verdictHtml(judged)}
     ${sobj ? setupHtml(sdata, sobj) : ""}
     ${notice.length ? `<section class="panel sv-noticed"><div class="panel-head"><div class="h3">What we noticed</div><span class="grow"></span><span class="sub">From all your matches: things that were true of this session too</span></div>
@@ -6522,7 +6557,7 @@ async function renderSession(view, date, idx) {
         <thead><tr>${COLS.map(([k, t]) => `<th data-sort="${k}" class="sortable ${sessionView.sort === k ? "on" : ""}">${t}${sessionView.sort === k ? (sessionView.desc ? " ▾" : " ▴") : ""}</th>`).join("")}</tr></thead>
         <tbody>${rows.map((p) => `<tr class="${p.is_me ? "me" : p.party ? "party" : ""}">${COLS.map(([k]) => cell(p, k)).join("")}</tr>`).join("")}</tbody>
       </table></div>
-      <div class="note">Your party: who FACEIT says queued with you, or (Premier, which doesn't record parties) teammates in two or more of the session's matches. HLTV 3.0, RWS, ADR, KAST and Swing are per round, so session values weight each match by its rounds. Eco kills: on players with under $2,000 of equipment (not pistol rounds).
+      <div class="note">Your party: who FACEIT says queued with you, or (Premier, which doesn't record parties) teammates in two or more of the session's matches. HLTV 3.0, RWS, ADR, KAST and Swing are per round, so session values weight each match by its rounds. Entries: opening duels (the round's first kill) won-lost. Pistol rounds: your kills and deaths in each half's first round. Eco kills: on players with under $2,000 of equipment (not pistol rounds).
         Colors: green is good, red is poor. K/D, K/R and ADR against the usual marks (ADR 82+ is good, 95+ excellent); clutches against what the average player in your matches wins from the same 1vXs (about ${Math.round(rates[1] * 100)}% of 1v1s, ${Math.round(rates[2] * 100)}% of 1v2s, ${Math.round(rates[3] * 100)}% of 1v3s), so a few clutches lean average until the difference is clear.</div>
     </section>
     ${baselineHtml(judged, sdata)}
@@ -6672,6 +6707,13 @@ function judgeSession(data, ids) {
   };
   const rating = stat("rating3");
   const pct = rating ? Math.round(((rating.v / rating.b) - 1) * 100) : 0;
+  // Where it ranks among your sessions (by HLTV 3.0), against sessions about as long (one big
+  // match isn't a session of ten).
+  const minLen = Math.min(3, n);
+  const sessRating = (sids) => { const rs = sids.map((id) => data.byId.get(id)).filter(Boolean); return rs.length >= minLen ? wmean(rs, "rating3") : null; };
+  const all = (data.sessions || []).map((s) => sessRating(s.ids)).filter((v) => v != null).sort((a, b) => b - a);
+  const mineR = wmean(mine, "rating3");
+  const rank = mineR != null && all.length >= 5 ? { pos: all.filter((v) => v > mineR + 1e-9).length + 1, of: all.length, minLen } : null;
   const verdict = !rating ? "even" : rating.z >= 1 && pct >= 5 ? "good" : rating.z <= -1 && pct <= -5 ? "bad" : "even";
   // Each part of your game: the average of its stats' scores.
   const parts = [];
@@ -6719,10 +6761,58 @@ function judgeSession(data, ids) {
   const [cw, ca] = D((d) => d.clutch);
   if (ca >= 2) fact("clutch", cw >= 2 ? 1.5 : 0, `You were the last one alive ${ca} times and won ${cw}.`);
   facts.sort((a, b) => Math.abs(b.z) - Math.abs(a.z));
-  return { mine, n, rating, pct, verdict, parts, better, worse, facts, baseline: others };
+  return { mine, n, rating, pct, verdict, parts, better, worse, facts, baseline: others, rank };
 }
 
 const SIZE_WORD = (z) => (Math.abs(z) >= 3 ? " (by a lot)" : Math.abs(z) >= 2 ? "" : " (slightly)");
+// A grade by the usual marks, for an average over n matches: averages swing less than single
+// matches, so the marks move toward the middle (by 1/sqrt(n), up to 4 matches' worth): holding a
+// number over a long session is rarer than hitting it once.
+function sessGrade(kind, v, n) {
+  const t = GRADES[kind];
+  if (!t || v == null) return "g2";
+  const f = 1 / Math.sqrt(Math.min(Math.max(n || 1, 1), 4)), mid = (t[1] + t[2]) / 2;
+  return `g${t.map((x) => mid + (x - mid) * f).filter((x) => v < x).length}`;
+}
+
+// How the session went objectively: against the usual marks for any player, not your own average.
+function objectiveHtml(p, data) {
+  if (!p || !p.rounds) return "";
+  const n = p.maps || 1;
+  const pct0 = (v) => `${Math.round(v)}%`;
+  const ok = p.c.opening_kills || 0, od = p.c.opening_deaths || 0;
+  const [pw, pl] = p.pistolDuels || [0, 0];
+  const cg = clutchGrade(p.c.clutches_won || [], p.c.clutches_attempted || [], data?.clutchRates || CLUTCH_AVG);
+  const stats = [
+    ["HLTV 3.0", f2(p.rating3), sessGrade("rating", p.rating3, n), 3],
+    ["K/D", f2(p.kd), sessGrade("kd", p.kd, n), 2],
+    ["ADR", f1(p.adr), sessGrade("adr", p.adr, n), 2],
+    ["Kills a round", f2(p.kr), sessGrade("kpr", p.kr, n), 1],
+    ["Swing", fmtSwing(p.swing), sessGrade("swing", p.swing, n), 1],
+    ["KAST", pct0(p.kast), sessGrade("kast", p.kast, n), 1],
+    ok + od >= 4 ? ["Opening duels", `${pct0((100 * ok) / (ok + od))} (${ok}-${od})`, sessGrade("open", (100 * ok) / (ok + od), n), 1] : null,
+    pw + pl >= 4 ? ["Pistol rounds", `${pct0((100 * pw) / (pw + pl))} (${pw}-${pl})`, sessGrade("duels", (100 * pw) / (pw + pl), n), 1] : null,
+    cg && cg.n >= 3 ? ["Clutches", `${cg.w}/${cg.n} (the average player: ${f1(cg.expected)})`, cg.g, 1] : null,
+  ].filter(Boolean);
+  const excellent = stats.filter((x) => x[2] === "g0"), good = stats.filter((x) => x[2] === "g1");
+  const rg = stats[0][2];
+  const tier = rg === "g0" && excellent.length >= Math.max(5, Math.ceil(stats.length * 0.75)) ? ["fire", "Pure domination."]
+    : rg === "g0" && excellent.length >= 4 ? ["fire", "You were on fire."]
+    : rg === "g0" || (rg === "g1" && excellent.length >= 3) ? ["great", "A great session."]
+    : rg === "g1" ? ["good", "A good session."]
+    : rg === "g2" ? ["even", "An average session."]
+    : ["rough", "A rough session."];
+  const order = { g0: 0, g1: 1, g2: 2, g3: 3, g4: 4 };
+  const chips = [...stats].sort((a, b) => order[a[2]] - order[b[2]] || b[3] - a[3]);
+  const over = n > 1 ? ` over ${n} matches (holding numbers across a whole session is much harder than in one match, so the marks allow for it)` : "";
+  const sub = excellent.length ? `${excellent.length} of your ${stats.length} main stats were excellent${good.length ? `, ${good.length} more good` : ""}, by the usual marks for any player${over}.`
+    : `By the usual marks for any player${over}, not your own average.`;
+  return `<div class="sv-obj ${tier[0]}"><div class="sv-obj-head"><span class="sv-obj-tag">Objectively</span><b>${tier[1]}</b></div>
+    <div class="sub">${sub}</div>
+    <div class="sv-obj-chips">${chips.map(([label, v, g]) => `<span class="sv-obj-chip ${g}"><span>${esc(label)}</span><b>${esc(v)}</b><i class="ps-grade ${g}">${RATE_GRADES[g]}</i></span>`).join("")}</div></div>`;
+}
+
+const ordinal = (n) => `${n}${["th", "st", "nd", "rd"][(n % 100 > 10 && n % 100 < 14) || n % 10 > 3 ? 0 : n % 10]}`;
 function verdictHtml(j) {
   if (!j) return `<div class="sv-box"><div class="sv-head">No demos for this session yet</div><div class="sub">Get the demos and Veloxify tells you how you played compared with your usual.</div></div>`;
   if (j.few) return `<div class="sv-box"><div class="sv-head">Not enough matches yet</div><div class="sub">After a few more matches with demos, Veloxify compares each session with your usual.</div></div>`;
@@ -6743,7 +6833,7 @@ function verdictHtml(j) {
   return `<div class="sv-box ${j.verdict}">
     <div class="sv-dot ${j.verdict}"></div>
     <div class="sv-body"><div class="sv-head">${head}</div>
-      <div class="sv-sub">HLTV 3.0 <b>${f2(r.v)}</b> against your usual ${f2(r.b)}, over ${j.n} match${j.n === 1 ? "" : "es"}${j.n < 3 ? " (one or two matches swing a lot)" : ""}.</div>
+      <div class="sv-sub">HLTV 3.0 <b>${f2(r.v)}</b> against your usual ${f2(r.b)}, over ${j.n} match${j.n === 1 ? "" : "es"}${j.n < 3 ? " (one or two matches swing a lot)" : ""}.${j.rank ? ` Your ${j.rank.pos === 1 ? "<b>best</b>" : `<b>${ordinal(j.rank.pos)} best</b>`} session of ${j.rank.of}${j.rank.minLen > 1 ? ` with ${j.rank.minLen}+ matches` : ""}.` : ""}</div>
       <div class="sv-parts">${parts.map((p) => `<div>${p}</div>`).join("")}</div>
       ${shown.length ? `<ul class="sv-facts">${shown.map((f) => `<li class="${f.z >= 1 ? "good" : f.z <= -1 ? "bad" : ""}">${f.text}</li>`).join("")}</ul>` : ""}
       ${tips.length ? `<div class="sv-tips">${tips.map((p) => `<div><b>Work on ${esc(p.words)}:</b> ${esc(SESS_TIPS[p.key])}</div>`).join("")}</div>` : ""}
@@ -6758,31 +6848,35 @@ const BASE_STATS = [["rating3", "HLTV 3.0", f2], ["kpr", "Kills / round", f2], [
 function baselineHtml(j, data) {
   if (!j || j.few) return "";
   const lower = (k) => !!data.bench[k]?.lower_is_better;
+  // One row: this session, your usual, the difference, and how good this session's number is.
+  const tr = (label, now, usual, diff, cls, grade = null, extra = "") => `<tr><td>${label}</td><td><b>${now}</b>${extra ? ` <small class="sub">${extra}</small>` : ""}${grade ? ` <i class="ps-grade ${grade}">${RATE_GRADES[grade]}</i>` : ""}</td><td>${usual}</td><td class="${cls}">${diff}</td></tr>`;
   const row = ([k, label, fmt]) => {
     const v = wmean(j.mine, k), b = wmean(j.baseline, k);
     if (v == null || b == null) return "";
-    const better = lower(k) ? v < b : v > b, rel = b ? Math.abs(v - b) / Math.abs(b) : 0;
-    return tile(label, fmt(b), fmt(v), rel < 0.03 ? "" : better ? "up" : "down", "", gradeOfStat(k, v));
+    const better = lower(k) ? v < b : v > b, rel = b ? (v - b) / Math.abs(b) : 0;
+    const diff = Math.abs(rel) < 0.005 ? "same" : `${rel > 0 ? "+" : "−"}${Math.abs(Math.round(rel * 100))}%`;
+    return tr(label, fmt(v), fmt(b), diff, Math.abs(rel) < 0.03 ? "" : better ? "up" : "down", gradeOfStat(k, v));
   };
-  const tile = (label, usual, now, cls, extra = "", grade = null) => `<div class="sv-tile"><span>${label}${grade ? ` <i class="ps-grade ${grade}">${RATE_GRADES[grade]}</i>` : ""}</span><b class="${cls}">${now}${extra ? ` <small>${extra}</small>` : ""}</b><small>usually ${usual}</small></div>`;
   // How good a value is: by the generally accepted marks where there are some, else against every
   // player-match in your lobbies.
   const STD = { rating3: "rating", kpr: "kpr", adr: "adr", kast: "kast", hs_pct: "hs", entry_success: "open" };
-  const gradeOfStat = (k, v) => (STD[k] ? `g${gradeOf(STD[k], v)}` : bandOf(standing(k, v)) || null);
+  const gradeOfStat = (k, v) => (STD[k] ? sessGrade(STD[k], v, j.n) : bandOf(standing(k, v)) || null);
   const duelRow = (label, get) => {
     const [w, l] = duelSum(j.mine, get), [bw, bl] = duelSum(j.baseline, get);
     if (w + l < 3 || bw + bl < 10) return "";
-    const p = w / (w + l), bp = bw / (bw + bl);
-    return tile(label, `${Math.round(100 * bp)}%`, `${Math.round(100 * p)}%`, Math.abs(p - bp) < 0.03 ? "" : p > bp ? "up" : "down", `${w}-${l}`);
+    const pnow = w / (w + l), bp = bw / (bw + bl), d = Math.round(100 * (pnow - bp));
+    return tr(label, `${Math.round(100 * pnow)}%`, `${Math.round(100 * bp)}%`, d ? `${d > 0 ? "+" : "−"}${Math.abs(d)} pts` : "same", Math.abs(pnow - bp) < 0.03 ? "" : pnow > bp ? "up" : "down", null, `${w}-${l}`);
   };
   const wins = j.mine.filter((r) => r.result === "win").length, bwins = j.baseline.filter((r) => r.result === "win").length;
-  return `<section class="panel sv-base"><div class="panel-head"><div class="h3">Your baseline</div><span class="grow"></span><span class="sub">This session (big number) against your usual over ${j.baseline.length} other matches</span></div>
-    <div class="sv-tiles">
-      ${tile("Matches won", `${Math.round((100 * bwins) / j.baseline.length)}%`, `${Math.round((100 * wins) / j.n)}%`, wins / j.n > bwins / j.baseline.length ? "up" : "down", `${wins}-${j.n - wins}`, j.n >= 3 ? `g${gradeOf("win", wins / j.n)}` : null)}
+  const wr = wins / j.n, bwr = bwins / j.baseline.length, wd = Math.round(100 * (wr - bwr));
+  return `<section class="panel sv-base"><div class="panel-head"><div class="h3">This session against your usual</div><span class="grow"></span><span class="sub">Your usual: your average over your other ${j.baseline.length} matches</span></div>
+    <table class="ins-table sv-cmp"><thead><tr><th></th><th>This session</th><th>Your usual</th><th>Difference</th></tr></thead><tbody>
+      ${tr("Matches won", `${Math.round(100 * wr)}%`, `${Math.round(100 * bwr)}%`, wd ? `${wd > 0 ? "+" : "−"}${Math.abs(wd)} pts` : "same", Math.abs(wd) < 3 ? "" : wd > 0 ? "up" : "down", j.n >= 3 ? sessGrade("win", wr, j.n) : null, `${wins}-${j.n - wins}`)}
       ${BASE_STATS.map(row).join("")}
       ${duelRow("Rifle duels won", (d) => d.by_weapon?.rifle)}${duelRow("AWP duels won", (d) => d.by_weapon?.awp)}${duelRow("Pistol duels won", (d) => d.by_weapon?.pistol)}
       ${duelRow("Afterplant duels won", (d) => d.afterplant)}${duelRow("Retake duels won", (d) => d.retake)}
-    </div></section>`;
+    </tbody></table>
+    <div class="note" style="padding:0 20px 14px;margin:0">The grade is for this session's number by the usual marks for any player (or, without one, against every player in your matches); the difference is against your own average.</div></section>`;
 }
 
 // ---- what we noticed: what goes with you playing better or worse ----
