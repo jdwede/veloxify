@@ -1671,3 +1671,27 @@ ul.ins-list { list-style: none; padding-left: 0; }
 .ps-buckets { grid-template-columns: repeat(auto-fill, minmax(420px, 1fr)); }
 .ps-sides td small { font-size: 11px; }
 .sv-tile span .ps-grade { font-style: normal; margin-left: 4px; font-size: 10px; padding: 1px 6px; }
+
+/* Playstyle: profile, roles, positions, maps, duel finder */
+.ps-profile { margin-bottom: 14px; }
+.ps-profile .sv-facts { padding: 0 20px 16px 38px; margin: 0; }
+.ps-roles-t, .ps-pos, .ps-maps { margin: 0 20px 14px; width: calc(100% - 40px); }
+.ps-roles-t td:not(:first-child), .ps-roles-t th:not(:first-child), .ps-pos td:not(:first-child), .ps-pos th:not(:first-child), .ps-maps td:not(:first-child), .ps-maps th:not(:first-child) { text-align: right; white-space: nowrap; }
+.ps-roles-t td small, .ps-pos td small, .ps-maps td small { font-size: 11px; }
+.ps-roles-t td .sub { font-size: 11px; white-space: normal; }
+.ps-roles-t tr.ps-group td { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; color: var(--faint); padding-top: 12px; }
+.ps-roles-t tr.good td:first-child b, .ps-pos tr.good td:first-child b, .ps-maps tr.good td:first-child b { color: var(--win); }
+.ps-roles-t tr.bad td:first-child b, .ps-pos tr.bad td:first-child b, .ps-maps tr.bad td:first-child b { color: var(--loss); }
+.ps-pos-row { cursor: pointer; }
+.ps-pos-row:hover td { background: var(--row-hi); }
+.ps-pos-row.on td { background: var(--accent-soft); }
+.ps-map-link { display: inline-flex; align-items: center; gap: 8px; color: var(--text); text-decoration: none; }
+.ps-map-link img, .ps-map-link .noicon { width: 20px; height: 20px; }
+.ps-def { padding: 0 20px 12px; font-size: 13px; color: var(--muted); line-height: 1.5; }
+.ps-caught { margin: 0 20px 12px; padding: 10px 12px; background: var(--row); border-radius: var(--radius-sm); border-left: 3px solid var(--line-2); font-size: 13px; display: flex; flex-direction: column; gap: 4px; }
+.ps-caught.bad { border-left-color: var(--loss); }
+.ps-caught.good { border-left-color: var(--win); }
+.ps-find { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 4px 20px 12px; }
+.ps-find .h3 { margin-right: 4px; }
+.ps-find select { background: var(--row); color: var(--text); border: 1px solid var(--line-2); border-radius: var(--radius-sm); padding: 5px 8px; font: inherit; font-size: 13px; }
+.ps-found { padding-bottom: 6px; }

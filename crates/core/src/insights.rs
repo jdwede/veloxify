@@ -16,7 +16,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 /// Bumped whenever what's in an insight file changes, so they're rebuilt (from the saved files).
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 6;
 
 /// Paths keep a point every this many replay frames (8 a second): twice a second.
 const PATH_EVERY: usize = 4;
@@ -86,8 +86,15 @@ pub struct IRound {
     /// `[time, attacker, victim, weapon, flags, ax, ay, vx, vy, height, distance, attacker
     /// speed, victim speed, victim's weapon]`; flags: 1 headshot, 2 opening kill, 4 a trade,
     /// 8 wallbang, 16 through smoke, 32 attacker in the air, 64 attacker blind, 128 no-scope;
-    /// height is the attacker's above the victim's.
-    pub kills: Vec<[i32; 14]>,
+    /// height is the attacker's above the victim's. Then the fight, which started with the first
+    /// hit between the two (in the 3 s before the kill; the kill itself when it was the only one):
+    /// 14, 15 how far (units) the attacker and the victim got from where they were in the half
+    /// second before it (who peeked); 16, 17 how long (tenths) each was flashed from 1 s before it; 18, 19 their health
+    /// as it started; 20, 21 utility on each before it ([`UTIL_MOLLY`] ...); 22 who hit first (0
+    /// the attacker, 1 the victim); 23 how far (degrees) the victim's aim was from the attacker as
+    /// it started, at best (over 60: caught off guard). Version 2 files have the first
+    /// 14 only.
+    pub kills: Vec<Vec<i32>>,
     /// `[time, attacker, victim, damage, weapon]` (-1 attacker = the world).
     pub hurts: Vec<[i32; 5]>,
     /// `[time, thrower, kind, from x, from y, to x, to y, tick]`; kind 0 smoke, 1 molotov,
@@ -101,6 +108,47 @@ pub struct IRound {
     /// degrees) in their first 2 seconds there.
     #[serde(default)]
     pub entries: Vec<[i32; 6]>,
+    /// Each player's main gun this round (index into `weapons`, -1 = none): the one they held most,
+    /// a pistol only when they had nothing else.
+    #[serde(default)]
+    pub prim: Vec<i32>,
+}
+
+/// Utility on a player before a fight: an enemy molotov landed by them (within 7 s before).
+pub const UTIL_MOLLY: i32 = 1;
+/// They took HE or fire damage from an enemy (within 4 s before).
+pub const UTIL_NADE_DAMAGE: i32 = 2;
+/// Flashed by an enemy (half a second or more, from 1 s before the fight).
+pub const UTIL_FLASHED: i32 = 4;
+/// Flashed by a teammate.
+pub const UTIL_TEAM_FLASHED: i32 = 8;
+
+/// Who started a fight (a kill row): 1 the attacker peeked (moved into a still victim), 2 the
+/// victim peeked, 3 both were moving, 0 both were still; -1 unknown (an older file). Moving is
+/// getting [`PEEK_MOVED`] units or more from where they were in the half second before the first
+/// hit.
+pub fn peek_of(k: &[i32]) -> i32 {
+    if k.len() < FIGHT_LEN {
+        return -1;
+    }
+    match (k[14] >= PEEK_MOVED, k[15] >= PEEK_MOVED) {
+        (true, false) => 1,
+        (false, true) => 2,
+        (true, true) => 3,
+        (false, false) => 0,
+    }
+}
+
+/// A kill row's length with the fight.
+pub const FIGHT_LEN: usize = 24;
+/// Got this far (units) from where they were in the half second before a fight's first hit:
+/// peeking, not holding still (a rifle swing covers about 100 units in that time).
+pub const PEEK_MOVED: i32 = 45;
+
+/// The victim was looking elsewhere (their aim more than 60 degrees from the attacker) as the fight
+/// started: caught off guard, not a duel lost.
+pub fn caught_off_guard(k: &[i32]) -> bool {
+    k.len() >= FIGHT_LEN && k[23] > 60
 }
 
 /// Everything for one map: the pages load this.
@@ -297,6 +345,58 @@ pub fn build(entry: &MatchEntry, d: &MatchDetails, r: &Replay, me: &str) -> Opti
             (((x1 - x0) as f64).hypot((y1 - y0) as f64) * tick_rate / (2.0 * r.step as f64)).round() as i32
         };
         let frame_of = |t: f32| ((t as f64 * tick_rate / r.step as f64).round().max(0.0) as usize).min(frames.len().saturating_sub(1));
+        let live_ticks = dr.live_tick - rr.start;
+        let hurts: Vec<[i32; 5]> = rr
+            .hurts
+            .iter()
+            .map(|h| [(((h[0] - live_ticks) as f64 / tick_rate) * 10.0).round() as i32, h[1], h[2], h[3], h[4]])
+            .filter(|h| h[0] >= 0)
+            .collect();
+        // For the fights: flashes, molotovs and grenade damage this round.
+        let blinds: Vec<(i32, i32, i32, f32)> = d
+            .blinds
+            .iter()
+            .filter(|b| b.round == rr.number)
+            .map(|b| (pi(&b.player), pi(&b.by), (b.t * 10.0).round() as i32, b.secs))
+            .collect();
+        let mollies: Vec<(i32, i32, i32, i32)> = d
+            .grenades
+            .iter()
+            .filter(|g| g.round == rr.number && g.kind == "molotov")
+            .map(|g| ((g.t * 10.0).round() as i32, pi(&g.player), g.xy[0] as i32, g.xy[1] as i32))
+            .collect();
+        let nade_weapon = |w: i32| usize::try_from(w).ok().and_then(|i| r.weapons.get(i)).is_some_and(|n| matches!(n.as_str(), "hegrenade" | "inferno" | "molotov" | "incgrenade"));
+        let enemies = |p: usize, q: i32| {
+            let b = sides.as_bytes();
+            usize::try_from(q).ok().and_then(|q| b.get(q)).is_some_and(|&s| s != b'-' && b[p] != b'-' && s != b[p])
+        };
+        let util = |p: usize, t0: i32, kt: i32| -> i32 {
+            let mut bits = 0;
+            for &(t, by, x, y) in &mollies {
+                if t >= t0 - 70 && t <= kt && enemies(p, by) {
+                    let fg = frame_of(t as f32 / 10.0);
+                    if alive(fg, p) && ((at(fg, p, 0) - x) as f64).hypot((at(fg, p, 1) - y) as f64) < 260.0 {
+                        bits |= UTIL_MOLLY;
+                    }
+                }
+            }
+            if hurts.iter().any(|h| h[2] == p as i32 && h[0] >= t0 - 40 && h[0] <= kt && enemies(p, h[1]) && nade_weapon(h[4])) {
+                bits |= UTIL_NADE_DAMAGE;
+            }
+            for &(who, by, t, secs) in &blinds {
+                let end = t + (secs * 10.0).round() as i32;
+                if who == p as i32 && secs >= 0.5 && t <= kt && end >= t0 - 10 && by != who {
+                    bits |= if enemies(p, by) { UTIL_FLASHED } else { UTIL_TEAM_FLASHED };
+                }
+            }
+            bits
+        };
+        // How far (degrees) p's aim is from q.
+        let off = |fr: usize, p: usize, q: usize| -> i32 {
+            let (x, y, tx, ty) = (at(fr, p, 0), at(fr, p, 1), at(fr, q, 0), at(fr, q, 1));
+            let want = ((ty - y) as f64).atan2((tx - x) as f64).to_degrees();
+            ((want - at(fr, p, 2) as f64 + 540.0).rem_euclid(360.0) - 180.0).abs().round() as i32
+        };
         let mut kills = vec![];
         for k in d.kills.iter().filter(|k| k.round == rr.number && !k.team_kill) {
             let row = (|| {
@@ -322,7 +422,47 @@ pub fn build(entry: &MatchEntry, d: &MatchDetails, r: &Replay, me: &str) -> Opti
                     | (k.smoke as i32) << 4
                     | (k.blind as i32) << 6
                     | (k.noscope as i32) << 7;
-                Some([(k.t * 10.0).round() as i32, a, v, -1, flags, ax, ay, vx, vy, height, dist, aspd, speed(f.saturating_sub(1), v as usize), at(f.saturating_sub(1), v as usize, 4)])
+                let base = [(k.t * 10.0).round() as i32, a, v, -1, flags, ax, ay, vx, vy, height, dist, aspd, speed(f.saturating_sub(1), v as usize), at(f.saturating_sub(1), v as usize, 4)];
+                // The fight: from the first hit between the two (in the 3 s before the kill).
+                let mut fight = [0, 0, 0, 0, 0, 0, 0, 0, -1, 180];
+                if a >= 0 {
+                    let (au, vu) = (a as usize, v as usize);
+                    let kt = base[0];
+                    let first = hurts
+                        .iter()
+                        .filter(|h| h[0] >= kt - 30 && h[0] <= kt && ((h[1] == a && h[2] == v) || (h[1] == v && h[2] == a)) && !nade_weapon(h[4]))
+                        .min_by_key(|h| h[0]);
+                    let t0 = first.map_or(kt, |h| h[0]);
+                    let f0 = frame_of(t0 as f32 / 10.0);
+                    // How far each got from where they were, from 0.625 to 0.125 s before it (a
+                    // swing out of cover, not strafing back and forth while holding).
+                    let moved = |p: usize| -> i32 {
+                        let to = f0.saturating_sub(1);
+                        let Some(from) = (f0.saturating_sub(5)..=to).find(|&g| alive(g, p)) else { return 0 };
+                        if !alive(to, p) {
+                            return 0;
+                        }
+                        ((at(to, p, 0) - at(from, p, 0)) as f64).hypot((at(to, p, 1) - at(from, p, 1)) as f64).round() as i32
+                    };
+                    let blind = |p: i32| blinds.iter().filter(|b| b.0 == p).map(|&(_, _, t, secs)| ((t + (secs * 10.0).round() as i32).min(kt) - t.max(t0 - 10)).max(0)).max().unwrap_or(0);
+                    fight[0] = moved(au);
+                    fight[1] = moved(vu);
+                    fight[2] = blind(a);
+                    fight[3] = blind(v);
+                    fight[4] = at(f0.saturating_sub(1), au, 3);
+                    fight[5] = at(f0.saturating_sub(1), vu, 3);
+                    fight[6] = util(au, t0, kt);
+                    fight[7] = util(vu, t0, kt);
+                    fight[8] = first.map_or(0, |h| if h[1] == a { 0 } else { 1 });
+                    // Where the victim was looking as it started (from half a second before to a
+                    // quarter second after; the closest they got to looking at the attacker).
+                    fight[9] = (f0.saturating_sub(4)..=(f0 + 2).min(f.saturating_sub(1)).max(f0.saturating_sub(4)))
+                        .filter(|&g| alive(g, vu))
+                        .map(|g| off(g, vu, au))
+                        .min()
+                        .unwrap_or(180);
+                }
+                Some([&base[..], &fight[..]].concat())
             })();
             if let Some(mut row) = row {
                 let name = weapon_file(&k.weapon);
@@ -336,13 +476,6 @@ pub fn build(entry: &MatchEntry, d: &MatchDetails, r: &Replay, me: &str) -> Opti
                 kills.push(row);
             }
         }
-        let live_ticks = dr.live_tick - rr.start;
-        let hurts = rr
-            .hurts
-            .iter()
-            .map(|h| [(((h[0] - live_ticks) as f64 / tick_rate) * 10.0).round() as i32, h[1], h[2], h[3], h[4]])
-            .filter(|h| h[0] >= 0)
-            .collect();
         let nades = d
             .throws
             .iter()
@@ -410,6 +543,21 @@ pub fn build(entry: &MatchEntry, d: &MatchDetails, r: &Replay, me: &str) -> Opti
             let killer = kills.iter().find(|k| k[2] == e as i32 && k[0] >= t_entry - 5 && k[0] <= t_entry + 30).map_or(-1, |k| k[1]);
             entries.push([site, e as i32, t_entry, killer, checked, present]);
         }
+        // Each player's main gun: the one held most, a pistol only when they had nothing else.
+        let gun_class = |w: i32| usize::try_from(w).ok().and_then(|i| r.weapons.get(i)).map_or("other", |n| weapon_class(n));
+        let prim: Vec<i32> = (0..np)
+            .map(|p| {
+                let mut held: HashMap<i32, u32> = HashMap::new();
+                for f in (0..frames.len()).filter(|&f| alive(f, p)) {
+                    let w = at(f, p, 4);
+                    if gun_class(w) != "other" {
+                        *held.entry(w).or_default() += 1;
+                    }
+                }
+                let best = |pistol: bool| held.iter().filter(|(&w, &n)| (gun_class(w) == "pistol") == pistol && n >= 8).max_by_key(|(&w, &n)| (n, -w)).map(|(&w, _)| w);
+                best(false).or_else(|| best(true)).unwrap_or(-1)
+            })
+            .collect();
         // When the bomb was defused: the round ends then.
         let defuse = dr.defused.then(|| (((dr.end_tick - dr.live_tick) as f64 / tick_rate) * 10.0).round() as i32);
         rounds.push(IRound {
@@ -430,6 +578,7 @@ pub fn build(entry: &MatchEntry, d: &MatchDetails, r: &Replay, me: &str) -> Opti
             nades,
             jumps,
             entries,
+            prim,
         });
     }
     Some(MatchInsight {
@@ -486,6 +635,9 @@ fn current(root: &Path, id: &str) -> bool {
     details::leading_version(&path(root, id)).is_some_and(|v| v >= VERSION)
 }
 
+/// The oldest insight file the pages can still show (until the background re-read rebuilds it).
+const USABLE_VERSION: u32 = 2;
+
 /// What the pages list: each map's matches and rounds (and how many matches wait for the
 /// background re-read).
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -498,7 +650,8 @@ pub struct InsightsIndex {
 pub struct MapCount {
     pub matches: usize,
     pub rounds: usize,
-    /// Matches on this map not in it yet (their replay is from before heights and callouts).
+    /// Matches on this map not in it yet (their replay is from before heights and callouts), or
+    /// in it from an older read until the background re-read rebuilds them.
     pub waiting: usize,
 }
 
@@ -525,6 +678,17 @@ pub struct MyDuels {
     pub awp_kills: u32,
     pub awp_opening_kills: u32,
     pub multikill_rounds: u32,
+    /// Fights you started by moving into a still enemy, and ones they started moving into you.
+    #[serde(default)]
+    pub peeked: [u32; 2],
+    #[serde(default)]
+    pub held: [u32; 2],
+    /// Deaths to someone you never had on screen.
+    #[serde(default)]
+    pub caught: u32,
+    /// Fights you were in flashed by an enemy.
+    #[serde(default)]
+    pub flashed: [u32; 2],
 }
 
 pub fn weapon_class(w: &str) -> &'static str {
@@ -558,6 +722,19 @@ fn my_duels(ins: &MatchInsight) -> Option<MyDuels> {
                 continue;
             }
             let i = if won { 0 } else { 1 };
+            if caught_off_guard(k) {
+                d.caught += lost as u32;
+            } else {
+                let peek = peek_of(k);
+                if peek == if won { 1 } else { 2 } {
+                    d.peeked[i] += 1;
+                } else if peek == if won { 2 } else { 1 } {
+                    d.held[i] += 1;
+                }
+            }
+            if k.len() >= FIGHT_LEN && (if won { k[20] } else { k[21] }) & UTIL_FLASHED != 0 {
+                d.flashed[i] += 1;
+            }
             d.by_weapon.entry(weapon(if won { k[3] } else { k[13] }).to_string()).or_default()[i] += 1;
             if k[4] & 2 != 0 {
                 d.opening[i] += 1;
@@ -621,11 +798,16 @@ fn write_maps(root: &Path, index: &Index) -> Result<()> {
         if by_map.get(&m.map).is_some_and(|o| o.matches.len() >= MAX_MATCHES_PER_MAP) {
             continue;
         }
-        let ins: Option<MatchInsight> = current(root, &m.id).then(|| std::fs::read_to_string(path(root, &m.id)).ok().and_then(|t| serde_json::from_str(&t).ok())).flatten();
+        let version = details::leading_version(&path(root, &m.id)).unwrap_or(0);
+        let ins: Option<MatchInsight> = (version >= USABLE_VERSION).then(|| std::fs::read_to_string(path(root, &m.id)).ok().and_then(|t| serde_json::from_str(&t).ok())).flatten();
         let Some(ins) = ins else {
             counts.entry(m.map.clone()).or_default().waiting += 1;
             continue;
         };
+        if version < VERSION {
+            // Shown as it is until it's rebuilt.
+            counts.entry(m.map.clone()).or_default().waiting += 1;
+        }
         if let Some(d) = my_duels(&ins) {
             mine.insert(ins.id.clone(), d);
         }
@@ -663,6 +845,9 @@ fn write_maps(root: &Path, index: &Index) -> Result<()> {
             }
             for h in r.hurts.iter_mut() {
                 h[4] = wp(h[4]);
+            }
+            for w in r.prim.iter_mut() {
+                *w = wp(*w);
             }
             out.rounds.push(MapRound { m: mi, round: r });
         }

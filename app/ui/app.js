@@ -3903,7 +3903,7 @@ function insPage(view, D, L, map, maps, waiting) {
   const nMatches = new Set(base.map((r) => r.m)).size;
   view.innerHTML = `
     <div class="ins-head"><div><div class="h1">Match insights</div>
-      <div class="sub">${esc(mapName(map))}: ${base.length} ${SIDE_WORD[S]}-side round${base.length === 1 ? "" : "s"} from ${nMatches} match${nMatches === 1 ? "" : "es"}${waiting ? ` · ${waiting} more ${esc(mapName(map))} match${waiting === 1 ? "" : "es"} on the way (being re-read in the background)` : ""}</div></div></div>
+      <div class="sub">${esc(mapName(map))}: ${base.length} ${SIDE_WORD[S]}-side round${base.length === 1 ? "" : "s"} from ${nMatches} match${nMatches === 1 ? "" : "es"}${waiting ? ` · ${waiting} match${waiting === 1 ? "" : "es"} being re-read in the background` : ""}</div></div></div>
     <div class="ins-maps">${maps.map(([m, c]) => `<a class="ins-map ${m === map ? "on" : ""}" href="#/insights/${esc(m)}">${mapIcon(m)}<b>${esc(mapName(m))}</b><span class="sub">${c.matches}</span></a>`).join("")}</div>
     <div class="ln-bar ins-filters">
       <div class="seg" title="Whose side to look at">${segBtns("side", [["T", "T side"], ["C", "CT side"]], S)}</div>
@@ -4852,12 +4852,13 @@ function condTextShort(ctx, c) {
 
 // ---- playstyle ----------------------------------------------------------------------------------------
 
-// Your own tendencies from every round you played (the same insight files as Match insights):
-// the roles you take, T versus CT, the duels you win and lose, and your best and worst spots.
-const ps = { map: "all", side: "all", src: "all", bucket: null, place: null };
-try { Object.assign(ps, JSON.parse(localStorage.getItem("veloxify.playstyle") || "{}"), { bucket: null, place: null }); } catch (e) { /* defaults */ }
-const savePs = () => { try { localStorage.setItem("veloxify.playstyle", JSON.stringify({ map: ps.map, side: ps.side, src: ps.src })); } catch (e) { /* not saved */ } };
-
+// Your own tendencies from every round you played (the same insight files as Match insights): who
+// you are as a player (your roles, rifler or AWPer, anchor or rotator) and how well you play each,
+// your best and worst maps and positions, staying alive, and your duels: how they started, with
+// what, and what came before. Everything is compared with the average player in the same rounds.
+const ps = { map: "all", side: "all", src: "all", bucket: null, place: null, pos: null, find: {}, finding: false };
+try { Object.assign(ps, JSON.parse(localStorage.getItem("veloxify.playstyle") || "{}"), { bucket: null, place: null, pos: null, finding: false }); } catch (e) { /* defaults */ }
+const savePs = () => { try { localStorage.setItem("veloxify.playstyle", JSON.stringify({ map: ps.map, side: ps.side, src: ps.src, find: ps.find })); } catch (e) { /* not saved */ } };
 const WCLASS = (w) => {
   if (!w) return "other";
   if (["ak47", "m4a1", "m4a1_silencer", "famas", "galilar", "aug", "sg556"].includes(w)) return "rifle";
@@ -4869,10 +4870,15 @@ const WCLASS = (w) => {
   return "other";
 };
 const WCLASS_NAME = { rifle: "Rifles", awp: "AWP", scout: "Scout", pistol: "Pistols", smg: "SMGs", heavy: "Shotguns and machine guns", other: "Other" };
+// Utility on a player before a fight (a kill row's 22 and 23).
+const UTIL = { molly: 1, nadeDmg: 2, flashed: 4, teamFlashed: 8 };
+const SIDE_NAME = { T: "T", C: "CT" };
 
-// Your duels: every kill you got (won) and every death to an enemy (lost), with what they were.
-// Every duel in these rounds from both players' side (the winner's and the loser's), so yours can
+// Every fight in these rounds from both players' side (the winner's and the loser's), so yours can
 // be compared with the average player's: `who` is "me", "mate" or "opp" (relative to you that round).
+// A duel is a fight you both saw coming: the one who died was looking their way as it started. Dying
+// while looking elsewhere is being caught off guard, not a duel lost (`duel` false). Matches read before
+// Veloxify knew who saw whom have no `fight` and count every kill and death.
 function allDuels(sets) {
   const out = [];
   for (const { D, rounds } of sets) for (const r of rounds) {
@@ -4882,25 +4888,36 @@ function allDuels(sets) {
     for (const k of r.kills) {
       const a = k[1], v = k[2];
       if (a < 0 || v < 0 || r.sides[a] === r.sides[v]) continue;
+      const F = k.length >= 24;
+      // The one who died was looking elsewhere (60+ degrees off) as it started.
+      const offGuard = F && k[23] > 60;
       for (const won of [true, false]) {
         const p = won ? a : v, side = r.sides[p];
+        const [mi, ti] = won ? [0, 1] : [1, 0];
         const myWeapon = D.weapons[won ? k[3] : k[13]] || "";
         const myPos = won ? [k[5], k[6]] : [k[7], k[8]];
+        // Who peeked: got 45+ units from where they were in the half second before the first hit.
+        const myMove = F && k[14 + mi] >= 45, theirMove = F && k[14 + ti] >= 45;
         out.push({
           D, r, k, p, won, side, who: p === me ? "me" : side === mySide ? "mate" : "opp", t: k[0], dist: k[10],
           myWeapon, theirWeapon: D.weapons[won ? k[13] : k[3]] || "", wclass: WCLASS(myWeapon), height: won ? k[9] : -k[9],
           mySpeed: won ? k[11] : k[12], theirSpeed: won ? k[12] : k[11], hs: won && !!(k[4] & 1), opening: !!(k[4] & 2), trade: !!(k[4] & 4),
           smoke: !!(k[4] & 16), myPos, place: p === me ? D.placeAt(myPos[0], myPos[1]) : -1, afterPlant: !!r.plant && k[0] > r.plant[0],
           alone: r.team[side].every((q) => q === p || (r.death[q] >= 0 && r.death[q] <= k[0])),
+          kind: r.kind?.[side === "T" ? 0 : 1] || "",
+          fight: F, duel: !offGuard, offGuard,
+          start: !F ? null : myMove && !theirMove ? "peeked" : !myMove && theirMove ? "held" : myMove ? "both" : "still",
+          myUtil: F ? k[20 + mi] : 0, theirUtil: F ? k[20 + ti] : 0,
+          myHp: F ? k[18 + mi] : 0, theirHp: F ? k[18 + ti] : 0,
+          firstHit: !F ? null : (k[22] === 0) === won ? "me" : "them",
         });
       }
     }
   }
   return out;
 }
-const myDuels = (sets) => allDuels(sets).filter((d) => d.who === "me");
 
-// A win rate against the average player's: Great .. Poor (needs enough duels to say).
+// A win rate against the average player's: Excellent .. Poor (needs enough duels to say).
 const RATE_GRADES = { g0: "Excellent", g1: "Good", g2: "Average", g3: "Below average", g4: "Poor" };
 // `standard` (a GRADES key) grades by the generally accepted marks; otherwise by the average player
 // in your matches (and only when the difference is more than chance).
@@ -4918,33 +4935,213 @@ function gradeRate(w, n, avg, standard = null) {
   const g = diff >= 0.08 && z >= 2 ? "g0" : diff >= 0.03 && z >= 1 ? "g1" : diff <= -0.08 && z <= -2 ? "g4" : diff <= -0.03 && z <= -1 ? "g3" : "g2";
   return { g, word: RATE_GRADES[g], z };
 }
+// A number against the average player's in the same role or spot (a rating: 15% better is
+// excellent, 5% good). Needs `min` rounds of yours to say.
+function gradeVs(v, avg, n, min = 12, lowerBetter = false) {
+  if (v == null || avg == null || !avg || n < min) return null;
+  const rel = lowerBetter ? avg / Math.max(v, 1e-6) - 1 : v / avg - 1;
+  const g = rel >= 0.15 ? "g0" : rel >= 0.05 ? "g1" : rel > -0.05 ? "g2" : rel > -0.15 ? "g3" : "g4";
+  return { g, word: RATE_GRADES[g], rel };
+}
+const gradeChip = (g) => (g ? `<span class="ps-grade ${g.g}">${g.word}</span>` : `<span class="ps-grade na" title="Not enough rounds yet to say">–</span>`);
+const isGood = (g) => g && (g.g === "g0" || g.g === "g1");
+const isBad = (g) => g && (g.g === "g3" || g.g === "g4");
 
-// Duel buckets: what kind of fight it was. Each has a test and a tip for when you lose them.
-const DUEL_BUCKETS = [
-  ["close", "Close range", "under 600 units", (d) => d.dist > 0 && d.dist < 600, "Up close, crosshair placement at head height and not over-peeking win fights. Try holding tighter angles so they come to you."],
-  ["mid", "Mid range", "600 to 1,500 units", (d) => d.dist >= 600 && d.dist < 1500, "At mid range, stop fully before you shoot (counter-strafe) and tap or burst instead of spraying."],
-  ["long", "Long range", "1,500+ units", (d) => d.dist >= 1500, "At long range, tap the head with a rifle and don't move while shooting. Avoid long fights with SMGs and pistols."],
-  ["rifle", "With a rifle", "AK, M4, FAMAS, Galil, AUG, SG", (d) => d.wclass === "rifle", "Rifle duels: work on first-bullet accuracy and the first 5-10 bullets of the spray (Practice tab: recoil maps)."],
-  ["awp", "With the AWP", "", (d) => d.wclass === "awp", "AWP: hold one angle without moving the crosshair, and reposition after every shot."],
-  ["pistol", "With a pistol", "", (d) => d.wclass === "pistol", "Pistol duels: one or two taps at the head beat spraying. Move between shots, stop to shoot."],
-  ["smg", "With an SMG", "", (d) => d.wclass === "smg", "SMGs win up close and on the move; avoid long angles with them."],
-  ["moving_target", "Moving enemies", "they were running", (d) => d.theirSpeed > 130, "Moving targets: lead slightly and keep the crosshair at head height as they cross, instead of flicking after them."],
-  ["still_target", "Enemies holding still", "they were standing", (d) => d.theirSpeed <= 30, "Against players holding an angle, use utility or jiggle-peek for info rather than wide-swinging into them."],
-  ["moving_me", "While you were moving", "you were running", (d) => d.mySpeed > 130, "You shot while moving: counter-strafe (tap the opposite key) so you're still when you fire."],
-  ["above", "You above them", "you had height", (d) => d.height > 64, ""],
-  ["below", "You below them", "they had height", (d) => d.height < -64, "When enemies are above you, pre-aim higher and use utility to take the high ground away."],
-  ["opening", "Opening duels", "the round's first kill", (d) => d.opening, "Opening duels: take them with a flash or a teammate ready to trade; don't dry-peek alone."],
-  ["afterplant", "After the plant", "", (d) => d.afterPlant && d.side === "T", "Afterplants: play crossfires on the bomb with a teammate and use time; you don't need to peek."],
-  ["retake", "Retakes", "", (d) => d.afterPlant && d.side === "C", "Retakes: wait for teammates and use utility together instead of going in one by one."],
-  ["clutch", "Last one alive", "", (d) => d.alone, "In clutches, take one fight at a time and use sound; isolate duels instead of being seen by two."],
+// HLTV Rating 1.0 from rounds (kills, survival and multi-kills; 1.00 is average). Unlike a whole
+// match's rating it can be split by side, position and role.
+function rating1(recs) {
+  const n = recs.length;
+  if (!n) return null;
+  const k = sum(recs.map((x) => x.k)), d = recs.filter((x) => x.died).length, mk = sum(recs.map((x) => Math.min(5, x.k) ** 2));
+  return (k / n / 0.679 + (0.7 * (n - d)) / n / 0.317 + mk / n / 1.277) / 2.7;
+}
+function recStats(recs) {
+  const n = recs.length;
+  if (!n) return { n: 0, rating: null };
+  const deaths = recs.filter((x) => x.died), ops = recs.filter((x) => x.op);
+  return {
+    n, rating: rating1(recs), kpr: sum(recs.map((x) => x.k)) / n, adr: sum(recs.map((x) => x.dmg)) / n,
+    surv: 1 - deaths.length / n, win: recs.filter((x) => x.win).length / n,
+    first: recs.filter((x) => x.first).length / n, untraded: deaths.filter((x) => !x.traded).length / n,
+    alive: sum(recs.map((x) => x.dt ?? x.r.end)) / n / 10,
+    open: ops.length ? ops.filter((x) => x.op > 0).length / ops.length : null, opens: ops.length,
+  };
+}
+
+// A CT's round: anchor (stayed on the site they held at 1:30 until 1:05, or until they died), rotator
+// (went to the other site by then) or mid (in the middle of the map at 1:30).
+function ctRole(D, r, p) {
+  const reg = (t) => { const q = posAt(D, r, p, t); return q ? regionOf(D, q[0], q[1]) : null; };
+  const a = reg(250);
+  if (!a) return null;
+  if (a === "Mid") return "mid";
+  for (let t = 300; t <= 650; t += 25) { const b = reg(t); if (!b) break; if (b !== a && b !== "Mid") return "rotator"; }
+  return "anchor";
+}
+// Where a player played the round: the callout they spent the most time in (CT from 1:45 to 1:10,
+// T from 1:40 until the plant or 0:55), until they died.
+function psPosition(r, p, S) {
+  const a = r.areas[p];
+  if (!a || !a.length) return -1;
+  const from = S === "C" ? 100 : 150;
+  let to = S === "C" ? 450 : 600;
+  if (r.death[p] >= 0) to = Math.min(to, r.death[p]);
+  if (S === "T" && r.plant) to = Math.min(to, r.plant[0]);
+  if (to - from < 30) return placeAt(r, p, Math.max(0, to - 5));
+  const time = new Map();
+  for (let i = 0; i < a.length; i += 2) {
+    const s = Math.max(a[i + 1], from), e = Math.min(i + 3 < a.length ? a[i + 3] : to, to);
+    if (e > s && a[i] >= 0) time.set(a[i], (time.get(a[i]) || 0) + e - s);
+  }
+  let best = -1, most = 0;
+  for (const [pl, t] of time) if (t > most) { most = t; best = pl; }
+  return best;
+}
+
+// Every player's round (yours and everyone else's in the same rounds): what they did, where they
+// played and in what role, so you can be compared with the average player in the same spot or role.
+function psRecords(sets) {
+  const out = [];
+  for (const set of sets) {
+    const { D } = set, ctx = { D };
+    const entries = new Map(), lurkers = new Map();
+    for (const e of siteEntries(ctx, set.rounds)) { const m = entries.get(e.r) || new Map(); if (!m.has(e.p)) m.set(e.p, e); entries.set(e.r, m); }
+    for (const l of lurks(ctx, set.rounds)) { const s = lurkers.get(l.r) || new Set(); s.add(l.p); lurkers.set(l.r, s); }
+    for (const r of set.rounds) {
+      const deathOf = (p) => (r.death[p] >= 0 ? r.death[p] : 1e9);
+      const fk = r.firstKill && r.firstKill[1] >= 0 ? r.firstKill : null;
+      for (const S of ["T", "C"]) {
+        const team = r.team[S];
+        if (!team.length) continue;
+        const first = team.reduce((a, b) => (deathOf(b) < deathOf(a) ? b : a));
+        for (const p of team) {
+          const died = r.death[p] >= 0;
+          const death = r.kills.find((k) => k[2] === p);
+          let role = null;
+          if (S === "T") {
+            if (entries.get(r)?.has(p)) role = "entry";
+            else if (lurkers.get(r)?.has(p)) role = "lurk";
+            else if (r.nades.filter((n) => n[1] === p && (n[2] === 0 || n[2] === 2) && (!r.plant || n[0] < r.plant[0])).length >= 2) role = "support";
+          } else role = ctRole(D, r, p);
+          out.push({
+            set, r, p, S, me: p === r.match.me, role, died, dt: died ? r.death[p] : null, first: died && first === p, win: r.win === S,
+            k: r.kills.filter((k) => k[1] === p && k[2] >= 0 && r.sides[k[2]] !== S).length,
+            // Traded: whoever killed them died within 5 s.
+            traded: !!death && death[1] >= 0 && r.kills.some((k) => k[2] === death[1] && k[0] >= death[0] && k[0] <= death[0] + 50),
+            dmg: sum(r.hurts.filter((h) => h[1] === p && h[2] >= 0 && r.sides[h[2]] !== S).map((h) => h[3])),
+            op: fk ? (fk[1] === p ? 1 : fk[2] === p ? -1 : 0) : 0,
+            pos: psPosition(r, p, S), gun: r.prim && r.prim[p] >= 0 ? WCLASS(D.weapons[r.prim[p]]) : null,
+          });
+        }
+      }
+    }
+  }
+  return out;
+}
+
+// Roles: how often you play each (against the average player) and how well (your rating in those
+// rounds against the average player's in the same role).
+const ROLE_DEFS = [
+  ["entry", "T", "Entry fragger", "First T into the site", (x) => x.role === "entry"],
+  ["lurk", "T", "Lurker", "Alone, far from your team, in the first minute", (x) => x.role === "lurk"],
+  ["support", "T", "Support", "Two or more smokes or flashes before the plant (not the entry or a lurker)", (x) => x.role === "support"],
+  ["anchor", "C", "Anchor", "Stayed on the site you held at 1:30 until 1:05 (or until you died)", (x) => x.role === "anchor"],
+  ["rotator", "C", "Rotator", "Went from one site to the other by 1:05", (x) => x.role === "rotator"],
+  ["mid", "C", "Mid / aggressive CT", "In the middle of the map at 1:30", (x) => x.role === "mid"],
+  ["rifle", "", "Rifler", "Rounds you played with a rifle", (x) => x.gun === "rifle"],
+  ["awp", "", "AWPer", "Rounds you played with the AWP", (x) => x.gun === "awp"],
 ];
+const ROLE_NOUN = { entry: "entry fragger", lurk: "lurker", support: "support player", anchor: "anchor", rotator: "rotator", mid: "mid CT", rifle: "rifler", awp: "AWPer" };
+const ROLE_LIKE = { entry: "an entry fragger", lurk: "a lurker", support: "a support player", anchor: "an anchor", rotator: "a rotator", mid: "an aggressive mid CT", rifle: "a rifler", awp: "an AWPer" };
+function psRoleStats(recs) {
+  return ROLE_DEFS.map(([key, side, name, how, test]) => {
+    const pool = recs.filter((x) => !side || x.S === side);
+    const mineAll = pool.filter((x) => x.me), othersAll = pool.filter((x) => !x.me);
+    const mine = mineAll.filter(test), others = othersAll.filter(test);
+    const s = recStats(mine), a = recStats(others);
+    const share = mineAll.length ? mine.length / mineAll.length : 0, avgShare = othersAll.length ? others.length / othersAll.length : 0;
+    return { key, side, name, how, s, a, share, avgShare, often: avgShare ? share / avgShare : 0, grade: gradeVs(s.rating, a.rating, s.n, 15), mine };
+  });
+}
+
+// Your maps: rating (these filters), rounds won, and whole matches won.
+function psMaps(recs, sets) {
+  return sets.map((set) => {
+    const mine = recs.filter((x) => x.me && x.set === set);
+    const s = recStats(mine);
+    const ids = new Set(mine.map((x) => x.r.match.id));
+    const rows = (ps.sdata?.rows || []).filter((row) => ids.has(row.id));
+    return { set, map: set.map, s, matches: ids.size, w: rows.filter((row) => row.result === "win").length, l: rows.filter((row) => row.result === "loss").length,
+      grade: s.n >= 40 ? ((g) => ({ g, word: RATE_GRADES[g] }))(`g${gradeOf("rating", s.rating)}`) : null };
+  }).filter((m) => m.s.n >= 20).sort((a, b) => b.s.rating - a.s.rating);
+}
+
+// Your positions on one map and side: how you do at each against the average player there.
+function psPositions(recs, set, S) {
+  const mine = recs.filter((x) => x.me && x.set === set && x.S === S);
+  const byPos = new Map();
+  for (const o of recs) if (!o.me && o.set === set && o.S === S && o.pos >= 0) { if (!byPos.has(o.pos)) byPos.set(o.pos, []); byPos.get(o.pos).push(o); }
+  return groupBy(mine.filter((x) => x.pos >= 0), (x) => x.pos).map(([pos, list]) => {
+    const s = recStats(list), a = recStats(byPos.get(pos) || []);
+    return { set, S, pos, list, name: areaName(set.L, set.map, set.D.places[pos]), s, a, share: list.length / mine.length, grade: gradeVs(s.rating, a.rating, s.n, 10) };
+  }).filter((g) => g.s.n >= 5 && g.a.n >= 20).sort((a, b) => (b.grade?.rel ?? -1) - (a.grade?.rel ?? -1) || b.s.n - a.s.n);
+}
+
+// Kinds of duel: [key, group, name, what it means, test, tip, options]. Only duels you both saw
+// coming count, except `fights` (opening duels count every first kill, as usual).
+const DUEL_GROUPS = ["How the fight started", "Your weapon", "Range and height", "Moments", "Utility, health and the first hit"];
+const DUEL_BUCKETS = [
+  ["peeked", 0, "You peeked them", "you moved into an enemy holding still", (d) => d.start === "peeked", "Peeking a held angle gives the holder the edge. Jiggle-peek for info first, peek off a flash, or swing together with a teammate so they can't hold one spot."],
+  ["held", 0, "They peeked you", "you held still, they moved into you", (d) => d.start === "held", "Holding: keep your crosshair where their head will appear and don't move it. Play off-angles so they can't pre-aim you, and change spots between rounds."],
+  ["both", 0, "Both moving", "you ran into each other", (d) => d.start === "both", "When you're both moving, whoever stops and shoots first wins: counter-strafe (tap the opposite key) before the shot."],
+  ["still", 0, "Standoff", "you were both holding still", (d) => d.start === "still", "In a standoff, tap the head and don't stay in the open; if you miss, re-peek from somewhere else."],
+  ["rifle", 1, "Rifles", "AK, M4, FAMAS, Galil, AUG, SG", (d) => d.wclass === "rifle", "Rifle duels: work on first-bullet accuracy and the first 5-10 bullets of the spray (Practice tab: recoil maps)."],
+  ["awp", 1, "AWP", "every AWP duel", (d) => d.wclass === "awp", "AWP: hold one angle without moving the crosshair, and reposition after every shot."],
+  ["awp_hold", 1, "AWP holding an angle", "you still with the AWP, they peeked", (d) => d.wclass === "awp" && d.start === "held", "Holding with the AWP: crosshair exactly where they appear, off the common pre-aim spot; shoot as they appear instead of following them."],
+  ["awp_peek", 1, "AWP peeking", "you moved into them with the AWP", (d) => d.wclass === "awp" && d.start === "peeked", "Peeking with the AWP: quick-peek for a shot or info and get back, peek off a flash, and don't re-peek the same angle."],
+  ["pistol", 1, "Pistols", "", (d) => d.wclass === "pistol", "Pistol duels: one or two taps at the head beat spraying. Move between shots, stop to shoot."],
+  ["pistol_long", 1, "Pistols at long range", "1,500+ units", (d) => d.wclass === "pistol" && d.dist >= 1500, "Long range with a pistol: stand still and tap the head, or don't take the fight: get closer or wait for them."],
+  ["smg", 1, "SMGs", "", (d) => d.wclass === "smg", "SMGs win up close and on the move; avoid long angles with them."],
+  ["close", 2, "Close range", "under 600 units", (d) => d.dist > 0 && d.dist < 600, "Up close, crosshair placement at head height and not over-peeking win fights. Hold tighter angles so they come to you."],
+  ["mid", 2, "Mid range", "600 to 1,500 units", (d) => d.dist >= 600 && d.dist < 1500, "At mid range, stop fully before you shoot (counter-strafe) and tap or burst instead of spraying."],
+  ["long", 2, "Long range", "1,500+ units", (d) => d.dist >= 1500, "At long range, tap the head with a rifle and don't move while shooting. Avoid long fights with SMGs and pistols."],
+  ["above", 2, "You had height", "you were above them", (d) => d.height > 64, ""],
+  ["below", 2, "They had height", "they were above you", (d) => d.height < -64, "When enemies are above you, pre-aim higher and use utility to take the high ground away."],
+  ["opening", 3, "Opening duels", "the round's first kill", (d) => d.opening, "Opening duels: take them with a flash or a teammate ready to trade; don't dry-peek alone.", { fights: true, standard: "open" }],
+  ["t_clear", 3, "T: clearing spots", "you peeked a CT holding an angle, before the plant", (d) => d.side === "T" && d.start === "peeked" && !d.afterPlant, "Clearing spots: check the common spots one at a time (slice the pie) with your crosshair already there, flash before you swing, and have a teammate close enough to trade."],
+  ["ct_hold", 3, "CT: holding a push", "a T peeked you, before the plant", (d) => d.side === "C" && d.start === "held" && !d.afterPlant, "Holding as CT: play an angle they don't pre-aim, fall back after the first contact, and let utility slow them down."],
+  ["ct_push", 3, "CT: pushing or re-peeking", "you peeked a still T, before the plant", (d) => d.side === "C" && d.start === "peeked" && !d.afterPlant, "Aggressive CT plays: do them early with a flash and get out. Re-peeking the angle you just fought from usually loses."],
+  ["afterplant", 3, "After the plant", "T side", (d) => d.afterPlant && d.side === "T", "Afterplants: play crossfires on the bomb with a teammate and use time; you don't need to peek."],
+  ["retake", 3, "Retakes", "CT side", (d) => d.afterPlant && d.side === "C", "Retakes: wait for teammates and use utility together instead of going in one by one."],
+  ["clutch", 3, "Last one alive", "", (d) => d.alone, "In clutches, take one fight at a time and use sound; isolate duels instead of being seen by two."],
+  ["moving_target", 3, "Moving enemies", "they were running", (d) => d.theirSpeed > 130, "Moving targets: lead slightly and keep the crosshair at head height as they cross, instead of flicking after them."],
+  ["me_flashed", 4, "You were flashed", "an enemy flash got you", (d) => d.myUtil & UTIL.flashed, "Flashed: turn away or back off and wait it out instead of taking the fight blind. Listen for the flash and turn before it pops."],
+  ["me_mollied", 4, "After a molly on you", "an enemy molotov landed by you", (d) => d.myUtil & UTIL.molly, "Mollied out: don't come out where they expect; move to a different angle or fall back."],
+  ["them_flashed", 4, "They were flashed", "your team's flash got them", (d) => d.theirUtil & UTIL.flashed, ""],
+  ["me_hurt", 4, "You were hurt", "under 50 HP as it started", (d) => d.fight && d.myHp > 0 && d.myHp < 50, "Hurt: avoid taking fights until a teammate can trade, or play a close angle where one hit is enough."],
+  ["them_hurt", 4, "They were hurt", "under 50 HP", (d) => d.fight && d.theirHp > 0 && d.theirHp < 50, ""],
+  ["hit_first", 4, "You hit first", "you landed the first hit", (d) => d.firstHit === "me", "You hit first and still lost: keep your crosshair on them after the first hit instead of stopping to check, and control the spray."],
+  ["hit_second", 4, "They hit first", "they landed the first hit", (d) => d.firstHit === "them", "When they hit you first, get out of their sight or fight back right away; standing still makes it worse."],
+];
+
+// The duel finder: your duels of one kind, from the choices.
+const FIND_DIMS = [
+  ["side", [["", "Any side"], ["T", "T side"], ["C", "CT side"]], (d, v) => d.side === v],
+  ["gun", [["", "Any weapon"], ["rifle", "Rifle"], ["awp", "AWP"], ["pistol", "Pistol"], ["smg", "SMG"], ["scout", "Scout"], ["heavy", "Shotgun"]], (d, v) => d.wclass === v],
+  ["range", [["", "Any range"], ["close", "Close"], ["mid", "Mid range"], ["long", "Long range"]], (d, v) => (v === "close" ? d.dist > 0 && d.dist < 600 : v === "mid" ? d.dist >= 600 && d.dist < 1500 : d.dist >= 1500)],
+  ["start", [["", "Any start"], ["peeked", "You peeked"], ["held", "They peeked you"], ["both", "Both moving"], ["still", "Standoff"]], (d, v) => d.start === v],
+  ["util", [["", "Any utility"], ["none", "No utility"], ["me_flashed", "You were flashed"], ["me_mollied", "Molly on you"], ["them_flashed", "They were flashed"]], (d, v) => (v === "none" ? !d.myUtil && !d.theirUtil : v === "me_flashed" ? d.myUtil & UTIL.flashed : v === "me_mollied" ? d.myUtil & UTIL.molly : d.theirUtil & UTIL.flashed)],
+  ["kind", [["", "Any round"], ["pistol", "Pistol round"], ["eco", "Eco"], ["force", "Force buy"], ["full", "Full buy"]], (d, v) => d.kind === v],
+  ["sit", [["", "Any moment"], ["opening", "Opening duel"], ["before", "Before the plant"], ["afterplant", "After the plant"], ["clutch", "Last alive"]], (d, v) => (v === "opening" ? d.opening : v === "before" ? !d.afterPlant : v === "afterplant" ? d.afterPlant : d.alone)],
+];
+const findTest = (find) => (d) => FIND_DIMS.every(([key, , test]) => !find[key] || test(d, find[key]));
 
 async function renderPlaystyle(view, map) {
   const idx = await loadInsightsIndex();
   const maps = Object.entries(idx?.maps || {}).filter(([, c]) => c.matches > 0).sort((a, b) => b[1].matches - a[1].matches);
   if (!maps.length) {
     const waiting = sum(Object.values(idx?.maps || {}).map((c) => c.waiting || 0));
-    view.innerHTML = `<div class="gn-head"><div><div class="h1">Playstyle</div><div class="sub">Your roles, your duels, your best and worst spots, from every round you played.</div></div></div>
+    view.innerHTML = `<div class="gn-head"><div><div class="h1">Playstyle</div><div class="sub">Your roles, your duels, your best and worst positions, from every round you played.</div></div></div>
       <div class="empty">Not ready yet. Veloxify is re-reading your demos for this in the background${waiting ? ` (${waiting} matches to go)` : ""}, while CS2 is closed.</div>`;
     return;
   }
@@ -4954,98 +5151,234 @@ async function renderPlaystyle(view, map) {
   const [list, Ls] = await Promise.all([Promise.all(want.map((m) => loadInsights(m))), Promise.all(want.map((m) => loadMapLineups(m))), loadCallouts()]);
   const sets = list.map((D, i) => (D ? { D, map: want[i], L: Ls[i] || {}, rounds: D.rounds.filter((r) => r.match.me >= 0 && (ps.src === "all" || r.match.source === ps.src) && (ps.side === "all" || r.sides[r.match.me] === ps.side)) } : null)).filter(Boolean);
   ps.sdata = await loadSessionData();
-  psPage(view, maps, sets);
+  const waiting = sum(Object.values(idx?.maps || {}).map((c) => c.waiting || 0));
+  psPage(view, maps, sets, waiting);
 }
 
-function psPage(view, maps, sets) {
-  const rerender = () => { savePs(); psPage(view, maps, sets); };
+function psPage(view, maps, sets, waiting = 0) {
+  const rerender = () => { savePs(); psPage(view, maps, sets, waiting); };
   const rounds = sets.flatMap((s) => s.rounds);
   const everyone = allDuels(sets);
-  const duels = everyone.filter((d) => d.who === "me"), others = everyone.filter((d) => d.who !== "me");
+  const fightsMine = everyone.filter((d) => d.who === "me"), fightsOthers = everyone.filter((d) => d.who !== "me");
+  const duels = fightsMine.filter((d) => d.duel), others = fightsOthers.filter((d) => d.duel);
+  const withFights = fightsMine.filter((d) => d.fight).length;
   const W = duels.filter((d) => d.won).length, Lo = duels.length - W;
-  const overall = duels.length ? W / duels.length : 0.5;
   const othersOverall = others.length ? others.filter((d) => d.won).length / others.length : 0.5;
-  const segBtns = (key, opts, val) => opts.map(([k, l]) => `<button data-${key}="${k}" class="${String(val) === String(k) ? "on" : ""}">${l}</button>`).join("");
-  const roles = psRoles(sets);
-  const sides = ["T", "C"].map((S) => psSide(sets, duels, S, others));
-  // Buckets: win rate against your average.
+  const recs = psRecords(sets);
+  const roles = psRoleStats(recs);
+  const sideStats = ["T", "C"].map((S) => ({ S, s: recStats(recs.filter((x) => x.me && x.S === S)), a: recStats(recs.filter((x) => !x.me && x.S === S)) }));
+  const oneMap = sets.length === 1 ? sets[0] : null;
+  const shownSides = ps.side === "all" ? ["T", "C"] : [ps.side];
+  const positions = sets.flatMap((set) => shownSides.flatMap((S) => psPositions(recs, set, S)));
+  const mapRows = ps.map === "all" ? psMaps(recs, sets) : [];
   // Each kind of duel: your win rate against the average player's (everyone else in your matches).
-  const buckets = DUEL_BUCKETS.map(([key, name, sub, test, tip]) => {
-    const ds = duels.filter(test), w = ds.filter((d) => d.won).length;
-    const os = others.filter(test), avg = os.length >= 30 ? os.filter((d) => d.won).length / os.length : null;
-    return { key, name, sub, tip, ds, w, n: ds.length, rate: ds.length ? w / ds.length : 0, avg, grade: gradeRate(w, ds.length, avg, key === "opening" ? "open" : null) };
+  const buckets = DUEL_BUCKETS.map(([key, group, name, sub, test, tip, opts = {}]) => {
+    const ds = (opts.fights ? fightsMine : duels).filter(test), w = ds.filter((d) => d.won).length;
+    const os = (opts.fights ? fightsOthers : others).filter(test), avg = os.length >= 30 ? os.filter((d) => d.won).length / os.length : null;
+    return { key, group, name, sub, tip, ds, w, n: ds.length, rate: ds.length ? w / ds.length : 0, avg, grade: gradeRate(w, ds.length, avg, opts.standard || null) };
   }).filter((b) => b.n >= 6);
-  const strong = buckets.filter((b) => b.grade && (b.grade.g === "g0" || b.grade.g === "g1")).sort((a, b) => b.grade.z - a.grade.z);
-  const weak = buckets.filter((b) => b.grade && (b.grade.g === "g3" || b.grade.g === "g4")).sort((a, b) => a.grade.z - b.grade.z);
+  const strong = buckets.filter((b) => isGood(b.grade)).sort((a, b) => b.grade.z - a.grade.z);
+  const weak = buckets.filter((b) => isBad(b.grade)).sort((a, b) => a.grade.z - b.grade.z);
   // When nothing's below average: the kinds of duel where you're closest to (or under) it.
   const least = weak.length ? [] : buckets.filter((b) => b.grade && b.n >= 30 && b.tip).sort((a, b) => (a.rate - a.avg) - (b.rate - b.avg)).slice(0, 2);
   const sel = buckets.find((b) => b.key === ps.bucket) || null;
-  const better = sides[0].n && sides[1].n ? (sides[0].score > sides[1].score + 0.05 ? "T" : sides[1].score > sides[0].score + 0.05 ? "C" : null) : null;
-  // Your spots (one map): duels won and lost by where you stood.
-  const oneMap = sets.length === 1 ? sets[0] : null;
-  const spots = oneMap ? groupBy(duels.filter((d) => d.place >= 0), (d) => d.place).map(([pl, ds]) => ({ pl, ds, w: ds.filter((d) => d.won).length })).filter((s) => s.ds.length >= 4) : [];
-  const nameOf = (pl) => (oneMap ? areaName(oneMap.L, oneMap.map, oneMap.D.places[pl]) : "");
-  const best = [...spots].filter((s) => s.ds.length >= 8).sort((a, b) => b.w / b.ds.length - a.w / a.ds.length).slice(0, 5);
-  const worst = [...spots].filter((s) => s.ds.length >= 8).sort((a, b) => a.w / a.ds.length - b.w / b.ds.length).slice(0, 5);
-  const fav = oneMap ? psFavorites(oneMap, ps.side) : [];
-  const bar = (b) => `<span class="ps-bar" title="Your ${Math.round(b.rate * 100)}%${b.avg != null ? ` · the average player in your matches: ${Math.round(b.avg * 100)}% (the white line)` : ""}"><i style="width:${Math.round(b.rate * 100)}%" class="${b.grade?.g === "g0" || b.grade?.g === "g1" ? "good" : b.grade?.g === "g3" || b.grade?.g === "g4" ? "bad" : ""}"></i>${b.avg != null ? `<b style="left:${Math.round(b.avg * 100)}%"></b>` : ""}</span>`;
-  const gradeChip = (g) => (g ? `<span class="ps-grade ${g.g}">${g.word}</span>` : `<span class="ps-grade na" title="Not enough duels yet to say">–</span>`);
+  // Caught off guard: deaths while you were looking the other way.
+  const md = fightsMine.filter((d) => d.fight && !d.won), od = fightsOthers.filter((d) => d.fight && !d.won);
+  const caught = { n: md.length, k: md.filter((d) => d.offGuard).length, avg: od.length ? od.filter((d) => d.offGuard).length / od.length : null, list: md.filter((d) => d.offGuard) };
+  caught.grade = md.length >= 30 ? gradeVs(caught.k / md.length, caught.avg, md.length, 30, true) : null;
+  const mk = fightsMine.filter((d) => d.fight && d.won), ok = fightsOthers.filter((d) => d.fight && d.won);
+  const surprised = { n: mk.length, k: mk.filter((d) => d.offGuard).length, avg: ok.length ? ok.filter((d) => d.offGuard).length / ok.length : null };
+  // The duel finder.
+  const finder = findTest(ps.find || {});
+  const found = duels.filter(finder), foundAvg = others.filter(finder);
+  const findB = { key: "find", name: "Your search", sub: "", tip: "", ds: found, w: found.filter((d) => d.won).length, n: found.length };
+  findB.rate = findB.n ? findB.w / findB.n : 0;
+  findB.avg = foundAvg.length >= 20 ? foundAvg.filter((d) => d.won).length / foundAvg.length : null;
+  findB.grade = gradeRate(findB.w, findB.n, findB.avg);
+  const finding = Object.values(ps.find || {}).some(Boolean);
+  const profile = psProfile({ roles, sideStats, buckets, positions, mapRows, caught, oneMap });
+
+  const segBtns = (key, opts, val) => opts.map(([k, l]) => `<button data-${key}="${k}" class="${String(val) === String(k) ? "on" : ""}">${l}</button>`).join("");
+  const pct = (v) => (v == null ? "—" : `${Math.round(v * 100)}%`);
+  const bar = (b) => `<span class="ps-bar" title="Your ${Math.round(b.rate * 100)}%${b.avg != null ? ` · the average player in your matches: ${Math.round(b.avg * 100)}% (the white line)` : ""}"><i style="width:${Math.round(b.rate * 100)}%" class="${isGood(b.grade) ? "good" : isBad(b.grade) ? "bad" : ""}"></i>${b.avg != null ? `<b style="left:${Math.round(b.avg * 100)}%"></b>` : ""}</span>`;
+  const bucketBtn = (b) => `<button class="ps-bucket ${sel?.key === b.key ? "on" : ""}" data-bucket="${b.key}"><span class="ps-bucket-name"><b>${esc(b.name)}</b>${b.sub ? `<span class="sub">${esc(b.sub)}</span>` : ""}</span>${bar(b)}<span class="ps-bucket-n">${pctOf(b.w, b.n)}%<small>${b.avg != null ? `avg ${Math.round(b.avg * 100)}% · ` : ""}${b.w}-${b.n - b.w}</small></span>${gradeChip(b.grade)}</button>`;
+  const swItem = (b, tip) => `<div class="ps-sw-item" data-bucket="${b.key}">${gradeChip(b.grade)} <b>${esc(b.name)}</b>: you win <b>${pctOf(b.w, b.n)}%</b> <span class="sub">(the average player ${Math.round(b.avg * 100)}%, ${b.n} duels)</span>${tip && b.tip ? `<div class="ps-tip">${esc(b.tip)}</div>` : ""}</div>`;
+  const roleRow = (r) => `<tr class="${isGood(r.grade) ? "good" : isBad(r.grade) ? "bad" : ""}"><td><b>${esc(r.name)}</b><div class="sub">${esc(r.how)}</div></td>
+    <td>${r.s.n ? `${pct(r.share)} <small class="sub">avg ${pct(r.avgShare)}</small>` : `<span class="sub">never</span>`}</td>
+    <td>${r.s.n >= 5 ? vsAvg(r.s.rating, r.a.rating, f2) : "—"}</td>
+    <td>${r.s.n >= 5 ? vsAvg(r.s.kpr, r.a.kpr, f2) : "—"}</td>
+    <td>${r.s.n >= 5 ? vsAvg(r.s.surv, r.a.surv, pct) : "—"}</td>
+    <td>${gradeChip(r.grade)}</td></tr>`;
+  const roleGroup = (title, side) => {
+    const list = roles.filter((r) => r.side === side && (ps.side === "all" || !side || side === ps.side));
+    return list.length ? `<tr class="ps-group"><td colspan="6">${title}</td></tr>${list.map(roleRow).join("")}` : "";
+  };
+  const posRow = (g, withMap = false) => `<tr class="ps-pos-row ${isGood(g.grade) ? "good" : isBad(g.grade) ? "bad" : ""} ${ps.pos === `${g.set.map}|${g.S}|${g.pos}` ? "on" : ""}" data-pos="${esc(`${g.set.map}|${g.S}|${g.pos}`)}">
+    <td><b>${esc(g.name)}</b>${withMap ? ` <span class="sub">${esc(mapName(g.set.map))} ${SIDE_NAME[g.S]}</span>` : ""}</td>
+    <td>${g.s.n} <small class="sub">${pct(g.share)}</small></td>
+    <td>${vsAvg(g.s.rating, g.a.rating, f2)}</td><td>${vsAvg(g.s.kpr, g.a.kpr, f2)}</td><td>${vsAvg(g.s.surv, g.a.surv, pct)}</td>
+    <td>${vsAvg(g.s.adr, g.a.adr, (v) => Math.round(v))}</td><td>${gradeChip(g.grade)}</td></tr>`;
+  const posHead = `<thead><tr><th>Position</th><th>Your rounds</th><th>Rating</th><th>Kills a round</th><th>Survived</th><th>ADR</th><th></th></tr></thead>`;
+  const selPos = positions.find((g) => `${g.set.map}|${g.S}|${g.pos}` === ps.pos) || null;
+  const survRow = (label, key, fmt, lowerBetter, hint) => `<tr><td>${label}${hint ? `<div class="sub">${hint}</div>` : ""}</td>${sideStats.filter((x) => shownSides.includes(x.S)).map(({ s, a }) => {
+    if (!s.n) return "<td>—</td>";
+    const g = gradeVs(s[key], a[key], s.n, 30, lowerBetter);
+    return `<td>${vsAvg(s[key], a[key], fmt, lowerBetter)} ${gradeChip(g)}</td>`;
+  }).join("")}</tr>`;
+  const better = (() => {
+    const [t, c] = sideStats;
+    if (!t.s.n || !c.s.n || ps.side !== "all") return null;
+    const rt = t.s.rating / (t.a.rating || 1), rc = c.s.rating / (c.a.rating || 1);
+    return rt > rc + 0.05 ? "T" : rc > rt + 0.05 ? "CT" : null;
+  })();
+
   view.innerHTML = `
     <div class="ins-head"><div><div class="h1">Playstyle</div>
-      <div class="sub">From ${rounds.length} rounds you played in ${new Set(rounds.map((r) => r.match.id)).size} matches${ps.map !== "all" ? ` on ${esc(mapName(ps.map))}` : ""}. Your roles, how you do on each side, the duels you win and lose, and where you play best.</div></div></div>
+      <div class="sub">From ${rounds.length} rounds you played in ${new Set(rounds.map((r) => r.match.id)).size} matches${ps.map !== "all" ? ` on ${esc(mapName(ps.map))}` : ""}. Who you are as a player, your best and worst maps and positions, and the duels you win and lose. Everything is compared with the average player in your matches.</div></div></div>
     <div class="ins-maps"><a class="ins-map ${ps.map === "all" ? "on" : ""}" href="#/playstyle/all"><b>All maps</b></a>${maps.map(([m, c]) => `<a class="ins-map ${m === ps.map ? "on" : ""}" href="#/playstyle/${esc(m)}">${mapIcon(m)}<b>${esc(mapName(m))}</b><span class="sub">${c.matches}</span></a>`).join("")}</div>
     <div class="ln-bar ins-filters"><div class="seg">${segBtns("side", [["all", "Both sides"], ["T", "T side"], ["C", "CT side"]], ps.side)}</div>
       <div class="seg">${segBtns("src", [["all", "All"], ["faceit", "FACEIT"], ["valve", "Premier"]], ps.src)}</div></div>
-    ${psLately(ps.sdata)}
+    ${waiting ? `<div class="note">Veloxify is re-reading ${waiting} of your matches for the new duel details (who peeked, flashes, mollies), in the background while CS2 is closed. Until then those matches show without them.</div>` : ""}
     ${!rounds.length ? `<div class="empty">No rounds with these filters.</div>` : `
+    <section class="panel ps-profile"><div class="panel-head"><div class="h3">Your profile</div><span class="grow"></span><span class="sub">The short version: what you are, and where you're best and worst</span></div>
+      <ul class="sv-facts">${profile.map(([cls, html]) => `<li class="${cls}">${html}</li>`).join("") || `<li>Not enough rounds yet.</li>`}</ul></section>
+    ${psLately(ps.sdata)}
     <div class="ps-grid">
-      <section class="panel"><div class="panel-head"><div class="h3">How you play</div><span class="grow"></span><span class="sub">Compared with everyone else in the same rounds</span></div>
-        <div class="ps-roles">${roles.map((r) => `<div class="ps-role ${r.top ? "top" : ""}" title="${esc(r.how)}"><div class="ps-role-h"><b>${esc(r.name)}</b><span class="sub">${r.n ? `${r.ratio.toFixed(1)}× the average` : "not enough rounds"}</span></div>
-          <span class="ps-meter"><i style="width:${Math.min(100, (r.ratio / 2.5) * 100)}%"></i><b style="left:${100 / 2.5}%"></b></span><div class="sub">${esc(r.detail)}</div></div>`).join("")}</div>
-        <div class="ps-verdict">${psVerdict(roles)}</div></section>
-      <section class="panel"><div class="panel-head"><div class="h3">T or CT?</div><span class="grow"></span>${better ? `<span class="tag main">Better on ${better === "T" ? "T" : "CT"}</span>` : ""}</div>
-        <table class="ins-table ps-sides"><thead><tr><th></th><th>T side</th><th>CT side</th></tr></thead><tbody>
-          ${[["Rounds", (s) => s.n],
-            ["Kills per round", (s) => vsAvg(s.kpr, s.avg.kpr, f2, false, 0, "kpr")],
-            ["Deaths per round", (s) => vsAvg(s.dpr, s.avg.dpr, f2, true)],
-            ["Survived", (s) => vsAvg(s.n ? s.survived / s.n : null, s.avg.survived, (v) => `${Math.round(v * 100)}%`)],
-            ["Opening duels won", (s) => (s.open ? vsAvg(s.openWon / s.open, s.avg.open, (v) => `${Math.round(v * 100)}%`, false, s.open, "open") : "—")],
-            ["Duels won", (s) => (s.duels ? vsAvg(s.won / s.duels, s.avg.duels, (v) => `${Math.round(v * 100)}%`, false, s.duels, "duels") : "—")],
-            ["Rounds won", (s) => `${pctOf(s.wins, s.n)}%`]]
-            .map(([l, f]) => `<tr><td>${l}</td><td>${sides[0].n ? f(sides[0]) : "—"}</td><td>${sides[1].n ? f(sides[1]) : "—"}</td></tr>`).join("")}</tbody></table>
+      <section class="panel"><div class="panel-head"><div class="h3">Your roles</div><span class="grow"></span><span class="sub">How often you play each, and how well against the average player in that role</span></div>
+        <table class="ins-table ps-roles-t"><thead><tr><th>Role</th><th>How often</th><th>Rating</th><th>Kills a round</th><th>Survived</th><th></th></tr></thead><tbody>
+          ${roleGroup("T side", "T")}${roleGroup("CT side", "C")}${roleGroup("Weapon", "")}</tbody></table>
+        <div class="note" style="padding:0 20px 14px;margin:0">Rating is HLTV Rating 1.0 (kills, survival and multi-kills; 1.00 is average), so it can be split by role and position. Small numbers: the average player in the same role in your matches.</div></section>
+      <section class="panel"><div class="panel-head"><div class="h3">T or CT? Staying alive</div><span class="grow"></span>${better ? `<span class="tag main">Better on ${better}</span>` : ""}</div>
+        <table class="ins-table ps-sides"><thead><tr><th></th>${shownSides.map((S) => `<th>${SIDE_NAME[S]} side</th>`).join("")}</tr></thead><tbody>
+          <tr><td>Rounds</td>${sideStats.filter((x) => shownSides.includes(x.S)).map(({ s }) => `<td>${s.n}</td>`).join("")}</tr>
+          ${survRow("Rating", "rating", f2, false)}
+          ${survRow("Kills per round", "kpr", f2, false)}
+          ${survRow("Damage per round", "adr", (v) => Math.round(v), false)}
+          ${survRow("Opening duels won", "open", pct, false)}
+          ${survRow("Survived", "surv", pct, false)}
+          ${survRow("First of your team to die", "first", pct, true, "dying too early")}
+          ${survRow("Died without a trade", "untraded", pct, true, "nobody got your killer back within 5 s")}
+          ${survRow("Time alive", "alive", (v) => `${Math.round(v)} s`, false, "seconds into the round, on average")}
+          ${survRow("Rounds won", "win", pct, false)}</tbody></table>
         <div class="note" style="padding:0 20px 14px;margin:0">Small numbers: the average player on that side in your matches. Green is better than them, red worse.</div></section>
     </div>
-    <section class="panel"><div class="panel-head"><div class="h3">Your duels</div><span class="grow"></span><span class="sub">${W} won, ${Lo} lost: <b>${pctOf(W, duels.length)}%</b> ${((g) => (g ? `<span class="ps-grade ${g.g}">${g.word}</span>` : ""))(gradeRate(W, duels.length, othersOverall, "duels"))} (the average player in your matches: ${Math.round(othersOverall * 100)}%). The white line on each bar is the average player.</span></div>
-      <div class="ps-sw">
-        <div><div class="h3 ps-good">Strengths</div>${strong.slice(0, 4).map((b) => `<div class="ps-sw-item" data-bucket="${b.key}">${gradeChip(b.grade)} <b>${esc(b.name)}</b>: you win <b>${pctOf(b.w, b.n)}%</b> <span class="sub">(the average player ${Math.round(b.avg * 100)}%, ${b.n} duels)</span></div>`).join("") || `<div class="sub">Nothing clearly above the average player yet.</div>`}</div>
-        <div><div class="h3 ps-bad">Weaknesses</div>${weak.slice(0, 4).map((b) => `<div class="ps-sw-item" data-bucket="${b.key}">${gradeChip(b.grade)} <b>${esc(b.name)}</b>: you win <b>${pctOf(b.w, b.n)}%</b> <span class="sub">(the average player ${Math.round(b.avg * 100)}%, ${b.n} duels)</span>${b.tip ? `<div class="ps-tip">${esc(b.tip)}</div>` : ""}</div>`).join("")
-          || `<div class="sub">Nothing below the average player. Your least strong, where there's most to gain:</div>${least.map((b) => `<div class="ps-sw-item" data-bucket="${b.key}">${gradeChip(b.grade)} <b>${esc(b.name)}</b>: you win <b>${pctOf(b.w, b.n)}%</b> <span class="sub">(the average player ${Math.round(b.avg * 100)}%, ${b.n} duels)</span>${b.tip ? `<div class="ps-tip">${esc(b.tip)}</div>` : ""}</div>`).join("")}`}</div>
-      </div>
-      <div class="ps-buckets">${buckets.map((b) => `<button class="ps-bucket ${sel?.key === b.key ? "on" : ""}" data-bucket="${b.key}"><span class="ps-bucket-name"><b>${esc(b.name)}</b>${b.sub ? `<span class="sub">${esc(b.sub)}</span>` : ""}</span>${bar(b)}<span class="ps-bucket-n">${pctOf(b.w, b.n)}%<small>${b.avg != null ? `avg ${Math.round(b.avg * 100)}% · ` : ""}${b.w}-${b.n - b.w}</small></span>${gradeChip(b.grade)}</button>`).join("")}</div>
-      ${sel ? psDuelList(sel) : `<div class="sub" style="padding:0 20px 16px">Click a kind of duel to see every one of them and open it in the 2D replay.</div>`}
+    ${mapRows.length > 1 ? `<section class="panel"><div class="panel-head"><div class="h3">Your maps</div><span class="grow"></span><span class="sub">Best first${ps.side !== "all" ? `, ${SIDE_NAME[ps.side]} side only` : ""}</span></div>
+      <table class="ins-table ps-maps"><thead><tr><th>Map</th><th>Matches</th><th>Rating</th><th>Kills a round</th><th>ADR</th><th>Survived</th><th>Rounds won</th><th></th></tr></thead><tbody>
+        ${mapRows.map((m, i) => `<tr class="${i === 0 ? "good" : i === mapRows.length - 1 ? "bad" : ""}"><td><a class="ps-map-link" href="#/playstyle/${esc(m.map)}">${mapIcon(m.map)}<b>${esc(mapName(m.map))}</b></a></td>
+          <td>${m.matches} <small class="sub">${m.w}-${m.l}</small></td><td><b>${f2(m.s.rating)}</b></td><td>${f2(m.s.kpr)}</td><td>${Math.round(m.s.adr)}</td><td>${pct(m.s.surv)}</td><td>${pct(m.s.win)}</td><td>${gradeChip(m.grade)}</td></tr>`).join("")}</tbody></table></section>` : ""}
+    <section class="panel"><div class="panel-head"><div class="h3">${oneMap ? `Your positions on ${esc(mapName(oneMap.map))}` : "Your best and worst positions"}</div><span class="grow"></span><span class="sub">Where you played the round (the callout you spent the most time in), against the average player there</span></div>
+      ${oneMap ? shownSides.map((S) => { const list = positions.filter((g) => g.S === S); return `<div class="h3 ins-sub">${SIDE_NAME[S]} side</div>${list.length ? `<table class="ins-table ps-pos">${posHead}<tbody>${list.map((g) => posRow(g)).join("")}</tbody></table>` : `<div class="sub" style="padding:0 20px 12px">Not enough rounds yet.</div>`}`; }).join("")
+        : (() => { const graded = positions.filter((g) => g.grade && g.s.n >= 15); const best = graded.filter((g) => g.grade.rel > 0).sort((a, b) => b.grade.rel - a.grade.rel).slice(0, 6); const worst = graded.filter((g) => g.grade.rel < 0).sort((a, b) => a.grade.rel - b.grade.rel).slice(0, 6);
+          return `<div class="h3 ins-sub ps-good">Best</div>${best.length ? `<table class="ins-table ps-pos">${posHead}<tbody>${best.map((g) => posRow(g, true)).join("")}</tbody></table>` : `<div class="sub" style="padding:0 20px 12px">Nothing clearly above the average player yet.</div>`}
+            <div class="h3 ins-sub ps-bad">Worst</div>${worst.length ? `<table class="ins-table ps-pos">${posHead}<tbody>${worst.map((g) => posRow(g, true)).join("")}</tbody></table>` : `<div class="sub" style="padding:0 20px 12px">Nothing below the average player.</div>`}
+            <div class="note" style="padding:0 20px 14px;margin:0">Pick a map above to see all your positions on it.</div>`; })()}
+      ${selPos ? psPosRounds(selPos) : `<div class="sub" style="padding:0 20px 16px">Click a position to see those rounds and open them in the 2D replay.</div>`}
     </section>
-    ${oneMap ? `<section class="panel"><div class="panel-head"><div class="h3">Your spots on ${esc(mapName(oneMap.map))}</div><span class="grow"></span><span class="sub">Where you stood in your duels (green: kills, red: deaths)</span></div>
-      <div class="ps-spots">
-        <div class="tl-map ps-map"><div class="tl-viewport"><div class="tl-canvas"><img src="${assetUrl(`radars/${oneMap.map}.png`)}" alt="" draggable="false"><svg id="ps-svg" viewBox="0 0 1024 1024"></svg></div></div></div>
-        <div>
-          ${fav.length ? `<div class="h3 ins-sub">Where you usually play <span class="sub">at ${clockOf(250)}</span></div><ul class="ins-list">${fav.slice(0, 6).map((f) => `<li><b>${esc(nameOf(f.pl))}</b> <span class="sub">${pctOf(f.n, f.of)}% of rounds · you win ${pctOf(f.wins, f.n)}% of them</span></li>`).join("")}</ul>` : ""}
-          ${best.length ? `<div class="h3 ins-sub ps-good">Best spots</div><ul class="ins-list">${best.map((s) => `<li><b>${esc(nameOf(s.pl))}</b> <span class="sub">${s.w}-${s.ds.length - s.w} in duels (${pctOf(s.w, s.ds.length)}%)</span></li>`).join("")}</ul>` : ""}
-          ${worst.length ? `<div class="h3 ins-sub ps-bad">Worst spots</div><ul class="ins-list">${worst.map((s) => `<li><b>${esc(nameOf(s.pl))}</b> <span class="sub">${s.w}-${s.ds.length - s.w} in duels (${pctOf(s.w, s.ds.length)}%)</span></li>`).join("")}</ul>` : ""}
-          ${!best.length && !fav.length ? `<div class="sub">Not enough duels on this map yet.</div>` : ""}
-        </div></div></section>` : `<div class="note">Pick a map above to see your spots on it.</div>`}`}
-    <div class="note">Duels are your kills (won) and your deaths to an enemy (lost). Distances are in game units (a player is about 72 tall). Roles compare how often you do something with everyone else in the same rounds, so 1.0× is average. Moving means faster than a walk.</div>`;
+    <section class="panel"><div class="panel-head"><div class="h3">Your duels</div><span class="grow"></span><span class="sub">${W} won, ${Lo} lost: <b>${pctOf(W, duels.length)}%</b> ${gradeChip(gradeRate(W, duels.length, othersOverall, "duels"))} (the average player in your matches: ${Math.round(othersOverall * 100)}%)</span></div>
+      <div class="ps-def">A duel is a fight you both saw coming: you won it if you got the kill, lost it if they did. Dying while you were looking the other way isn't a duel lost, it's being caught off guard (below). The white line on each bar is the average player.${withFights < fightsMine.length ? ` <span class="sub">${fightsMine.length - withFights} of your fights are from matches not re-read yet: they count as duels, without who peeked or utility.</span>` : ""}</div>
+      ${caught.n >= 20 ? `<div class="ps-caught ${isBad(caught.grade) ? "bad" : isGood(caught.grade) ? "good" : ""}"><b>Caught off guard:</b> ${caught.k} of your ${caught.n} deaths (${pctOf(caught.k, caught.n)}%) came while you were looking the other way <span class="sub">(the average player ${pct(caught.avg)})</span> ${gradeChip(caught.grade)}
+        ${isBad(caught.grade) ? `<div class="ps-tip">Check the spots you pass with your crosshair, listen for footsteps, and don't turn your back on an angle that isn't cleared.</div>` : ""}
+        <div class="sub">You caught them off guard in ${pctOf(surprised.k, surprised.n)}% of your kills (the average player ${pct(surprised.avg)}).</div></div>` : ""}
+      <div class="ps-sw">
+        <div><div class="h3 ps-good">Strengths</div>${strong.slice(0, 4).map((b) => swItem(b, false)).join("") || `<div class="sub">Nothing clearly above the average player yet.</div>`}</div>
+        <div><div class="h3 ps-bad">Weaknesses</div>${weak.slice(0, 4).map((b) => swItem(b, true)).join("")
+          || `<div class="sub">Nothing below the average player. Your least strong, where there's most to gain:</div>${least.map((b) => swItem(b, true)).join("")}`}</div>
+      </div>
+      <div class="ps-find"><span class="h3">Find a kind of duel</span>${FIND_DIMS.map(([key, opts]) => `<select data-find="${key}">${opts.map(([v, l]) => `<option value="${v}" ${(ps.find?.[key] || "") === v ? "selected" : ""}>${esc(l)}</option>`).join("")}</select>`).join("")}
+        ${finding ? `<button class="btn ghost" data-find-clear>Clear</button>` : ""}</div>
+      ${finding ? `<div class="ps-buckets ps-found">${findB.n ? bucketBtn({ ...findB, name: "Duels like this", sub: `${findB.n} of yours` }) : `<div class="sub">None of your duels match.</div>`}</div>` : ""}
+      ${DUEL_GROUPS.map((g, gi) => { const list = buckets.filter((b) => b.group === gi); return list.length ? `<div class="h3 ins-sub">${esc(g)}</div><div class="ps-buckets">${list.map(bucketBtn).join("")}</div>` : ""; }).join("")}
+      ${sel ? psDuelList(sel) : finding && ps.bucket === "find" ? psDuelList(findB) : `<div class="sub" style="padding:0 20px 16px">Click a kind of duel to see every one of them and open it in the 2D replay.</div>`}
+    </section>
+    ${oneMap ? `<section class="panel"><div class="panel-head"><div class="h3">Where you fight on ${esc(mapName(oneMap.map))}</div><span class="grow"></span><span class="sub">${sel ? esc(sel.name) : "All your duels"} (green: kills, red: deaths)</span></div>
+      <div class="ps-spots"><div class="tl-map ps-map"><div class="tl-viewport"><div class="tl-canvas"><img src="${assetUrl(`radars/${oneMap.map}.png`)}" alt="" draggable="false"><svg id="ps-svg" viewBox="0 0 1024 1024"></svg></div></div></div>
+        <div>${(() => { const fav = psFavorites(oneMap, ps.side); return fav.length ? `<div class="h3 ins-sub">Where you usually are <span class="sub">at ${clockOf(250)}</span></div><ul class="ins-list">${fav.slice(0, 8).map((f) => `<li><b>${esc(areaName(oneMap.L, oneMap.map, oneMap.D.places[f.pl]))}</b> <span class="sub">${pctOf(f.n, f.of)}% of rounds · you win ${pctOf(f.wins, f.n)}% of them</span></li>`).join("")}</ul>` : ""; })()}</div></div></section>` : ""}`}
+    <div class="note">Distances are in game units (a player is about 72 tall). A fight starts with its first hit. You peeked if you got 45 units or more from where you were in the half second before it (a swing out of cover); you held if you stayed put (strafing in place still counts as holding). Positions and roles need 5 or more of your rounds to show and 10 to 15 to be graded.</div>`;
 
   view.querySelectorAll("[data-side]").forEach((b) => (b.onclick = () => { ps.side = b.dataset.side; renderPlaystyle(view, ps.map); }));
   view.querySelectorAll("[data-src]").forEach((b) => (b.onclick = () => { ps.src = b.dataset.src; renderPlaystyle(view, ps.map); }));
   view.querySelectorAll("[data-bucket]").forEach((b) => (b.onclick = () => { ps.bucket = ps.bucket === b.dataset.bucket ? null : b.dataset.bucket; rerender(); }));
+  view.querySelectorAll("[data-pos]").forEach((b) => (b.onclick = () => { ps.pos = ps.pos === b.dataset.pos ? null : b.dataset.pos; rerender(); }));
+  view.querySelectorAll("[data-find]").forEach((s) => (s.onchange = () => { ps.find = { ...(ps.find || {}), [s.dataset.find]: s.value }; ps.bucket = "find"; rerender(); }));
+  view.querySelector("[data-find-clear]")?.addEventListener("click", () => { ps.find = {}; if (ps.bucket === "find") ps.bucket = null; rerender(); });
   wireRoundList(view);
   if (oneMap) loadRadar(oneMap.map).then((radar) => {
     const svg = view.querySelector("#ps-svg");
     if (!svg || !radar) return;
     const at = (x, y) => [(x - radar.pos_x) / radar.scale, (radar.pos_y - y) / radar.scale];
-    const shown = sel ? sel.ds : duels;
+    const shown = sel ? sel.ds : ps.bucket === "find" ? findB.ds : duels;
     svg.innerHTML = shown.slice(0, 600).map((d) => { const [x, y] = at(d.myPos[0], d.myPos[1]); return `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="4" class="ps-dot ${d.won ? "won" : "lost"}"/>`; }).join("");
   });
+}
+
+// The short version, in sentences: [class, html], good and bad things marked.
+function psProfile({ roles, sideStats, buckets, positions, mapRows, caught }) {
+  const out = [];
+  const pct = (v) => `${Math.round(v * 100)}%`;
+  for (const side of ["T", "C"]) {
+    const list = roles.filter((r) => r.side === side && r.s.n >= 12);
+    if (!list.length) continue;
+    const S = SIDE_NAME[side];
+    const top = [...list].sort((a, b) => b.often - a.often)[0];
+    if (top.often >= 1.15) {
+      const g = top.grade, like = ROLE_LIKE[top.key];
+      const how = !g ? "" : g.rel >= 0.05 ? `, and you're good at it: rating <b>${f2(top.s.rating)}</b> when you do, the average ${ROLE_NOUN[top.key]} ${f2(top.a.rating)}`
+        : g.rel <= -0.05 ? `, but you do worse than the average ${ROLE_NOUN[top.key]} at it: rating <b>${f2(top.s.rating)}</b>, theirs ${f2(top.a.rating)}`
+        : `, about as well as the average ${ROLE_NOUN[top.key]} (rating ${f2(top.s.rating)}, theirs ${f2(top.a.rating)})`;
+      out.push([isGood(g) ? "good" : isBad(g) ? "bad" : "", `On ${S} you play most like <b>${like}</b>: ${pct(top.share)} of your ${S} rounds, the average player ${pct(top.avgShare)}${how}.`]);
+    } else if (side === "C") {
+      // Every CT round is one of these: say which you play most.
+      const common = [...list].sort((a, b) => b.share - a.share)[0];
+      const VERB = { anchor: "anchor a site", rotator: "rotate between sites", mid: "play mid" };
+      const g = common.grade;
+      out.push([isGood(g) ? "good" : isBad(g) ? "bad" : "", `On CT you mostly <b>${VERB[common.key]}</b> (${pct(common.share)} of your CT rounds, about as often as the average player)${g ? `: rating <b>${f2(common.s.rating)}</b> when you do, the average ${ROLE_NOUN[common.key]} ${f2(common.a.rating)}` : ""}.`]);
+    } else out.push(["", `On ${S} you don't lean to one role: a flexible player.`]);
+    const best = list.filter((r) => r.grade && r.key !== top.key && r.grade.rel >= 0.08).sort((a, b) => b.grade.rel - a.grade.rel)[0];
+    if (best) out.push(["good", `You're at your best on ${S} as <b>${ROLE_LIKE[best.key]}</b>: rating <b>${f2(best.s.rating)}</b> in those ${best.s.n} rounds, the average ${ROLE_NOUN[best.key]} ${f2(best.a.rating)}.`]);
+  }
+  // Rifler or AWPer.
+  const rifle = roles.find((r) => r.key === "rifle"), awp = roles.find((r) => r.key === "awp");
+  if (rifle && awp && rifle.s.n + awp.s.n >= 30) {
+    const awpShare = awp.s.n / (rifle.s.n + awp.s.n);
+    const kind = awpShare >= 0.4 ? "an <b>AWPer</b>" : awpShare >= 0.15 ? "a <b>rifler who also AWPs</b>" : "a <b>rifler</b>";
+    let html = `You're ${kind}: ${pct(1 - awpShare)} of your rifle and AWP rounds are with a rifle`;
+    const r = rifle.s.n >= 15 ? rifle : null, a = awp.s.n >= 15 ? awp : null;
+    if (r) html += ` (rating ${f2(r.s.rating)}, the average rifler ${f2(r.a.rating)})`;
+    if (a) html += `; with the AWP your rating is ${f2(a.s.rating)} (the average AWPer ${f2(a.a.rating)})`;
+    out.push(["", `${html}.${r && a && r.grade && a.grade ? (r.grade.rel > a.grade.rel + 0.08 ? " You play better with a rifle." : a.grade.rel > r.grade.rel + 0.08 ? " You play better with the AWP." : "") : ""}`]);
+  }
+  // Maps.
+  // Best and worst map: from maps with 5+ matches.
+  const enough = mapRows.filter((m) => m.matches >= 5);
+  if (enough.length >= 2) {
+    const b = enough[0], w = enough[enough.length - 1];
+    out.push(["good", `Your best map is <b>${esc(mapName(b.map))}</b> (rating ${f2(b.s.rating)}, won ${b.w} of ${b.matches} matches).`]);
+    out.push(["bad", `Your worst map is <b>${esc(mapName(w.map))}</b> (rating ${f2(w.s.rating)}, won ${w.w} of ${w.matches} matches).`]);
+  }
+  // Positions.
+  const graded = positions.filter((g) => g.grade && g.s.n >= 15);
+  const bestPos = graded.filter((g) => g.grade.rel >= 0.1).sort((a, b) => b.grade.rel - a.grade.rel)[0];
+  const worstPos = graded.filter((g) => g.grade.rel <= -0.1).sort((a, b) => a.grade.rel - b.grade.rel)[0];
+  const posName = (g) => `<b>${esc(g.name)}</b> on ${esc(mapName(g.set.map))} ${SIDE_NAME[g.S]}`;
+  if (bestPos) out.push(["good", `Your best position: ${posName(bestPos)} (rating ${f2(bestPos.s.rating)} in ${bestPos.s.n} rounds, the average player there ${f2(bestPos.a.rating)}).`]);
+  if (worstPos) out.push(["bad", `Your weakest position: ${posName(worstPos)} (rating ${f2(worstPos.s.rating)} in ${worstPos.s.n} rounds, the average player there ${f2(worstPos.a.rating)}).`]);
+  // Duels.
+  const open = buckets.find((b) => b.key === "opening");
+  if (open?.grade) out.push([isGood(open.grade) ? "good" : isBad(open.grade) ? "bad" : "", `You win <b>${pctOf(open.w, open.n)}%</b> of your opening duels (the average player ${Math.round(open.avg * 100)}%): <b>${open.grade.word.toLowerCase()}</b>.`]);
+  const ranked = buckets.filter((b) => b.grade && b.key !== "opening" && b.n >= 25);
+  const bestDuel = ranked.filter((b) => isGood(b.grade)).sort((a, b) => b.grade.z - a.grade.z)[0];
+  const worstDuel = ranked.filter((b) => isBad(b.grade)).sort((a, b) => a.grade.z - b.grade.z)[0];
+  if (bestDuel) out.push(["good", `Your best duels: <b>${esc(bestDuel.name)}</b> (${bestDuel.sub ? `${esc(bestDuel.sub)}; ` : ""}you win ${pctOf(bestDuel.w, bestDuel.n)}%, the average player ${Math.round(bestDuel.avg * 100)}%).`]);
+  if (worstDuel) out.push(["bad", `Your worst duels: <b>${esc(worstDuel.name)}</b> (${worstDuel.sub ? `${esc(worstDuel.sub)}; ` : ""}you win ${pctOf(worstDuel.w, worstDuel.n)}%, the average player ${Math.round(worstDuel.avg * 100)}%).`]);
+  // Staying alive.
+  for (const { S, s, a } of sideStats) {
+    if (s.n < 40) continue;
+    const g = gradeVs(s.first, a.first, s.n, 40, true);
+    if (isBad(g)) out.push(["bad", `On ${SIDE_NAME[S]} you're the first of your team to die in <b>${pct(s.first)}</b> of rounds (the average player ${pct(a.first)}): you die too early.`]);
+    else if (isGood(g)) out.push(["good", `On ${SIDE_NAME[S]} you stay alive well: the first of your team to die in only ${pct(s.first)} of rounds (the average player ${pct(a.first)}).`]);
+  }
+  if (isBad(caught.grade)) out.push(["bad", `${pctOf(caught.k, caught.n)}% of your deaths come while you're looking the other way (the average player ${pct(caught.avg)}): you get caught off guard more than most.`]);
+  return out;
 }
 
 // Lately (your last 15 matches against the ones before) and what goes with you playing better:
@@ -5077,127 +5410,23 @@ function vsAvg(v, avg, fmt, lowerBetter = false, n = 0, standard = null) {
   return `<span class="${good ? "up" : bad ? "down" : ""}">${fmt(v)}</span> <small class="sub">avg ${fmt(avg)}</small>${g ? ` <span class="ps-grade ${g.g}">${g.word}</span>` : ""}`;
 }
 
+// One kind of duel, newest first, each opening its round in the 2D replay.
 function psDuelList(b) {
-  const rows = [...b.ds].sort((a, x) => x.r.match.ts - a.r.match.ts).slice(0, 40);
+  const rows = [...b.ds].sort((a, x) => x.r.match.ts - a.r.match.ts || x.t - a.t).slice(0, 40);
+  const START = { peeked: "you peeked", held: "they peeked you", both: "both moving", still: "standoff" };
   return `<div class="ps-duels"><div class="h3 ins-sub">${esc(b.name)} <span class="sub">${b.n} duels${b.n > rows.length ? `, newest ${rows.length}` : ""}</span></div>
     ${rows.map((d) => `<button class="ins-round" data-rmatch="${esc(d.r.match.id)}" data-rnum="${d.r.n}" title="Open the round in the 2D replay">
       <span class="${d.won ? "up" : "down"}">${d.won ? "Won" : "Lost"}</span><span>${esc(mapName(d.D.map))} · ${new Date(d.r.match.ts * 1000).toLocaleDateString([], { month: "short", day: "numeric" })} · round ${d.r.n} · ${clockOf(d.t)}</span>
-      <span class="sub">${esc(d.myWeapon ? weaponName(d.myWeapon) : "?")} vs ${esc(d.theirWeapon ? weaponName(d.theirWeapon) : "?")} · ${d.dist} units${d.hs ? " · headshot" : ""}${d.theirSpeed > 130 ? " · they were moving" : ""}${d.mySpeed > 130 ? " · you were moving" : ""}</span></button>`).join("")}</div>`;
+      <span class="sub">${esc(d.myWeapon ? weaponName(d.myWeapon) : "?")} vs ${esc(d.theirWeapon ? weaponName(d.theirWeapon) : "?")} · ${d.dist} units${d.start ? ` · ${START[d.start]}` : ""}${d.myUtil & UTIL.flashed ? " · you were flashed" : ""}${d.myUtil & UTIL.molly ? " · molly on you" : ""}${d.theirUtil & UTIL.flashed ? " · they were flashed" : ""}${d.fight && d.myHp < 100 && d.myHp > 0 ? ` · you had ${d.myHp} HP` : ""}${d.offGuard ? (d.won ? " · they were looking away" : " · you were looking away") : ""}${d.hs ? " · headshot" : ""}</span></button>`).join("")}</div>`;
 }
 
-// Your side's numbers: per round and in duels.
-function psSide(sets, duels, S, others = []) {
-  const rounds = sets.flatMap((s) => s.rounds).filter((r) => r.sides[r.match.me] === S);
-  const me = (r) => r.match.me;
-  const kills = sum(rounds.map((r) => r.kills.filter((k) => k[1] === me(r) && k[2] >= 0 && r.sides[k[2]] !== S).length));
-  const deaths = rounds.filter((r) => r.death[me(r)] >= 0).length;
-  const ds = duels.filter((d) => d.side === S);
-  const open = ds.filter((d) => d.opening);
-  const n = rounds.length;
-  const kpr = n ? kills / n : 0, dpr = n ? deaths / n : 0;
-  // The average player on this side: everyone else who played it in your matches.
-  const all = sets.flatMap((s) => s.rounds);
-  let oRounds = 0, oKills = 0, oDeaths = 0;
-  for (const r of all) for (const p of r.team[S]) {
-    if (p === me(r)) continue;
-    oRounds++;
-    oKills += r.kills.filter((k) => k[1] === p && k[2] >= 0 && r.sides[k[2]] !== S).length;
-    if (r.death[p] >= 0) oDeaths++;
-  }
-  const od = others.filter((d) => d.side === S), oo = od.filter((d) => d.opening);
-  const avg = {
-    kpr: oRounds ? oKills / oRounds : null, dpr: oRounds ? oDeaths / oRounds : null, survived: oRounds ? 1 - oDeaths / oRounds : null,
-    open: oo.length ? oo.filter((d) => d.won).length / oo.length : null, duels: od.length ? od.filter((d) => d.won).length / od.length : null,
-  };
-  return { n, kpr, dpr, survived: n - deaths, wins: rounds.filter((r) => r.win === S).length, open: open.length, openWon: open.filter((d) => d.won).length, duels: ds.length, won: ds.filter((d) => d.won).length, score: kpr - dpr, avg };
-}
-
-// Roles: how often you do each thing, against everyone else in the same rounds.
-function psRoles(sets) {
-  const acc = {};
-  const add = (key, mine, all, n) => { const a = (acc[key] = acc[key] || { mine: 0, all: 0, n: 0 }); a.mine += mine; a.all += all; a.n += n; };
-  const clutch = { mine: 0, n: 0, others: 0, on: 0 };
-  for (const { D, rounds } of sets) {
-    const ctx = { D };
-    const tRounds = rounds.filter((r) => r.sides[r.match.me] === "T");
-    const cRounds = rounds.filter((r) => r.sides[r.match.me] === "C");
-    // Entry: first T into a site, and opening duels taken.
-    for (const e of siteEntries(ctx, tRounds)) add("entry", e.p === e.r.match.me ? 1 : 0, 1 / Math.max(1, e.r.team.T.length), 1);
-    for (const r of rounds) {
-      const k = r.firstKill, me = r.match.me;
-      if (!k || k[1] < 0) continue;
-      const S = r.sides[me];
-      if (r.sides[k[1]] !== S && r.sides[k[2]] !== S) continue;
-      add("opener", k[1] === me || k[2] === me ? 1 : 0, 1 / Math.max(1, r.team[S].length), 1);
-    }
-    // Lurking.
-    const ls = lurks(ctx, tRounds);
-    for (const r of tRounds) add("lurk", ls.some((l) => l.r === r && l.p === r.match.me) ? 1 : 0, ls.filter((l) => l.r === r).length / Math.max(1, r.team.T.length), 1);
-    // AWP: share of your team's AWP kills, and your kills with it.
-    for (const r of rounds) {
-      const S = r.sides[r.match.me];
-      const awp = r.kills.filter((k) => k[1] >= 0 && r.sides[k[1]] === S && WCLASS(D.weapons[k[3]]) === "awp");
-      if (awp.length) add("awp", awp.filter((k) => k[1] === r.match.me).length, awp.length / Math.max(1, r.team[S].length), 1);
-    }
-    // Support: flashes and smokes thrown.
-    for (const r of rounds) {
-      const S = r.sides[r.match.me];
-      const util = r.nades.filter((n) => (n[2] === 0 || n[2] === 2) && r.sides[n[1]] === S);
-      add("support", util.filter((n) => n[1] === r.match.me).length, util.length / Math.max(1, r.team[S].length), 1);
-    }
-    // Trades: kills that traded a teammate.
-    for (const r of rounds) {
-      const S = r.sides[r.match.me];
-      const tr = r.kills.filter((k) => k[1] >= 0 && r.sides[k[1]] === S && k[4] & 4);
-      if (tr.length) add("trader", tr.filter((k) => k[1] === r.match.me).length, tr.length / Math.max(1, r.team[S].length), 1);
-    }
-    // CT: anchor (same site from 0:25 to 0:60) or rotator (moved from one site to the other).
-    for (const r of cRounds) {
-      const reg = (p, t) => { const q = posAt(D, r, p, t); return q ? regionOf(D, q[0], q[1]) : null; };
-      const kind = (p) => { const a = reg(p, 250), b = reg(p, 600); return !a || !b ? null : a === b && a !== "Mid" ? "anchor" : a !== b && a !== "Mid" && b !== "Mid" ? "rotate" : null; };
-      const all = r.team.C.map(kind);
-      const mine = kind(r.match.me);
-      add("anchor", mine === "anchor" ? 1 : 0, all.filter((x) => x === "anchor").length / Math.max(1, r.team.C.length), 1);
-      add("rotator", mine === "rotate" ? 1 : 0, all.filter((x) => x === "rotate").length / Math.max(1, r.team.C.length), 1);
-    }
-    // Clutch: rounds won as the last one alive, against everyone else's clutches in them.
-    for (const r of rounds) for (const S of ["T", "C"]) {
-      const team = r.team[S];
-      if (team.length < 2) continue;
-      const deathOf = (p) => (r.death[p] >= 0 ? r.death[p] : 1e9);
-      const [last, next] = [...team].sort((a, b) => deathOf(b) - deathOf(a));
-      if (deathOf(next) >= 1e9) continue; // two or more lived: nobody was alone
-      const won = r.win === S ? 1 : 0;
-      if (last === r.match.me) { clutch.mine += won; clutch.n++; } else { clutch.others += won; clutch.on++; }
-    }
-  }
-  const othersRate = clutch.on ? clutch.others / clutch.on : 0;
-  if (clutch.n) add("clutch", clutch.mine, clutch.n * othersRate, clutch.n);
-  const ROLES = [
-    ["entry", "Entry fragger", "First T into the site", (a) => `First in ${a.mine} of ${a.n} site takes`],
-    ["opener", "Opening duels", "In the round's first kill", (a) => `In the first duel ${pctOf(a.mine, a.n)}% of rounds`],
-    ["lurk", "Lurker", "Alone, far from your team, in the first minute", (a) => `Lurked in ${pctOf(a.mine, a.n)}% of T rounds`],
-    ["awp", "AWPer", "Your share of your team's AWP kills", (a) => `${a.mine} AWP kills`],
-    ["support", "Support", "Smokes and flashes you throw", (a) => `${(a.mine / Math.max(1, a.n)).toFixed(1)} smokes and flashes a round`],
-    ["trader", "Trader", "Kills that avenge a teammate", (a) => `${a.mine} trade kills`],
-    ["anchor", "Anchor", "CT: holding the same site from 1:30 to 1:00", (a) => `Anchored ${pctOf(a.mine, a.n)}% of CT rounds`],
-    ["rotator", "Rotator", "CT: moving from one site to the other", (a) => `Rotated ${pctOf(a.mine, a.n)}% of CT rounds`],
-    ["clutch", "Clutcher", "Rounds won as the last one alive", (a) => `Won ${a.mine} of ${a.n} as the last alive (others: ${pctOf(clutch.others, clutch.on)}%)`],
-  ];
-  const out = ROLES.map(([key, name, how, detail]) => {
-    const a = acc[key] || { mine: 0, all: 0, n: 0 };
-    return { key, name, how, n: a.n, ratio: a.all > 0 ? a.mine / a.all : 0, detail: a.n ? detail(a) : "" };
-  });
-  const ranked = out.filter((r) => r.n >= 15 && r.key !== "clutch").sort((a, b) => b.ratio - a.ratio);
-  ranked.slice(0, 2).forEach((r) => { if (r.ratio >= 1.2) r.top = true; });
-  return out;
-}
-
-function psVerdict(roles) {
-  const top = roles.filter((r) => r.top);
-  if (!top.length) return `<span class="sub">You don't lean strongly to one role: a flexible player.</span>`;
-  const LIKE = { entry: "an entry fragger", opener: "an opening-duel player", lurk: "a lurker", awp: "an AWPer", support: "a support player", trader: "a trader", anchor: "an anchor", rotator: "a rotator" };
-  return `You play most like ${top.map((r) => `<b>${esc(LIKE[r.key] || r.name)}</b>`).join(" and ")}.`;
+// The rounds you played at one position, newest first.
+function psPosRounds(g) {
+  const rows = [...g.list].sort((a, b) => b.r.match.ts - a.r.match.ts || b.r.n - a.r.n).slice(0, 20);
+  return `<div class="ps-duels"><div class="h3 ins-sub">${esc(g.name)} <span class="sub">${esc(mapName(g.set.map))} ${SIDE_NAME[g.S]} · ${g.s.n} rounds, round won ${pctOf(Math.round(g.s.win * g.s.n), g.s.n)}%${g.s.n > rows.length ? ` · newest ${rows.length}` : ""}</span></div>
+    ${rows.map((x) => `<button class="ins-round" data-rmatch="${esc(x.r.match.id)}" data-rnum="${x.r.n}" title="Open the round in the 2D replay">
+      <span class="${x.win ? "up" : "down"}">${x.win ? "Won" : "Lost"}</span><span>${new Date(x.r.match.ts * 1000).toLocaleDateString([], { month: "short", day: "numeric" })} · round ${x.r.n}${((k) => (k ? ` · ${{ pistol: "pistol round", eco: "eco", force: "force buy", full: "full buy" }[k] || k}` : ""))(x.r.kind?.[x.S === "T" ? 0 : 1])}</span>
+      <span class="sub">${x.k} kill${x.k === 1 ? "" : "s"}, ${Math.round(x.dmg)} damage · ${x.died ? `died at ${clockOf(x.dt)}${x.first ? " (first of your team)" : ""}${x.traded ? ", traded" : ""}` : "survived"}</span></button>`).join("")}</div>`;
 }
 
 // Where you usually are 25 seconds in, on one map.
@@ -5924,6 +6153,7 @@ const SESS_GROUPS = [
 const SESS_DUELS = [
   ["rifle", "rifle duels", (d) => d.by_weapon?.rifle], ["awp", "AWP duels", (d) => d.by_weapon?.awp], ["pistol", "pistol duels", (d) => d.by_weapon?.pistol],
   ["afterplant", "afterplants", (d) => d.afterplant], ["retake", "retakes", (d) => d.retake], ["moving", "duels on the move", (d) => d.moving],
+  ["peeked", "your peeks", (d) => d.peeked], ["held", "holding angles", (d) => d.held],
 ];
 const SESS_TIPS = {
   aim: "Warm up before you queue: 10 minutes of aim_botz or a deathmatch (Practice tab), and keep your crosshair at head height.",
@@ -5939,6 +6169,8 @@ const SESS_TIPS = {
   afterplant: "Afterplants: play crossfires on the bomb with a teammate and use the time; you don't need to peek.",
   retake: "Retakes: wait for your teammates and go in together with utility.",
   moving: "You lost duels while running: stop before you shoot.",
+  peeked: "Peeking held angles: jiggle-peek for info first, peek off a flash, or swing together with a teammate.",
+  held: "Holding angles: keep your crosshair where their head will appear, and play spots they don't pre-aim.",
 };
 
 const wmean = (rows, k) => {
