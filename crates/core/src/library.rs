@@ -130,6 +130,10 @@ mod entry_file_tests {
     }
 }
 
+/// Bumped when what makes a highlight (or its clip) changes: 1 = one taps tagged, kills after the
+/// round ended inside the clip.
+pub const HIGHLIGHT_RULES: u32 = 1;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MatchEntry {
     pub id: String,
@@ -150,6 +154,10 @@ pub struct MatchEntry {
     /// Misses you were punished for (see `lowlights`), worst first.
     #[serde(default)]
     pub lowlights: Vec<Lowlight>,
+    /// The highlight rules ([`HIGHLIGHT_RULES`]) this match was analyzed with: older ones are
+    /// analyzed again in the background after an update changes them.
+    #[serde(default)]
+    pub rules: u32,
     /// FACEIT competition (e.g. a matchmaking queue or an ESEA league season), from FACEIT.
     #[serde(default)]
     pub competition: Option<String>,
@@ -475,6 +483,7 @@ pub fn match_entry(
     hls.sort_by(|x, y| y.score.partial_cmp(&x.score).unwrap());
     let duration_ticks = m.rounds.last().map(|r| r.end_tick).unwrap_or(0) - m.rounds.first().map(|r| r.live_tick).unwrap_or(0);
     Some(MatchEntry {
+        rules: HIGHLIGHT_RULES,
         id: id.to_string(),
         source: match m.source {
             Source::Faceit => "faceit",

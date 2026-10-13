@@ -115,6 +115,9 @@ impl Profile {
                 p.console.insert(k.to_string(), v);
             }
         }
+        // Steam's in-game FPS counter is drawn into CS2's picture, so recordings catch it: always
+        // look for it (a corner is only covered when the counter is found there).
+        p.output.hide_fps_counter = true;
         Ok(p)
     }
 }

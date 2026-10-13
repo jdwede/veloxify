@@ -5,7 +5,7 @@ use crate::settings::{data_dir, Seen, Settings};
 use crate::{faceit, mapicons, system};
 use cs2hl_core::faceit::Faceit;
 use cs2hl_core::ingest::{self, Added};
-use cs2hl_core::library::{Index, MatchEntry};
+use cs2hl_core::library::{Index, MatchEntry, HIGHLIGHT_RULES};
 use cs2hl_render::batch::{self, Event, Scope};
 use cs2hl_render::profile::Profile;
 use serde::Serialize;
@@ -45,6 +45,8 @@ pub enum Job {
     Import(Vec<String>),
     /// Film these grenade lineups' videos now (lineup ids).
     RenderLineups(Vec<String>),
+    /// Filming was stopped for a moment (to share a clip): automatic filming carries on.
+    Resume,
 }
 
 /// What a render run makes.
@@ -101,6 +103,8 @@ pub struct Worker {
     /// Matches re-read so far in this run of re-reading (it goes a minute at a time), so the count
     /// carries on instead of starting over each minute.
     reread_done: Cell<usize>,
+    /// The same for matches analyzed again after a change to the highlight rules.
+    rules_done: Cell<usize>,
 }
 
 /// The tray icon tells at a glance what CS2 is up to: green = CS2 closed (Veloxify is free to
@@ -113,7 +117,7 @@ const TRAY_ICONS: [&[u8]; 3] = [
 
 impl Worker {
     pub fn new(app: AppHandle, settings: Arc<Mutex<Settings>>, status: Arc<Mutex<Status>>, abort: Arc<AtomicBool>, stop_item: Option<MenuItem<Wry>>) -> Self {
-        Self { app, settings, status, seen: Seen::load(), failed: HashMap::new(), abort, stop_item, tray_icon: Cell::new(None), not_drawing: Cell::new(None), reread_done: Cell::new(0) }
+        Self { app, settings, status, seen: Seen::load(), failed: HashMap::new(), abort, stop_item, tray_icon: Cell::new(None), not_drawing: Cell::new(None), reread_done: Cell::new(0), rules_done: Cell::new(0) }
     }
 
     fn set(&self, state: &str, message: impl Into<String>, done: usize, total: usize) {
@@ -211,6 +215,7 @@ impl Worker {
                     Ok(Job::Faceit) => last_faceit = None,
                     Ok(Job::Import(files)) => self.forget(&files),
                     Ok(Job::RenderLineups(ids)) => pending_lineups.extend(ids),
+                    Ok(Job::Resume) => held = false,
                     Err(RecvTimeoutError::Disconnected) => return,
                     _ => {}
                 }
@@ -224,6 +229,7 @@ impl Worker {
                     Ok(Job::Faceit) => last_faceit = None,
                     Ok(Job::Import(files)) => self.forget(&files),
                     Ok(Job::RenderLineups(ids)) => pending_lineups.extend(ids),
+                    Ok(Job::Resume) => held = false,
                     Err(RecvTimeoutError::Disconnected) => return,
                     _ => {}
                 }
@@ -314,7 +320,13 @@ impl Worker {
             if rebuilt {
                 self.library_changed();
             }
-            insights_pending |= rebuilt || imported;
+            // Then matches analyzed with older highlight rules (an update changed them).
+            let (updated, more_rules) = if more_details { (false, false) } else { self.update_highlights(&settings, me) };
+            if updated {
+                self.library_changed();
+            }
+            let more_details = more_details || more_rules;
+            insights_pending |= rebuilt || imported || updated;
             if insights_pending && !system::cs2_running() {
                 match cs2hl_core::insights::update(&settings.library_dir, Duration::from_secs(30)) {
                     Ok(0) => insights_pending = false,
@@ -337,6 +349,7 @@ impl Worker {
                         Job::Faceit => last_faceit = None,
                         Job::Import(files) => self.forget(&files),
                         Job::RenderLineups(ids) => pending_lineups.extend(ids),
+                        Job::Resume => held = false,
                         _ => {}
                     }
                 }
@@ -375,6 +388,7 @@ impl Worker {
                 Ok(Job::Faceit) => last_faceit = None,
                 Ok(Job::Import(files)) => self.forget(&files),
                 Ok(Job::RenderLineups(ids)) => pending_lineups.extend(ids),
+                Ok(Job::Resume) => held = false,
                 Err(RecvTimeoutError::Disconnected) => return,
                 _ => {}
             }
@@ -444,6 +458,65 @@ impl Worker {
             let _ = batch::migrate_lineup_clips(lib);
         }
         (built > 0, left && built > 0)
+    }
+
+    /// Matches analyzed with older highlight rules ([`HIGHLIGHT_RULES`]): analyzed again from their
+    /// demo, newest first, a minute at a time. Clips that still show the same are kept; one whose
+    /// moment changed (a kill after the round ended now inside it) is filmed again. Returns
+    /// whether any were updated, and whether more are left.
+    fn update_highlights(&self, settings: &Settings, me: u64) -> (bool, bool) {
+        let lib = &settings.library_dir;
+        let Ok(index) = std::fs::read_to_string(lib.join("index.json")).map_err(anyhow::Error::from).and_then(|t| Ok(serde_json::from_str::<Index>(&t)?))
+        else {
+            return (false, false);
+        };
+        let mut todo: Vec<(i64, PathBuf, PathBuf)> = index
+            .matches
+            .iter()
+            .filter_map(|m| {
+                let file = lib.join("matches").join(format!("{}.json", m.id));
+                let entry: MatchEntry = serde_json::from_str(&std::fs::read_to_string(&file).ok()?).ok()?;
+                let demo = PathBuf::from(&entry.demo_path);
+                (entry.rules < HIGHLIGHT_RULES && demo.exists()).then_some((m.played_ts, file, demo))
+            })
+            .collect();
+        if todo.is_empty() {
+            self.rules_done.set(0);
+            return (false, false);
+        }
+        todo.sort_by_key(|(ts, _, _)| std::cmp::Reverse(*ts));
+        let done_before = self.rules_done.get();
+        let (total, policy, started) = (done_before + todo.len(), settings.clip_policy(), Instant::now());
+        let (mut done, mut left) = (0, false);
+        for (i, (_, file, demo)) in todo.into_iter().enumerate() {
+            if started.elapsed() > Duration::from_secs(60) || system::cs2_running() || crate::demos::downloading(&self.app) {
+                left = true;
+                break;
+            }
+            self.set("details", format!("Updating highlights: match {} of {total}", done_before + i + 1), done_before + i, total);
+            self.rules_done.set(done_before + i + 1);
+            match ingest::add_demo(lib, &demo, me, &policy, true) {
+                Ok(Added::Added { .. }) => done += 1,
+                other => {
+                    // Couldn't (an unreadable demo, or you're not in it): don't try again until
+                    // the next change to the rules.
+                    if let Err(e) = &other {
+                        vlog!("highlights {}: {e:#}", file.display());
+                    }
+                    if let Some(mut entry) = std::fs::read_to_string(&file).ok().and_then(|t| serde_json::from_str::<MatchEntry>(&t).ok()) {
+                        entry.rules = HIGHLIGHT_RULES;
+                        let _ = std::fs::write(&file, serde_json::to_string_pretty(&entry).unwrap_or_default());
+                    }
+                }
+            }
+        }
+        if !left {
+            self.rules_done.set(0);
+        }
+        if done > 0 {
+            let _ = ingest::rebuild_index(lib, me);
+        }
+        (done > 0, left && done > 0)
     }
 
     /// Names the user may go by on FACEIT: the one set in Settings, the names they played under

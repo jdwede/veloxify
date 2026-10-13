@@ -6796,18 +6796,18 @@ function objectiveHtml(p, data) {
   ].filter(Boolean);
   const excellent = stats.filter((x) => x[2] === "g0"), good = stats.filter((x) => x[2] === "g1");
   const rg = stats[0][2];
-  const tier = rg === "g0" && excellent.length >= Math.max(5, Math.ceil(stats.length * 0.75)) ? ["fire", "Pure domination."]
-    : rg === "g0" && excellent.length >= 4 ? ["fire", "You were on fire."]
-    : rg === "g0" || (rg === "g1" && excellent.length >= 3) ? ["great", "A great session."]
-    : rg === "g1" ? ["good", "A good session."]
-    : rg === "g2" ? ["even", "An average session."]
-    : ["rough", "A rough session."];
+  const tier = rg === "g0" && excellent.length >= Math.max(5, Math.ceil(stats.length * 0.75)) ? ["fire", "You were on fire this session."]
+    : rg === "g0" || (rg === "g1" && excellent.length >= 3) ? ["great", "You played great this session."]
+    : rg === "g1" ? ["good", "You played good this session."]
+    : rg === "g2" ? ["even", "You played okay this session."]
+    : rg === "g3" ? ["rough", "You played bad this session."]
+    : ["rough", "You played terrible this session."];
   const order = { g0: 0, g1: 1, g2: 2, g3: 3, g4: 4 };
   const chips = [...stats].sort((a, b) => order[a[2]] - order[b[2]] || b[3] - a[3]);
   const over = n > 1 ? ` over ${n} matches (holding numbers across a whole session is much harder than in one match, so the marks allow for it)` : "";
   const sub = excellent.length ? `${excellent.length} of your ${stats.length} main stats were excellent${good.length ? `, ${good.length} more good` : ""}, by the usual marks for any player${over}.`
     : `By the usual marks for any player${over}, not your own average.`;
-  return `<div class="sv-obj ${tier[0]}"><div class="sv-obj-head"><span class="sv-obj-tag">Objectively</span><b>${tier[1]}</b></div>
+  return `<div class="sv-obj ${tier[0]}"><div class="sv-obj-head"><b>${tier[1]}</b></div>
     <div class="sub">${sub}</div>
     <div class="sv-obj-chips">${chips.map(([label, v, g]) => `<span class="sv-obj-chip ${g}"><span>${esc(label)}</span><b>${esc(v)}</b><i class="ps-grade ${g}">${RATE_GRADES[g]}</i></span>`).join("")}</div></div>`;
 }
@@ -7780,6 +7780,53 @@ document.getElementById("player-prev").onclick = () => play(state.playing - 1);
 document.getElementById("player-next").onclick = () => play(state.playing + 1);
 document.getElementById("player-video").addEventListener("ended", () => play(state.playing + 1));
 document.getElementById("player-folder").onclick = () => tauri?.core.invoke("show_in_folder", { rel: state.playlist[state.playing]?.clip });
+// Copy for Discord: a copy under your upload limit with the Veloxify mark, on the clipboard. While
+// Veloxify films, a second click pauses the filming for it (it carries on after).
+{
+  const size = document.getElementById("player-discord-size");
+  try { size.value = localStorage.getItem("veloxify.discordMb") || "20"; } catch (e) { /* default */ }
+  size.onchange = () => { try { localStorage.setItem("veloxify.discordMb", size.value); } catch (e) { /* not saved */ } };
+  let pauseOk = 0;
+  const label = "Copy for Discord";
+  document.getElementById("player-discord").onclick = async (e) => {
+    const btn = e.currentTarget, rel = state.playlist[state.playing]?.clip;
+    if (!tauri || !rel || btn.disabled) return;
+    const make = () => tauri.core.invoke("copy_for_discord", { rel, limitMb: Number(size.value) || 20 });
+    let paused = false;
+    btn.disabled = true;
+    btn.textContent = "Making the Discord copy…";
+    try {
+      let r;
+      try {
+        r = await make();
+      } catch (err) {
+        if (String(err) !== "filming" || Date.now() > pauseOk) throw err;
+        btn.textContent = "Pausing the filming…";
+        await tauri.core.invoke("stop_rendering");
+        paused = true;
+        for (let i = 0; i < 90 && (await tauri.core.invoke("get_status")).state === "rendering"; i++) await new Promise((res) => setTimeout(res, 1000));
+        btn.textContent = "Making the Discord copy…";
+        r = await make();
+      }
+      btn.textContent = `Copied: ${r.mb.toFixed(1)} MB, ${r.height}p. Paste it in Discord (Ctrl+V)`;
+      setTimeout(() => (btn.textContent = label), 6000);
+    } catch (err) {
+      const m = String(err);
+      if (m === "filming") {
+        pauseOk = Date.now() + 8000;
+        btn.textContent = "Veloxify is filming. Click again to pause it and copy";
+        setTimeout(() => { if (Date.now() >= pauseOk) btn.textContent = label; }, 8200);
+      } else {
+        btn.textContent = m === "playing" ? "Not while you're playing CS2" : "Couldn't make the copy";
+        if (m !== "playing") console.error(err);
+        setTimeout(() => (btn.textContent = label), 4000);
+      }
+    } finally {
+      if (paused) tauri.core.invoke("resume_filming");
+      btn.disabled = false;
+    }
+  };
+}
 document.getElementById("player-copy").onclick = async (e) => {
   const btn = e.currentTarget;
   try {
@@ -7879,8 +7926,9 @@ function renderBanner() {
       ],
     };
   } else if (st?.state === "details" && st.total) {
-    b = { kind: "busy", title: "Re-reading your matches", count: `${Math.min(st.done + 1, st.total)}/${st.total}`, frac: st.done / st.total,
-      note: "An update added new stats, so each match's demo is read once more (about 5 seconds each, only while CS2 is closed).", actions: [] };
+    const hl = (st.message || "").startsWith("Updating highlights");
+    b = { kind: "busy", title: hl ? "Updating your highlights" : "Re-reading your matches", count: `${Math.min(st.done + 1, st.total)}/${st.total}`, frac: st.done / st.total,
+      note: hl ? "An update changed what makes a highlight (one taps, kills after the round ended), so each match is looked at once more (only while CS2 is closed). Clips that changed are filmed again." : "An update added new stats, so each match's demo is read once more (about 5 seconds each, only while CS2 is closed).", actions: [] };
   } else if (st?.state === "importing" && st.total) {
     b = { kind: "busy", title: "Analyzing matches", count: `${Math.min(st.done + 1, st.total)}/${st.total}`, frac: st.done / st.total, actions: [] };
   } else if (st?.state === "rendering") {

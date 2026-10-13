@@ -261,23 +261,142 @@ pub fn make_thumb(clip: &Path, thumb: &Path) -> Result<()> {
     make_thumb_at(clip, thumb, 3.7)
 }
 
-/// Preview frame `at` seconds into a clip (or just before its end).
-pub fn make_thumb_at(clip: &Path, thumb: &Path, at: f64) -> Result<()> {
-    // The clip's length from ffmpeg's own "Duration: 00:00:21.00" line (no ffprobe needed).
-    let mut probe = Command::new(ffmpeg_exe());
-    probe.args(["-hide_banner", "-i"]).arg(clip);
-    hide_console(&mut probe);
-    let info = String::from_utf8_lossy(&probe.output()?.stderr).into_owned();
+/// A video's length (seconds) and picture size, from ffmpeg's own "Duration: 00:00:21.00" and
+/// "1920x1080" lines (no ffprobe needed).
+pub fn probe_size(video: &Path) -> Result<(f64, u32, u32)> {
+    let mut c = Command::new(ffmpeg_exe());
+    c.args(["-hide_banner", "-i"]).arg(video);
+    hide_console(&mut c);
+    let info = String::from_utf8_lossy(&c.output()?.stderr).into_owned();
     let dur: f64 = info
         .split("Duration: ")
         .nth(1)
         .and_then(|d| d.split(',').next())
         .map(|hms| hms.trim().split(':').filter_map(|x| x.parse::<f64>().ok()).fold(0.0, |acc, x| acc * 60.0 + x))
         .unwrap_or(0.0);
+    let (width, height) = info
+        .lines()
+        .find(|l| l.contains("Video:"))
+        .and_then(|l| l.split([' ', ',']).find_map(|w| w.split_once('x').and_then(|(a, b)| a.parse::<u32>().ok().zip(b.parse::<u32>().ok()))))
+        .unwrap_or((1920, 1080));
+    Ok((dur, width, height))
+}
+
+/// A video's length (seconds) and picture height.
+pub fn probe(video: &Path) -> Result<(f64, u32)> {
+    probe_size(video).map(|(d, _, h)| (d, h))
+}
+
+/// Preview frame `at` seconds into a clip (or just before its end).
+pub fn make_thumb_at(clip: &Path, thumb: &Path, at: f64) -> Result<()> {
+    let (dur, _) = probe(clip)?;
     let t = at.min(dur - 0.5).max(0.0);
     let mut c = ffmpeg();
     c.args(["-ss", &format!("{t:.2}"), "-i"]).arg(clip);
     c.args(["-frames:v", "1", "-vf", "scale=640:-2", "-q:v", "3"]).arg(thumb);
     run(c)?;
     Ok(())
+}
+
+/// A copy made to share: its size and picture height.
+#[derive(Debug, Clone, Copy)]
+pub struct ShareCopy {
+    pub bytes: u64,
+    pub height: u32,
+}
+
+/// A copy of a clip that fits under `limit_bytes` (Discord's upload limit), with the Veloxify mark
+/// in the bottom-right corner: `logo` (an image) and "veloxify" in `font`, both optional. The
+/// bitrate is what fits (the picture goes down to 720 or 540 lines when that's too little for full
+/// size); the GPU encoder when there is one (seconds), else the CPU in two passes (to land on the
+/// size). Tried again smaller if it still comes out too big.
+pub fn share_copy(src: &Path, dst: &Path, limit_bytes: u64, logo: Option<&Path>, font: Option<&Path>, work: &Path) -> Result<ShareCopy> {
+    let (dur, src_w, src_h) = probe_size(src)?;
+    if dur <= 0.0 {
+        bail!("couldn't read the clip's length");
+    }
+    // Clips filmed before the FPS counter was covered still have it: covered here.
+    let fps_cover = detect_fps_counter(&src.display().to_string(), src_w, src_h).map(|c| fps_mask(c, src_w, src_h));
+    std::fs::create_dir_all(work)?;
+    let mut budget = 0.92;
+    for _ in 0..3 {
+        // Kilobits a second: everything that fits, less the sound.
+        let total = (limit_bytes as f64 * 8.0 / 1000.0 * budget / dur).min(40_000.0);
+        let audio = if total > 3000.0 { 128.0 } else { 96.0 };
+        let video = (total - audio).max(500.0);
+        let h = if video >= 5500.0 { src_h.min(1080) } else if video >= 2800.0 { src_h.min(720) } else { src_h.min(540) };
+        let fps = if video < 1500.0 { Some(30) } else { None };
+        // The mark: a black rounded badge in the bottom-left corner, the logo then "veloxify".
+        let fs = (h as f64 * 0.034).round().max(14.0) as u32;
+        let lh = (fs as f64 * 1.25).round() as u32;
+        let (px, py, gap) = ((fs as f64 * 0.42).round() as u32, (fs as f64 * 0.28).round() as u32, (fs as f64 * 0.32).round() as u32);
+        let m = (h as f64 * 0.025).round() as u32;
+        let rate = fps.map(|f| format!(",fps={f}")).unwrap_or_default();
+        let scaled = match &fps_cover {
+            Some(cover) => format!("[0:v]{cover}[cv];[cv]scale=-2:{h}{rate}[bg]"),
+            None => format!("[0:v]scale=-2:{h}{rate}[bg]"),
+        };
+        let mark = |with_text: bool| -> String {
+            // "veloxify" in Segoe UI Bold is about 3.6 times the font size wide.
+            let text = with_text && font.is_some();
+            let logo_w = if logo.is_some() { lh } else { 0 };
+            let text_w = if text { (if logo.is_some() { gap } else { 0 }) + (fs as f64 * 3.62).round() as u32 } else { 0 };
+            let w = px + logo_w + text_w + px;
+            let bh = lh + 2 * py;
+            let r = (bh as f64 * 0.32).round() as u32;
+            // Rounded corners: a pixel is inside when it's within r of the inner rectangle.
+            let mut g = format!(
+                "{scaled};color=c=black:s={w}x{bh},format=rgba,geq=r='0':g='0':b='0':a='if(lte(hypot(max(0,max({r}-X,X-({w}-1-{r}))),max(0,max({r}-Y,Y-({bh}-1-{r})))),{r}),245,0)'[box]"
+            );
+            let mut last = "[box]".to_string();
+            if logo.is_some() {
+                g += &format!(";[1:v]scale=-1:{lh}[lg];{last}[lg]overlay={px}:{py}[b1]");
+                last = "[b1]".into();
+            }
+            if text {
+                let ff = font.unwrap().display().to_string().replace('\\', "/").replace(':', "\\:");
+                let x = px + if logo.is_some() { lh + gap } else { 0 };
+                g += &format!(";{last}drawtext=fontfile='{ff}':text='veloxify':fontsize={fs}:fontcolor=white:x={x}:y=(h-th)/2[b2]");
+                last = "[b2]".into();
+            }
+            g + &format!(";[bg]{last}overlay={m}:H-h-{m}:shortest=1[vout]")
+        };
+        let encode = |graph: &str, nvenc: bool| -> Result<()> {
+            let input = |c: &mut Command| {
+                c.arg("-i").arg(src);
+                if let Some(l) = logo {
+                    c.arg("-i").arg(l);
+                }
+                c.args(["-filter_complex", graph, "-map", "[vout]", "-map", "0:a?"]);
+            };
+            let vb = format!("{}k", video.round());
+            if nvenc {
+                let mut c = ffmpeg();
+                input(&mut c);
+                c.args(["-c:v", "h264_nvenc", "-preset", "p6", "-rc", "cbr", "-b:v", &vb, "-maxrate", &vb, "-bufsize", &vb]);
+                c.args(["-c:a", "aac", "-b:a", &format!("{}k", audio), "-movflags", "+faststart"]).arg(dst);
+                return run(c).map(|_| ());
+            }
+            let log = work.join("pass");
+            let mut c = ffmpeg();
+            input(&mut c);
+            c.args(["-c:v", "libx264", "-preset", "medium", "-b:v", &vb, "-pass", "1", "-passlogfile"]).arg(&log).args(["-an", "-f", "null", "NUL"]);
+            run(c)?;
+            let mut c = ffmpeg();
+            input(&mut c);
+            c.args(["-c:v", "libx264", "-preset", "medium", "-b:v", &vb, "-pass", "2", "-passlogfile"]).arg(&log);
+            c.args(["-c:a", "aac", "-b:a", &format!("{}k", audio), "-movflags", "+faststart"]).arg(dst);
+            run(c).map(|_| ())
+        };
+        // The GPU first; without the text if this ffmpeg can't draw it.
+        let (full, plain) = (mark(true), mark(false));
+        let done = encode(&full, true).or_else(|_| encode(&full, false)).or_else(|_| encode(&plain, true)).or_else(|_| encode(&plain, false));
+        done?;
+        let bytes = std::fs::metadata(dst)?.len();
+        if bytes <= limit_bytes {
+            return Ok(ShareCopy { bytes, height: h });
+        }
+        budget *= 0.85 * limit_bytes as f64 / bytes as f64;
+    }
+    bail!("couldn't get the clip under the size limit")
 }

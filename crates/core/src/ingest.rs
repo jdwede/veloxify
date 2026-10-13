@@ -59,7 +59,8 @@ pub fn add_demo(root: &Path, path: &Path, me: u64, policy: &ClipPolicy, refresh:
     };
     if let Some(prev) = previous {
         for h in entry.highlights.iter_mut() {
-            if let Some(old) = prev.highlights.iter().find(|o| o.id == h.id) {
+            // The clip is kept unless what it shows changed (it's filmed again then).
+            if let Some(old) = prev.highlights.iter().find(|o| o.id == h.id && o.segments == h.segments) {
                 h.clip = old.clip.clone();
                 h.render_error = old.render_error.clone();
                 h.thumb = old.thumb.clone();
@@ -77,7 +78,10 @@ pub fn add_demo(root: &Path, path: &Path, me: u64, policy: &ClipPolicy, refresh:
             entry.played_at = prev.played_at.clone();
         }
     }
-    std::fs::write(&out, serde_json::to_string_pretty(&entry)?)?;
+    // Written beside it and renamed over it, so a match file is never left half-written.
+    let tmp = out.with_extension("json.tmp");
+    std::fs::write(&tmp, serde_json::to_string_pretty(&entry)?)?;
+    std::fs::rename(&tmp, &out)?;
     if let Err(e) = crate::details::write(root, &id, &demo, &m, &a, me) {
         eprintln!("details {id}: {e:#}");
     }

@@ -16,6 +16,7 @@ mod mapicons;
 mod players;
 mod practice;
 mod settings;
+mod share;
 mod system;
 mod tracking;
 mod worker;
@@ -76,15 +77,39 @@ fn show_in_folder(state: State<AppState>, rel: String) -> Result<(), String> {
 fn copy_file(state: State<AppState>, rel: String) -> Result<(), String> {
     let lib = state.settings.lock().unwrap().library_dir.clone();
     let path = worker::library_file(&lib, &rel).ok_or("file not found")?;
-    let mut c = std::process::Command::new("powershell");
-    c.args(["-NoProfile", "-Command", &format!("Set-Clipboard -LiteralPath '{}'", path.display().to_string().replace('\'', "''"))]);
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        c.creation_flags(0x0800_0000);
+    share::to_clipboard(&path)
+}
+
+#[derive(Serialize)]
+struct SharedView {
+    mb: f64,
+    height: u32,
+}
+
+/// A copy of the clip that fits Discord's upload limit (`limit_mb`), with the Veloxify mark, on the
+/// clipboard: paste it into Discord. Not while you're playing (it'd cost you frames) or while
+/// Veloxify films (the filming would stutter): "playing" / "filming" then.
+#[tauri::command]
+async fn copy_for_discord(state: State<'_, AppState>, rel: String, limit_mb: u32) -> Result<SharedView, String> {
+    if state.status.lock().unwrap().state == "rendering" {
+        return Err("filming".into());
     }
-    let out = c.output().map_err(|e| e.to_string())?;
-    out.status.success().then_some(()).ok_or_else(|| String::from_utf8_lossy(&out.stderr).into_owned())
+    if system::cs2_running() {
+        return Err("playing".into());
+    }
+    let lib = state.settings.lock().unwrap().library_dir.clone();
+    let path = worker::library_file(&lib, &rel).ok_or("file not found")?;
+    let shared = tauri::async_runtime::spawn_blocking(move || share::discord_copy(&path, limit_mb.clamp(8, 500)))
+        .await
+        .map_err(|e| e.to_string())??;
+    share::to_clipboard(&shared.path)?;
+    Ok(SharedView { mb: shared.bytes as f64 / 1e6, height: shared.height })
+}
+
+/// Filming stopped for something (sharing a clip): carry on with it now.
+#[tauri::command]
+fn resume_filming(state: State<AppState>) {
+    let _ = state.jobs.lock().unwrap().send(Job::Resume);
 }
 
 #[derive(Serialize)]
@@ -583,6 +608,8 @@ fn main() {
             process_now,
             stop_rendering,
             render_matches,
+            copy_for_discord,
+            resume_filming,
             show_in_folder,
             copy_file,
             get_settings,

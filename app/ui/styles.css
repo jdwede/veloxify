@@ -1776,3 +1776,10 @@ ul.ins-list { list-style: none; padding-left: 0; }
 .sv-cmp td:not(:first-child), .sv-cmp th:not(:first-child) { text-align: right; white-space: nowrap; }
 .sv-cmp td b { font-size: 15px; }
 .sv-cmp td i.ps-grade { font-style: normal; margin-left: 6px; font-size: 10px; padding: 1px 6px; }
+
+/* Clip player: Copy for Discord with the upload limit next to it */
+.player-share { display: inline-flex; align-items: stretch; }
+.player-share .btn { border-top-right-radius: 0; border-bottom-right-radius: 0; background: #5865f2; border-color: #5865f2; color: #fff; }
+.player-share .btn:hover { background: #4752c4; }
+.player-share .btn:disabled { opacity: 0.8; cursor: progress; }
+.player-share select { background: var(--row); color: var(--text); border: 1px solid var(--line-2); border-left: 0; border-radius: 0 var(--radius-sm) var(--radius-sm) 0; padding: 0 6px; font: inherit; font-size: 12px; }

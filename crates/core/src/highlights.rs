@@ -362,6 +362,13 @@ pub fn detect(m: &Match, a: &Analysis, player: u64, flicks: &HashMap<usize, f64>
         if n == 1 && tier == 0 && !tags.is_empty() {
             tier = 1;
         }
+        // One taps: tagged (and worth a little more), but not a highlight on their own.
+        for k in &ks {
+            if one_tap(m, k, player) {
+                score += 0.75;
+                tag("one tap".into(), &mut tags);
+            }
+        }
 
         if gun_round && !ctx.pistol {
             score += 0.5;
@@ -379,7 +386,10 @@ pub fn detect(m: &Match, a: &Analysis, player: u64, flicks: &HashMap<usize, f64>
         let post = (POST_ROLL_S * TICKRATE) as i32;
         let gap = (SEGMENT_GAP_S * TICKRATE) as i32;
         let lo = round.live_tick;
-        let hi = round.end_tick + (5.0 * TICKRATE) as i32;
+        // Up to 5 s after the round ends, or past a kill in the seconds after it (before the next
+        // round starts), with a moment after it.
+        let last_kill = ks.iter().map(|k| k.tick).max().unwrap_or(round.end_tick);
+        let hi = (round.end_tick + (5.0 * TICKRATE) as i32).max(last_kill + (1.5 * TICKRATE) as i32);
         let mut segments: Vec<Segment> = vec![];
         for k in &ks {
             match segments.last_mut() {
@@ -490,6 +500,20 @@ fn hand(n: usize, ks: &[&Kill], tags: &[String], clutch: Option<&Clutch>) -> u32
 
 /// Headline priority: ACE > 4K > clutch > ninja defuse > rare kill > 3K > precision multi-kill >
 /// entry/critical 2K > flick > anything else.
+/// A one tap: a single bullet to the head that killed from 80+ health, with a rifle or a pistol,
+/// not in the middle of a spray (no other shot in the 0.2 s before it, no earlier hit on them).
+fn one_tap(m: &Match, k: &Kill, player: u64) -> bool {
+    if !k.headshot || !matches!(weapon_class(&k.weapon), "rifle" | "pistol" | "deagle") {
+        return false;
+    }
+    let hits: Vec<_> = m.damages.iter().filter(|d| d.attacker == Some(player) && d.victim == k.victim && d.tick <= k.tick && d.tick >= k.tick - 3 * TICKRATE as i32).collect();
+    let [hit] = hits.as_slice() else { return false };
+    if hit.tick != k.tick || hit.hitgroup != "head" || hit.health_removed < 80 {
+        return false;
+    }
+    !m.shots.iter().any(|s| s.player == player && s.tick < k.tick && s.tick >= k.tick - (0.2 * TICKRATE) as i32)
+}
+
 fn title(tags: &[String], n: usize, weapon: Option<String>, round_number: u32) -> String {
     const ORDER: &[&str] = &[
         "ACE", "4K", "clutch", "ninja defuse", "noscope", "knife kill", "grenade impact kill", "jumping kill", "3K",

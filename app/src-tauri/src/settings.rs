@@ -176,9 +176,9 @@ impl RenderOptions {
         p["output"]["width"] = (height * 16 / 9).into();
         p["output"]["fps"] = (if self.fps == 30 { 30 } else { 60 }).into();
         p["output"]["transition"] = (if self.transition == "fade" { "fade" } else { "cut" }).into();
-        // Recordings are of CS2's own window, which Steam's overlay (FPS counter) isn't part of:
-        // nothing to cover, and covering a corner could hide real footage.
-        p["output"]["hide_fps_counter"] = false.into();
+        // Steam's in-game FPS counter is drawn into CS2's picture, so recordings catch it: cover it
+        // where it's found (only a corner with the counter in it is covered).
+        p["output"]["hide_fps_counter"] = true.into();
         p["console"]["cl_draw_only_deathnotices"] = (if self.killfeed_only { "1" } else { "0" }).into();
         p["console"]["cl_show_observer_crosshair"] = (if self.own_crosshair { "2" } else { "0" }).into();
         // The crosshair recordings use, in CS2's pixel variables: a chosen code, else the clean
