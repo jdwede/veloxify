@@ -453,8 +453,9 @@ pub struct MyMatch {
     pub stats: std::collections::BTreeMap<String, f64>,
 }
 
-/// Writes `benchmarks.json` (every stat's distribution over all player-matches) and, given the
-/// owner, `my_stats.json` (their stats per match: core stats and details stats).
+/// Writes `benchmarks.json` (every stat's distribution over all player-matches), `lobby_clutches.json`
+/// (everyone else's clutches by 1vX, won and attempted, index 1-5) and, given the owner,
+/// `my_stats.json` (their stats per match: core stats and details stats).
 pub fn write_benchmarks(root: &std::path::Path, me: Option<u64>) -> Result<()> {
     let mut values: HashMap<&str, Vec<f64>> = HashMap::new();
     let mut mine: HashMap<String, std::collections::BTreeMap<String, f64>> = HashMap::new();
@@ -487,6 +488,7 @@ pub fn write_benchmarks(root: &std::path::Path, me: Option<u64>) -> Result<()> {
         }
     }
     let mut my_matches = vec![];
+    let (mut clutch_won, mut clutch_att) = ([0u32; 6], [0u32; 6]);
     for f in std::fs::read_dir(root.join("matches"))?.flatten() {
         let p = f.path();
         if !crate::library::is_entry_file(&p) {
@@ -494,6 +496,12 @@ pub fn write_benchmarks(root: &std::path::Path, me: Option<u64>) -> Result<()> {
         }
         let Ok(e) = serde_json::from_str::<crate::library::MatchEntry>(&std::fs::read_to_string(&p)?) else { continue };
         for pl in &e.players {
+            if pl.steamid != me_s {
+                for x in 1..6 {
+                    clutch_won[x] += pl.counts.clutches_won[x];
+                    clutch_att[x] += pl.counts.clutches_attempted[x];
+                }
+            }
             let core = core_stats(pl);
             for (k, _) in CORE_STATS {
                 if let Some(v) = core.get(*k) {
@@ -507,6 +515,7 @@ pub fn write_benchmarks(root: &std::path::Path, me: Option<u64>) -> Result<()> {
             }
         }
     }
+    std::fs::write(root.join("lobby_clutches.json"), serde_json::to_string(&serde_json::json!({ "won": clutch_won, "attempted": clutch_att }))?)?;
     if me.is_some() {
         my_matches.sort_by_key(|m| m.ts);
         std::fs::write(root.join("my_stats.json"), serde_json::to_string(&my_matches)?)?;

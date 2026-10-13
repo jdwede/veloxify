@@ -180,6 +180,10 @@ impl Worker {
         let mut insights_pending = true;
         // The user's CS2 setup (resolution, sensitivity, mouse) is recorded once per launch too.
         let mut setup_checked = false;
+        // Filming was stopped (Stop rendering, CS2 or a FACEIT match wanted): no more automatic
+        // filming until they've played again, as the notification says ("more after your next
+        // game"). What they ask for still films.
+        let mut held = false;
         // Right tray color from the start (the first import can take a while).
         self.set(if system::cs2_running() { "waiting" } else { "idle" }, "Starting", 0, 0);
         loop {
@@ -248,7 +252,7 @@ impl Worker {
                 vlog!("put back your CS2 video settings after a render was cut short");
             }
             let imported = self.import(&settings, me);
-            if imported || !settings.library_dir.join("my_stats.json").exists() {
+            if imported || !settings.library_dir.join("my_stats.json").exists() || !settings.library_dir.join("lobby_clutches.json").exists() {
                 let _ = cs2hl_core::details::write_benchmarks(&settings.library_dir, Some(me));
                 let _ = batch::migrate_lineup_clips(&settings.library_dir);
             } else if !cs2hl_core::lineups::current(&settings.library_dir) {
@@ -281,6 +285,9 @@ impl Worker {
                     vlog!("your CS2 setup changed (or was recorded for the first time)");
                 }
             }
+            if was_playing {
+                held = false;
+            }
             was_playing = false;
             // CS2 stopped drawing last time (monitor off...): film again once someone's at the PC
             // (keyboard or mouse input since then, or something asked for).
@@ -293,10 +300,10 @@ impl Worker {
             let can_film = self.not_drawing.get().is_none();
             // Clips and lineup videos you asked for come first.
             if can_film && !pending_clips.is_empty() {
-                self.render(&settings, me, Scope::Items(std::mem::take(&mut pending_clips)));
+                held |= self.render(&settings, me, Scope::Items(std::mem::take(&mut pending_clips)));
             }
             if can_film && !pending_lineups.is_empty() && !system::cs2_running() {
-                self.render_lineups(&settings, me, Some(std::mem::take(&mut pending_lineups)));
+                held |= self.render_lineups(&settings, me, Some(std::mem::take(&mut pending_lineups)));
             }
             // Older matches' details (match page, insights, crosshairs) before automatic filming:
             // a minute at a time, until none are left (an update can make all of them stale).
@@ -332,20 +339,20 @@ impl Worker {
                 }
                 continue;
             }
-            if can_film && (settings.auto_render || !pending_render.is_empty()) {
+            if can_film && ((settings.auto_render && !held) || !pending_render.is_empty()) {
                 let scope =
                     if pending_render.is_empty() { Scope::LatestSession } else { Scope::Matches(std::mem::take(&mut pending_render)) };
-                self.render(&settings, me, scope);
+                held |= self.render(&settings, me, scope);
                 // Then the latest session's worst deaths, for the whiff analyzer.
-                if settings.auto_render && settings.auto_lowlights && !system::cs2_running() {
+                if settings.auto_render && settings.auto_lowlights && !held && !system::cs2_running() {
                     let items = latest_lowlights(&settings.library_dir, LOWLIGHTS_PER_MATCH);
                     if !items.is_empty() {
-                        self.render(&settings, me, Scope::Items(items));
+                        held |= self.render(&settings, me, Scope::Items(items));
                     }
                 }
                 // Then grenade lineup videos, the most thrown first, a batch at a time.
-                if settings.auto_render && settings.auto_lineups && !system::cs2_running() {
-                    self.render_lineups(&settings, me, None);
+                if settings.auto_render && settings.auto_lineups && !held && !system::cs2_running() {
+                    held |= self.render_lineups(&settings, me, None);
                 }
             } else if imported {
                 self.set("idle", "Up to date", 0, 0);
@@ -574,25 +581,28 @@ impl Worker {
         added > 0
     }
 
-    fn render(&self, settings: &Settings, me: u64, scope: Scope) {
-        self.run_batch(settings, me, Batch::Clips(scope));
+    /// Films clips; true when filming was stopped before the end.
+    fn render(&self, settings: &Settings, me: u64, scope: Scope) -> bool {
+        self.run_batch(settings, me, Batch::Clips(scope))
     }
 
-    fn render_lineups(&self, settings: &Settings, me: u64, ids: Option<Vec<String>>) {
-        self.run_batch(settings, me, Batch::Lineups(ids));
+    fn render_lineups(&self, settings: &Settings, me: u64, ids: Option<Vec<String>>) -> bool {
+        self.run_batch(settings, me, Batch::Lineups(ids))
     }
 
-    fn run_batch(&self, settings: &Settings, me: u64, what: Batch) {
+    /// Films one batch; true when it was stopped before the end (Stop rendering, CS2 or a FACEIT
+    /// match wanted).
+    fn run_batch(&self, settings: &Settings, me: u64, what: Batch) -> bool {
         let lib = settings.library_dir.clone();
         if !lib.join("index.json").exists() {
-            return;
+            return false;
         }
         let empty = match &what {
             Batch::Clips(scope) => batch::plan(&lib, scope).map_or(true, |p| p.is_empty()),
             Batch::Lineups(ids) => batch::plan_lineups(&lib, ids.as_deref()).is_empty(),
         };
         if empty {
-            return;
+            return false;
         }
         let kind = match &what {
             Batch::Lineups(_) => "lineups",
@@ -605,7 +615,7 @@ impl Worker {
             Ok(p) => p,
             Err(e) => {
                 self.set("error", format!("Render profile: {e}"), 0, 0);
-                return;
+                return false;
             }
         };
         // A FACEIT match found means you're about to need CS2: don't start, and stop if one comes
@@ -614,7 +624,7 @@ impl Worker {
         if let Some(pid) = &player_id {
             if faceit::in_match(pid) == Some(true) {
                 self.set("waiting", "FACEIT match in progress; clips after it", 0, 0);
-                return;
+                return false;
             }
         }
         let work = data_dir().join("work");
@@ -641,6 +651,7 @@ impl Worker {
         }
         let mut total = 0;
         let mut done = 0;
+        let mut stopped = false;
         let abort = self.abort.clone();
         {
             let mut s = self.status.lock().unwrap();
@@ -681,6 +692,7 @@ impl Worker {
                 }
             }
             Event::Stopped { rendered, wants_cs2 } => {
+                stopped = true;
                 vlog!("{noun}: stopped after {rendered} (CS2 wanted: {wants_cs2})");
                 // Veloxify never starts CS2 for you (it could be left running with nobody there):
                 // it closes its own and you start CS2 from Steam as usual.
@@ -714,6 +726,7 @@ impl Worker {
             Err(e) => self.set("error", format!("Rendering stopped: {e:#}"), done, total),
             Ok(_) => {}
         }
+        stopped
     }
 }
 

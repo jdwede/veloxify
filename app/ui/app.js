@@ -6013,8 +6013,8 @@ async function renderSession(view, date, idx) {
       ${bar("CT side", p.ct_rating, "var(--ct)")}
       <div class="sc-stats">
         <div><b class="${gradeClass("rws", p.rws)}">${f1(p.rws)}</b><span>RWS</span></div>
-        <div><b>${f1(p.adr)}</b><span>ADR</span></div>
-        <div><b>${f2(p.kd)}</b><span>K/D</span></div>
+        <div><b class="${gradeClass("adr", p.adr)}">${f1(p.adr)}</b><span>ADR</span></div>
+        <div><b class="${gradeClass("kd", p.kd)}">${f2(p.kd)}</b><span>K/D</span></div>
         <div><b>${fmtSwing(p.swing)}</b><span>Swing</span></div>
       </div>
       <div class="sc-maps">${p.results.map((r) => `<span class="${r.won ? "up" : "down"}" title="${esc(mapName(r.map))}">${r.won ? "W" : "L"}</span>`).join("")}</div>
@@ -6024,12 +6024,25 @@ async function renderSession(view, date, idx) {
   const COLS = [
     ["name", "Player"], ["maps", "Maps"], ["wins", "W-L"], ["rating3", "HLTV 3.0"], ["rws", "RWS"], ["kills", "K"], ["deaths", "D"], ["assists", "A"],
     ["diff", "+/-"], ["kd", "K/D"], ["adr", "ADR"], ["kr", "K/R"], ["kast", "KAST"], ["hs", "HS%"], ["k2", "2K"], ["k3", "3K"], ["k4", "4K"], ["k5", "5K"],
-    ["mvps", "MVPs"], ["entries", "Entries"], ["pistol", "Pistol kills"], ["eco", "Eco kills"], ["clutch", "Clutches"], ["swing", "Swing"],
+    ["mvps", "MVPs"], ["entries", "Entries"], ["pistol", "Pistol kills"], ["eco", "Eco kills"], ["clutch", "Clutches"],
+    ["c1", "1v1"], ["c2", "1v2"], ["c3", "1v3"], ["c4", "1v4"], ["c5", "1v5"], ["swing", "Swing"],
   ];
+  const rates = sdata.clutchRates || CLUTCH_AVG;
+  const clutchArr = (p, k) => p.c[k] || [0, 0, 0, 0, 0, 0];
+  // One 1vX (or all of them, x = 0): "2/5 (40%)", colored against the average player.
+  const clutchCell = (p, x) => {
+    const won = clutchArr(p, "clutches_won"), att = clutchArr(p, "clutches_attempted");
+    const only = (arr) => (x ? arr.map((v, i) => (i === x ? v : 0)) : arr);
+    const g = clutchGrade(only(won), only(att), rates);
+    if (!g) return `<td class="zero">–</td>`;
+    const avg = x ? `the average player in your matches wins ${Math.round(rates[x] * 100)}% of 1v${x}s` : `the average player would have won ${f1(g.expected)} of these`;
+    return `<td class="${g.g}" title="${x ? `1v${x}: ` : ""}won ${g.w} of ${g.n} (${pctOf(g.w, g.n)}%); ${avg}">${g.w}/${g.n} <small>(${pctOf(g.w, g.n)}%)</small></td>`;
+  };
   const val = (p, k) => ({
     name: p.name.toLowerCase(), kills: p.c.kills || 0, deaths: p.c.deaths || 0, assists: p.c.assists || 0, diff: (p.c.kills || 0) - (p.c.deaths || 0),
     k2: (p.c.multikill_rounds || [])[2] || 0, k3: (p.c.multikill_rounds || [])[3] || 0, k4: (p.c.multikill_rounds || [])[4] || 0, k5: (p.c.multikill_rounds || [])[5] || 0,
     mvps: p.c.mvps || 0, entries: p.c.opening_kills || 0, pistol: p.c.pistol_kills || 0, eco: p.c.eco_kills || 0, clutch: sum(p.c.clutches_won || []),
+    ...(/^c[1-5]$/.test(k) ? { [k]: ((x) => (clutchArr(p, "clutches_attempted")[x] ? clutchArr(p, "clutches_won")[x] / clutchArr(p, "clutches_attempted")[x] : -1))(Number(k[1])) } : {}),
   }[k] ?? p[k] ?? 0);
   // Only the players who were in the session with you: you and your party.
   const rows = players.filter((p) => p.is_me || (p.party && p.mine > 0))
@@ -6044,11 +6057,12 @@ async function renderSession(view, date, idx) {
       case "rating3": return `<td class="rating ${ratingClass(p.rating3)}">${f2(p.rating3)}</td>`;
       case "rws": return `<td class="${gradeClass("rws", p.rws)}">${f1(p.rws)}</td>`;
       case "diff": { const d = val(p, "diff"); return `<td class="${d > 0 ? "up" : d < 0 ? "down" : ""}">${d > 0 ? "+" : ""}${d}</td>`; }
-      case "kd": case "kr": return `<td>${f2(p[k])}</td>`;
-      case "adr": return `<td>${f1(p.adr)}</td>`;
+      case "kd": case "kr": return `<td class="${gradeClass(k === "kd" ? "kd" : "kpr", p[k])}">${f2(p[k])}</td>`;
+      case "adr": return `<td class="${gradeClass("adr", p.adr)}">${f1(p.adr)}</td>`;
       case "kast": return `<td>${f1(p.kast)}%</td>`;
       case "hs": return `<td>${Math.round(p.hs)}%</td>`;
-      case "clutch": return `<td>${val(p, "clutch")}/${sum(p.c.clutches_attempted || [])}</td>`;
+      case "clutch": return clutchCell(p, 0);
+      case "c1": case "c2": case "c3": case "c4": case "c5": return clutchCell(p, Number(k[1]));
       case "swing": return `<td>${fmtSwing(p.swing)}</td>`;
       default: return `<td>${val(p, k)}</td>`;
     }
@@ -6076,7 +6090,8 @@ async function renderSession(view, date, idx) {
         <thead><tr>${COLS.map(([k, t]) => `<th data-sort="${k}" class="sortable ${sessionView.sort === k ? "on" : ""}">${t}${sessionView.sort === k ? (sessionView.desc ? " ▾" : " ▴") : ""}</th>`).join("")}</tr></thead>
         <tbody>${rows.map((p) => `<tr class="${p.is_me ? "me" : p.party ? "party" : ""}">${COLS.map(([k]) => cell(p, k)).join("")}</tr>`).join("")}</tbody>
       </table></div>
-      <div class="note">Your party: who FACEIT says queued with you, or (Premier, which doesn't record parties) teammates in two or more of the session's matches. HLTV 3.0, RWS, ADR, KAST and Swing are per round, so session values weight each match by its rounds. Eco kills: on players with under $2,000 of equipment (not pistol rounds).</div>
+      <div class="note">Your party: who FACEIT says queued with you, or (Premier, which doesn't record parties) teammates in two or more of the session's matches. HLTV 3.0, RWS, ADR, KAST and Swing are per round, so session values weight each match by its rounds. Eco kills: on players with under $2,000 of equipment (not pistol rounds).
+        Colors: green is good, red is poor. K/D, K/R and ADR against the usual marks (ADR 82+ is good, 95+ excellent); clutches against what the average player in your matches wins from the same 1vXs (about ${Math.round(rates[1] * 100)}% of 1v1s, ${Math.round(rates[2] * 100)}% of 1v2s, ${Math.round(rates[3] * 100)}% of 1v3s), so a few clutches lean average until the difference is clear.</div>
     </section>
     ${baselineHtml(judged, sdata)}
     ${notesHtml(sdata, skey)}
@@ -6107,9 +6122,9 @@ async function renderSession(view, date, idx) {
 async function loadSessionData(force = false) {
   if (state.sessData && !force) return state.sessData;
   const json = async (rel, fallback) => { try { const r = await fetch(assetUrl(rel), { cache: "no-store" }); return r.ok ? await r.json() : fallback; } catch (e) { return fallback; } };
-  const [myStats, bench, me, , setups, practice, notes] = await Promise.all([
+  const [myStats, bench, me, , setups, practice, notes, lobbyClutches] = await Promise.all([
     loadMyStats(), loadBenchmarks(), json("insights/me.json", null), loadCrosshairs(),
-    json("settings_log.json", []), json("practice_log.json", []), json("session_notes.json", {}),
+    json("settings_log.json", []), json("practice_log.json", []), json("session_notes.json", {}), json("lobby_clutches.json", null),
   ]);
   const duels = me?.matches || {};
   const statsById = new Map((myStats || []).map((m) => [m.id, m]));
@@ -6123,8 +6138,30 @@ async function loadSessionData(force = false) {
     rows.push({ id, ts: ms.ts, rounds: ms.rounds || 1, stats: ms.stats || {}, duels: duels[id] || null, map: sum.map, result: sum.result, party: sum.party_size || 0,
       xh: state.xh?.matches?.[id]?.[meId] || "", session: s.key, nInSession: i + 1, hour: new Date((sum.played_ts || ms.ts) * 1000).getHours() });
   });
-  state.sessData = { rows, byId: new Map(rows.map((r) => [r.id, r])), sessions, bench: bench || {}, setups: setups || [], practice: practice || [], notes: notes && typeof notes === "object" ? notes : {} };
+  state.sessData = { rows, byId: new Map(rows.map((r) => [r.id, r])), sessions, bench: bench || {}, setups: setups || [], practice: practice || [], notes: notes && typeof notes === "object" ? notes : {}, clutchRates: clutchRates(lobbyClutches) };
   return state.sessData;
+}
+
+// How often the average player in your matches wins each 1vX (index 1-5), from everyone else's
+// clutches (`lobby_clutches.json`); until that's written, what it was over a few thousand clutches.
+const CLUTCH_AVG = [0, 0.6, 0.23, 0.045, 0.005, 0.005];
+function clutchRates(lobby) {
+  return CLUTCH_AVG.map((fallback, x) => {
+    const a = lobby?.attempted?.[x] || 0;
+    return x && a >= 30 ? lobby.won[x] / a : fallback;
+  });
+}
+// Clutches won against what the average player would have won from the same 1vXs: Excellent ..
+// Poor (`g0`..`g4`). Small samples lean average: it takes a clear difference to color one.
+function clutchGrade(won, att, rates) {
+  let expected = 0, varc = 0, w = 0, n = 0;
+  for (let x = 1; x <= 5; x++) {
+    const a = att[x] || 0, p = rates[x];
+    expected += a * p; varc += a * p * (1 - p); w += won[x] || 0; n += a;
+  }
+  if (!n) return null;
+  const z = varc > 0 ? (w - expected) / Math.sqrt(varc) : 0;
+  return { g: z >= 2 ? "g0" : z >= 0.75 ? "g1" : z <= -2 ? "g4" : z <= -0.75 ? "g3" : "g2", w, n, expected };
 }
 
 // Every session (oldest first): its matches, when, and a key that stays the same (its first match).
