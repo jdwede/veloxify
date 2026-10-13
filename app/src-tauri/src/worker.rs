@@ -98,6 +98,9 @@ pub struct Worker {
     tray_icon: Cell<Option<usize>>,
     /// When filming last stopped because CS2 stopped drawing: no filming until there's input.
     not_drawing: Cell<Option<Instant>>,
+    /// Matches re-read so far in this run of re-reading (it goes a minute at a time), so the count
+    /// carries on instead of starting over each minute.
+    reread_done: Cell<usize>,
 }
 
 /// The tray icon tells at a glance what CS2 is up to: green = CS2 closed (Veloxify is free to
@@ -110,7 +113,7 @@ const TRAY_ICONS: [&[u8]; 3] = [
 
 impl Worker {
     pub fn new(app: AppHandle, settings: Arc<Mutex<Settings>>, status: Arc<Mutex<Status>>, abort: Arc<AtomicBool>, stop_item: Option<MenuItem<Wry>>) -> Self {
-        Self { app, settings, status, seen: Seen::load(), failed: HashMap::new(), abort, stop_item, tray_icon: Cell::new(None), not_drawing: Cell::new(None) }
+        Self { app, settings, status, seen: Seen::load(), failed: HashMap::new(), abort, stop_item, tray_icon: Cell::new(None), not_drawing: Cell::new(None), reread_done: Cell::new(0) }
     }
 
     fn set(&self, state: &str, message: impl Into<String>, done: usize, total: usize) {
@@ -387,42 +390,54 @@ impl Worker {
         else {
             return (false, false);
         };
-        let mut todo: Vec<(i64, String)> = index
+        // Matches whose demo couldn't be read for this version: skipped until an update changes
+        // how matches are read, or the demo file changes (downloaded again).
+        let mut failed = DetailsFailed::load(lib);
+        let mut todo: Vec<(i64, String, PathBuf)> = index
             .matches
             .iter()
             .filter(|m| cs2hl_core::details::stale(lib, &m.id))
-            .map(|m| (m.played_ts, m.id.clone()))
+            .filter_map(|m| {
+                let entry: MatchEntry = serde_json::from_str(&std::fs::read_to_string(lib.join("matches").join(format!("{}.json", m.id))).ok()?).ok()?;
+                let demo = PathBuf::from(&entry.demo_path);
+                // No demo (deleted by the storage limit): nothing to build from.
+                let size = std::fs::metadata(&demo).ok()?.len();
+                (!failed.skip(&m.id, size)).then_some((m.played_ts, m.id.clone(), demo))
+            })
             .collect();
-        todo.sort_by_key(|(ts, _)| std::cmp::Reverse(*ts));
-        let total = todo.len();
+        if todo.is_empty() {
+            self.reread_done.set(0);
+            return (false, false);
+        }
+        todo.sort_by_key(|(ts, _, _)| std::cmp::Reverse(*ts));
+        let done_before = self.reread_done.get();
+        let total = done_before + todo.len();
         let started = Instant::now();
         let mut built = 0;
         let mut left = false;
-        for (i, (_, id)) in todo.into_iter().enumerate() {
+        for (i, (_, id, demo_path)) in todo.into_iter().enumerate() {
             if started.elapsed() > Duration::from_secs(60) || system::cs2_running() || crate::demos::downloading(&self.app) {
                 left = true;
                 break;
             }
-            let Some(entry) = std::fs::read_to_string(lib.join("matches").join(format!("{id}.json")))
-                .ok()
-                .and_then(|t| serde_json::from_str::<MatchEntry>(&t).ok())
-            else {
-                continue;
-            };
-            let demo_path = Path::new(&entry.demo_path);
-            if !demo_path.exists() {
-                continue; // the demo was deleted (storage limit): nothing to build from
-            }
-            self.set("details", format!("Match details {} of {total}", i + 1), i, total);
-            let result = cs2hl_core::demo_io::read_demo(demo_path).and_then(|demo| {
+            self.set("details", format!("Re-reading match {} of {total}", done_before + i + 1), done_before + i, total);
+            let result = cs2hl_core::demo_io::read_demo(&demo_path).and_then(|demo| {
                 let m = cs2hl_core::model::load_match(&demo)?;
                 let a = cs2hl_core::analysis::analyze(&m);
                 cs2hl_core::details::write(lib, &id, &demo, &m, &a, me)
             });
             match result {
                 Ok(()) => built += 1,
-                Err(e) => vlog!("details {id}: {e:#}"),
+                Err(e) => {
+                    vlog!("details {id}: {e:#} (skipped from now on, until an update or a new copy of the demo)");
+                    failed.add(&id, std::fs::metadata(&demo_path).map(|m| m.len()).unwrap_or(0));
+                    failed.save(lib);
+                }
             }
+            self.reread_done.set(done_before + i + 1);
+        }
+        if !left {
+            self.reread_done.set(0);
         }
         if built > 0 {
             let _ = cs2hl_core::details::write_benchmarks(lib, Some(me));
@@ -735,6 +750,26 @@ pub fn library_file(lib: &Path, rel: &str) -> Option<PathBuf> {
     let p = lib.join(rel);
     let canon = p.canonicalize().ok()?;
     canon.starts_with(lib.canonicalize().ok()?).then_some(canon)
+}
+
+/// Matches whose details couldn't be built (`details_failed.json`): id -> the details version and
+/// the demo's size when it failed. Retried after an update (a new version) or a new demo file.
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+struct DetailsFailed(std::collections::BTreeMap<String, (u32, u64)>);
+
+impl DetailsFailed {
+    fn load(lib: &Path) -> Self {
+        std::fs::read_to_string(lib.join("details_failed.json")).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
+    }
+    fn save(&self, lib: &Path) {
+        let _ = std::fs::write(lib.join("details_failed.json"), serde_json::to_string(self).unwrap_or_default());
+    }
+    fn skip(&self, id: &str, demo_size: u64) -> bool {
+        self.0.get(id).is_some_and(|&(v, size)| v == cs2hl_core::details::VERSION && size == demo_size)
+    }
+    fn add(&mut self, id: &str, demo_size: u64) {
+        self.0.insert(id.to_string(), (cs2hl_core::details::VERSION, demo_size));
+    }
 }
 
 /// Lowlights rendered automatically per match (the worst ones; the rest render on Watch).

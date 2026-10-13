@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
 /// Bumped whenever what's in a details file changes, so older ones are rebuilt.
-pub const VERSION: u32 = 12;
+pub const VERSION: u32 = 14;
 
 /// Spotted state is sampled every this many ticks.
 const SPOT_STEP: i32 = 2;
@@ -35,6 +35,17 @@ const RECOIL_RESET_TICKS: i32 = (0.5 * TICKRATE) as i32;
 const SPRAY_GAP_TICKS: i32 = (0.2 * TICKRATE) as i32;
 /// Fully crouched (counter-strafing excludes these shots).
 const CROUCHED: f64 = 0.9;
+/// How far back (ticks) before a fight's first bullet the stop is read (half a second).
+const STOP_LOOKBACK: i32 = 32;
+/// Running: this share of the gun's top speed or more. Accurate: under [`ACCURATE_SPEED`].
+const RUNNING_SPEED: f64 = 0.75;
+const ACCURATE_SPEED: f64 = 0.34;
+
+/// Guns you stop to shoot (rifles and snipers); run-and-gun weapons (SMGs, pistols, shotguns)
+/// don't count for the stop stats.
+fn stop_to_shoot(w: &str) -> bool {
+    matches!(weapon_class(w), "rifle" | "awp" | "scout" | "auto")
+}
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MatchDetails {
@@ -273,6 +284,11 @@ pub struct DPlayer {
     /// Their crosshair share code in this match (the one they used most).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub crosshair: String,
+    /// Their mouse pull in rifle sprays, per gun and bullet: summed view-angle change since the
+    /// spray's first bullet `[pitch, yaw, sprays]` (degrees; pitch down and yaw left positive), to
+    /// set against the gun's recoil (`recoil.json`).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub pull: std::collections::BTreeMap<String, Vec<[f32; 3]>>,
 }
 
 /// Every stat on the match page's Aim, Utility and Activity tabs: key, and whether lower is
@@ -291,6 +307,8 @@ pub const STATS: &[(&str, bool)] = &[
     ("accurate_movement", false),
     ("air_shot_pct", true),
     ("air_accuracy", false),
+    ("first_stop", false),
+    ("stop_ms", true),
     ("nades_per_round", false),
     ("flash_assist_pct", false),
     ("enemies_per_flash", false),
@@ -336,6 +354,7 @@ impl DPlayer {
         rate("accurate_movement", a.move_accurate, a.move_shots, MIN_SAMPLE);
         rate("air_shot_pct", a.air_shots, a.spotted_shots, MIN_SAMPLE);
         rate("air_accuracy", a.air_hits, a.air_shots, 3);
+        rate("first_stop", a.first_stop_good, a.first_stop_shots, MIN_SAMPLE);
         rate("flash_assist_pct", u.flash_assists, u.flashes, 1);
         rate("wasted_magazine", ac.wasted_bullets, ac.magazine_bullets, 1);
         rate("rounds_survived_pct", ac.rounds_survived, ac.rounds, 1);
@@ -343,7 +362,7 @@ impl DPlayer {
         rate("trade_kill_success_pct", tr.kill_success, tr.kill_attempts, 1);
         rate("traded_death_attempt_pct", tr.death_attempts, tr.death_opps, 1);
         rate("traded_death_success_pct", tr.death_success, tr.death_attempts, 1);
-        for (k, v, n) in [("ttd_ms", a.ttd_ms, a.ttd_n), ("ttk_ms", a.ttk_ms, a.ttk_n), ("crosshair_deg", a.crosshair_deg, a.crosshair_n)] {
+        for (k, v, n) in [("ttd_ms", a.ttd_ms, a.ttd_n), ("ttk_ms", a.ttk_ms, a.ttk_n), ("crosshair_deg", a.crosshair_deg, a.crosshair_n), ("stop_ms", a.stop_ms, a.stop_n)] {
             if let (Some(v), true) = (v, n >= 3) {
                 s.insert(k.into(), v);
             }
@@ -455,10 +474,13 @@ pub struct MyMatch {
 
 /// Writes `benchmarks.json` (every stat's distribution over all player-matches), `lobby_clutches.json`
 /// (everyone else's clutches by 1vX, won and attempted, index 1-5) and, given the owner,
-/// `my_stats.json` (their stats per match: core stats and details stats).
+/// `my_stats.json` (their stats per match: core stats and details stats) and `my_spray.json` (their
+/// spray pull per match and rifle).
 pub fn write_benchmarks(root: &std::path::Path, me: Option<u64>) -> Result<()> {
     let mut values: HashMap<&str, Vec<f64>> = HashMap::new();
     let mut mine: HashMap<String, std::collections::BTreeMap<String, f64>> = HashMap::new();
+    // The owner's spray pull per match (Mechanics: recoil control).
+    let mut my_pull: std::collections::BTreeMap<String, std::collections::BTreeMap<String, Vec<[f32; 3]>>> = std::collections::BTreeMap::new();
     let me_s = me.map(|m| m.to_string()).unwrap_or_default();
     let mut recoil: std::collections::BTreeMap<String, Vec<[f64; 3]>> = std::collections::BTreeMap::new();
     for f in std::fs::read_dir(root.join("matches"))?.flatten() {
@@ -483,6 +505,9 @@ pub fn write_benchmarks(root: &std::path::Path, me: Option<u64>) -> Result<()> {
             }
             if pl.steamid == me_s {
                 let id = p.file_name().unwrap().to_string_lossy().trim_end_matches(".details.json").to_string();
+                if !pl.pull.is_empty() {
+                    my_pull.insert(id.clone(), pl.pull.clone());
+                }
                 mine.insert(id, pl.stats.clone());
             }
         }
@@ -517,6 +542,7 @@ pub fn write_benchmarks(root: &std::path::Path, me: Option<u64>) -> Result<()> {
     }
     std::fs::write(root.join("lobby_clutches.json"), serde_json::to_string(&serde_json::json!({ "won": clutch_won, "attempted": clutch_att }))?)?;
     if me.is_some() {
+        std::fs::write(root.join("my_spray.json"), serde_json::to_string(&my_pull)?)?;
         my_matches.sort_by_key(|m| m.ts);
         std::fs::write(root.join("my_stats.json"), serde_json::to_string(&my_matches)?)?;
     }
@@ -591,6 +617,18 @@ pub struct Aim {
     pub air_shots: u32,
     #[serde(default)]
     pub air_hits: u32,
+    /// The first bullet of each fight with a rifle or sniper (recoil reset, enemy spotted, on the
+    /// ground, not fully crouched), and those fired stopped (under 34% of the gun's top speed).
+    #[serde(default)]
+    pub first_stop_shots: u32,
+    #[serde(default)]
+    pub first_stop_good: u32,
+    /// Average time (ms) from running (75%+ of top speed) to stopped (under 34%), for first
+    /// bullets fired stopped after running in the half second before (a counter-strafe).
+    #[serde(default)]
+    pub stop_ms: Option<f64>,
+    #[serde(default)]
+    pub stop_n: u32,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -1036,6 +1074,14 @@ pub fn build(demo: &[u8], m: &Match, a: &Analysis, me: u64) -> Result<MatchDetai
     for k in &m.kills {
         state_ticks.insert(k.tick - 2);
     }
+    // Every tick of the half second before a fight's first bullet (how they stopped for it).
+    for (p, list) in &shots {
+        for s in list.iter().filter(|s| s.first && stop_to_shoot(&s.weapon) && has_spotted(*p, s.tick)) {
+            for d in 2..=STOP_LOOKBACK {
+                state_ticks.insert(s.tick - d);
+            }
+        }
+    }
     // Recoil before each spray bullet (the punch it fired with).
     for list in shots.values() {
         for s in list.iter().filter(|s| s.spray) {
@@ -1169,6 +1215,7 @@ pub fn build(demo: &[u8], m: &Match, a: &Analysis, me: u64) -> Result<MatchDetai
     for p in &m.players {
         let s = p.steamid;
         let mut aim = Aim::default();
+        let mut stops: Vec<f64> = vec![];
         let list: &[ShotInfo] = shots.get(&s).map(|v| v.as_slice()).unwrap_or(&[]);
         for sh in list {
             aim.shots += 1;
@@ -1193,12 +1240,25 @@ pub fn build(demo: &[u8], m: &Match, a: &Analysis, me: u64) -> Result<MatchDetai
                     aim.air_hits += sh.hit as u32;
                 } else if let (Some(a0), Some(a1), duck) = (pos(sh.tick - 1), pos(sh.tick), num(s, sh.tick, "duck_amount").unwrap_or(0.0)) {
                     if duck < CROUCHED {
-                        let accurate = (a1.0 - a0.0).hypot(a1.1 - a0.1) * TICKRATE < 0.34 * max_speed(&sh.weapon);
+                        let top = max_speed(&sh.weapon);
+                        let accurate = (a1.0 - a0.0).hypot(a1.1 - a0.1) * TICKRATE < ACCURATE_SPEED * top;
                         aim.move_shots += 1;
                         aim.move_accurate += accurate as u32;
                         if rifle {
                             aim.strafe_shots += 1;
                             aim.strafe_good += accurate as u32;
+                        }
+                        if sh.first && stop_to_shoot(&sh.weapon) {
+                            aim.first_stop_shots += 1;
+                            aim.first_stop_good += accurate as u32;
+                            // Running in the half second before, then stopped: how long the stop took.
+                            let speed = |t: i32| Some((pos(t)?.0 - pos(t - 1)?.0).hypot(pos(t)?.1 - pos(t - 1)?.1) * TICKRATE);
+                            let last_run = (sh.tick - STOP_LOOKBACK + 1..=sh.tick).rev().find(|&t| speed(t).is_some_and(|v| v >= RUNNING_SPEED * top));
+                            if let (true, Some(run)) = (accurate, last_run) {
+                                if let Some(stopped) = (run + 1..=sh.tick).find(|&t| speed(t).is_some_and(|v| v < ACCURATE_SPEED * top)) {
+                                    stops.push((stopped - run) as f64 / TICKRATE * 1000.0);
+                                }
+                            }
                         }
                     }
                 }
@@ -1243,6 +1303,71 @@ pub fn build(demo: &[u8], m: &Match, a: &Analysis, me: u64) -> Result<MatchDetai
         }
         aim.ttk_n = ttk.len() as u32;
         aim.ttk_ms = median(ttk);
+        aim.stop_n = stops.len() as u32;
+        aim.stop_ms = (!stops.is_empty()).then(|| stops.iter().sum::<f64>() / stops.len() as f64);
+        // Mouse pull in rifle sprays: each bullet's view angle against the spray's first, at the
+        // enemy the spray hit, minus that enemy's own movement on screen (following a moving enemy
+        // isn't recoil control). A spray ends when they die, at a jump of over 3 degrees between
+        // two bullets (a flick to someone else), or where the angles weren't read.
+        let mut pull: std::collections::BTreeMap<String, Vec<[f32; 3]>> = std::collections::BTreeMap::new();
+        let mut i = 0;
+        while i < list.len() {
+            if !(list[i].spray && list[i].first && weapon_class(&list[i].weapon) == "rifle") {
+                i += 1;
+                continue;
+            }
+            let start = i;
+            while i + 1 < list.len() && list[i + 1].spray && !list[i + 1].first && list[i + 1].weapon == list[start].weapon && list[i + 1].tick - list[i].tick <= SPRAY_GAP_TICKS {
+                i += 1;
+            }
+            let (t0, t1, gun) = (list[start].tick, list[i].tick, list[start].weapon.as_str());
+            let target = m
+                .damages
+                .iter()
+                .filter(|d| d.attacker == Some(s) && enemies(s, d.victim) && d.tick >= t0 && d.tick <= t1 + 2 && d.weapon.trim_start_matches("weapon_") == gun)
+                .min_by_key(|d| d.tick)
+                .map(|d| d.victim);
+            if let Some(target) = target {
+                let death = m.kills.iter().filter(|k| k.victim == target && k.tick >= t0).map(|k| k.tick).min().unwrap_or(i32::MAX);
+                // Where the enemy's chest is on screen, (pitch, yaw), from the shooter's eyes.
+                let toward = |t: i32| -> Option<(f64, f64)> {
+                    let (dx, dy) = (num(target, t, "X")? - num(s, t, "X")?, num(target, t, "Y")? - num(s, t, "Y")?);
+                    let dz = (num(target, t, "Z")? + 48.0) - (num(s, t, "Z")? + 64.0);
+                    Some((-dz.atan2(dx.hypot(dy)).to_degrees(), dy.atan2(dx).to_degrees()))
+                };
+                let wrap = |a: f64| (a + 540.0).rem_euclid(360.0) - 180.0;
+                if let (Some(a0), Some(d0)) = (angles(s, t0), toward(t0)) {
+                    let row = pull.entry(gun.to_string()).or_insert_with(|| vec![[0.0; 3]; RECOIL_BULLETS]);
+                    let mut prev = (0.0, 0.0);
+                    for (k, b) in list[start..=i].iter().take(RECOIL_BULLETS).enumerate() {
+                        if b.tick > death {
+                            break;
+                        }
+                        let (Some(a), Some(d)) = (angles(s, b.tick), toward(b.tick)) else { break };
+                        let p = (a.0 - a0.0) - (d.0 - d0.0);
+                        let y = wrap(a.1 - a0.1) - wrap(d.1 - d0.1);
+                        if (p - prev.0).hypot(y - prev.1) > 3.0 {
+                            break;
+                        }
+                        prev = (p, y);
+                        row[k][0] += p as f32;
+                        row[k][1] += y as f32;
+                        row[k][2] += 1.0;
+                    }
+                }
+            }
+            i += 1;
+        }
+        pull.retain(|_, row| row[0][2] > 0.0);
+        for row in pull.values_mut() {
+            for b in row.iter_mut() {
+                b[0] = (b[0] * 1000.0).round() / 1000.0;
+                b[1] = (b[1] * 1000.0).round() / 1000.0;
+            }
+            while row.last().is_some_and(|b| b[2] == 0.0) {
+                row.pop();
+            }
+        }
 
         // Utility.
         let mut util = Utility { rounds: m.rounds.len() as u32, ..Default::default() };
@@ -1304,7 +1429,7 @@ pub fn build(demo: &[u8], m: &Match, a: &Analysis, me: u64) -> Result<MatchDetai
         }
         act.rounds_survived = (0..m.rounds.len()).filter(|r| !a.rounds[*r].died.contains(&s)).count() as u32;
 
-        let mut dp = DPlayer { steamid: sid(s), aim, utility: util, activity: act, trades: trades.remove(&s).unwrap_or_default(), stats: Default::default(), crosshair: String::new() };
+        let mut dp = DPlayer { steamid: sid(s), aim, utility: util, activity: act, trades: trades.remove(&s).unwrap_or_default(), stats: Default::default(), crosshair: String::new(), pull };
         dp.compute_stats();
         players.push(dp);
     }

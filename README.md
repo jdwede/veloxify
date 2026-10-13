@@ -79,6 +79,13 @@ FACEIT, Allstar or Valve.</sub>
 - Your maps, best first, and your positions on each map (where you played the round) against the average player there. Click a position to see those rounds in the 2D replay.
 - Your duels: a duel is a fight you both saw coming (dying while looking the other way is being caught off guard, counted separately). By how the fight started (you peeked, they peeked you, both moving, standoff), weapon (AWP holding or peeking, pistols at long range...), range and height, moments (clearing spots on T, holding a push on CT, afterplants, retakes, clutches), and utility, health and who hit first. Strengths, weaknesses with tips, and a finder to combine any of these.
 
+**Mechanics** (how good your movement, aim, utility and gamesense are)
+- A score per section (50 is the average player in your matches) and a card per stat: a chart of your last 10 to 100 matches (green where you beat the average, red where you fall short), this period against the one before, a grade, and how to improve.
+- Movement: whether you stopped before the first bullet of each fight, how fast you go from running to stopped, counter-strafing, and shots in the air. Rifles and snipers only; SMGs, pistols and shotguns are run-and-gun.
+- Aim: headshot accuracy, accuracy, first bullet, spray accuracy, crosshair placement, time to damage, and your spray pattern per rifle (your mouse pull against the gun's recoil, with a control %).
+- Utility: flashes leading to kills, enemies and teammates flashed, blind time, HE and utility damage, grenades used and unused.
+- Gamesense: caught off guard, dying first, dying untraded, dying while your team had the numbers (chasing kills), taking sites alone, trading teammates, clutching against what the average player wins, and staying steady after a losing streak.
+
 **Crosshairs**
 - Every player's crosshair on the match page: a preview and a copy button, as the scoreboard's last column.
 - Your crosshair history (every crosshair you've played with, by date), favorites, and the crosshairs most popular in your matches.

@@ -289,6 +289,10 @@ async function route() {
     document.querySelector('[data-nav="insights"]').classList.add("active");
     return renderInsights(view, parts[1] ? decodeURIComponent(parts[1]) : null);
   }
+  if (parts[0] === "mechanics") {
+    document.querySelector('[data-nav="mechanics"]').classList.add("active");
+    return renderMechanics(view);
+  }
   if (parts[0] === "playstyle") {
     document.querySelector('[data-nav="playstyle"]').classList.add("active");
     return renderPlaystyle(view, parts[1] ? decodeURIComponent(parts[1]) : null);
@@ -1696,6 +1700,7 @@ const STAT_CATALOG = [
   ["spotted_accuracy", "Spotted accuracy", "Aim", pct0], ["ttd_ms", "Time to damage", "Aim", ms0], ["ttk_ms", "Time to kill", "Aim", ms0],
   ["crosshair_deg", "Crosshair placement", "Aim", deg2], ["head_accuracy", "Head accuracy", "Aim", pct0], ["hs_kill_pct", "HS kill %", "Aim", pct0],
   ["first_bullet", "First bullet accuracy", "Aim", pct0], ["spray_accuracy", "Spray accuracy", "Aim", pct0], ["accuracy", "Accuracy (all)", "Aim", pct0],
+  ["first_stop", "First bullet stopped (rifles, snipers)", "Movement", pct0], ["stop_ms", "Time to stop", "Movement", ms0],
   ["counter_strafe", "Counter-strafing (rifles)", "Movement", pct0], ["accurate_movement", "Shots while stopped (all guns)", "Movement", pct0],
   ["air_shot_pct", "Shots while jumping", "Movement", pct1], ["air_accuracy", "Accuracy while jumping", "Movement", pct0],
   ["nades_per_round", "Grenades per round", "Utility", f2], ["flash_assist_pct", "Flash assists per flash", "Utility", pct0],
@@ -1712,12 +1717,15 @@ const STAT_GROUPS = ["Overall", "Aim", "Movement", "Utility", "Activity"];
 // Ratings you build yourself: weighted stats, each against every player in your library.
 const DEFAULT_RATINGS = [
   { id: "aim", name: "Aim", parts: { spotted_accuracy: 15, ttd_ms: 15, crosshair_deg: 15, head_accuracy: 10, first_bullet: 10, spray_accuracy: 10, ttk_ms: 10, counter_strafe: 10, hs_kill_pct: 5 } },
-  { id: "movement", name: "Movement", parts: { counter_strafe: 40, accurate_movement: 30, air_shot_pct: 20, air_accuracy: 10 } },
+  { id: "movement", name: "Movement", parts: { first_stop: 35, counter_strafe: 30, stop_ms: 20, air_shot_pct: 15 } },
   { id: "utility", name: "Utility", parts: { nades_per_round: 20, flash_assist_pct: 15, enemies_per_flash: 15, he_damage_avg: 15, blind_time: 10, friends_per_flash: 10, unused_utility: 10, he_team_damage_avg: 5 } },
   { id: "impact", name: "Impact", parts: { swing: 30, adr: 20, entry_success: 15, multikill_pr: 15, kast: 10, clutch_wins: 10 } },
 ];
 let customRatings = DEFAULT_RATINGS;
 try { customRatings = JSON.parse(localStorage.getItem("veloxify.ratings") || "null") || DEFAULT_RATINGS; } catch (e) { /* defaults */ }
+// Movement used to count every gun's shots (SMGs and pistols are run-and-gun): an unedited one
+// moves to the stop stats.
+customRatings = customRatings.map((r) => (r.id === "movement" && JSON.stringify(r.parts) === JSON.stringify({ counter_strafe: 40, accurate_movement: 30, air_shot_pct: 20, air_accuracy: 10 }) ? DEFAULT_RATINGS[1] : r));
 const saveRatings = () => { try { localStorage.setItem("veloxify.ratings", JSON.stringify(customRatings)); } catch (e) { /* not saved */ } };
 
 // A custom rating for one set of stats: the weighted average standard score, as 0-100 (50 = the
@@ -3260,7 +3268,7 @@ async function renderGrenades(view, map) {
   const maps = Object.entries(L.maps).map(([m, d]) => ({ m, d, total: Object.values(d.counts).reduce((a, b) => a + b, 0) })).sort((a, b) => b.total - a.total);
   const videosOn = (m) => Object.entries(state.lineupClips || {}).filter(([id, c]) => id.startsWith(`${m}-`) && c.clip).length;
   view.innerHTML = `
-    <div class="gn-head"><div><div class="h1">Grenades</div><div class="sub">Instant smokes from spawn and set lineups thrown in your matches, each counted once however often it was thrown, most thrown first. Grenades thrown on the move aren't lineups and aren't listed. Pick a map.</div></div></div>
+    <div class="gn-head"><div><div class="h1">Lineups</div><div class="sub">Instant smokes from spawn and set lineups thrown in your matches, each counted once however often it was thrown, most thrown first. Grenades thrown on the move aren't lineups and aren't listed. Pick a map.</div></div></div>
     <div class="gn-maps">${maps.map(({ m, d, total }) => {
       const videos = videosOn(m);
       return `<a class="gn-map" href="#/grenades/${esc(m)}">
@@ -5444,6 +5452,430 @@ function psFavorites(set, side) {
   return [...by.values()].sort((a, b) => b.n - a.n);
 }
 
+// ---- mechanics --------------------------------------------------------------------------------------
+
+// Mechanics: how good your movement, aim, utility and gamesense are, stat by stat and match by
+// match, against the average player in your matches. Leetify-style cards: a chart per stat (green
+// where you beat the average, red where you fall short), this period against the one before, a
+// grade and how to improve. Each section gets a score: 50 is the average player in your matches.
+const mech = { n: 30, map: "all", src: "all" };
+try { Object.assign(mech, JSON.parse(localStorage.getItem("veloxify.mechanics") || "{}")); } catch (e) { /* defaults */ }
+const saveMech = () => { try { localStorage.setItem("veloxify.mechanics", JSON.stringify(mech)); } catch (e) { /* not saved */ } };
+
+const mPct = (v) => `${Math.round(v)}%`;
+const mPct1 = (v) => `${v.toFixed(1)}%`;
+const mMs = (v) => `${Math.round(v)} ms`;
+// Stats per section. `src` "stats": from each match's analysis (my_stats.json, compared with every
+// player-match in your library); "game": from the match insights (every player in your matches).
+const MECH_SECTIONS = [
+  { key: "movement", name: "Movement", icon: "⇄", blurb: "Stopping to shoot with rifles and snipers. SMGs, pistols and shotguns are run-and-gun guns, so they don't count.", stats: [
+    { key: "first_stop", name: "First bullet stopped", fmt: mPct, what: "The first bullet of each fight with a rifle or sniper, fired stopped (under 34% of the gun's top speed). Fired on the move, it goes wide.",
+      tip: "Stop before the first bullet: tap the opposite movement key, then click. When contact surprises you mid-run, stop first, then shoot.", practice: "aimbotz" },
+    { key: "stop_ms", name: "Time to stop", fmt: mMs, lower: true, what: "How long you take to go from running to stopped before a fight's first bullet. A clean counter-strafe takes about 100 ms; letting go of the keys takes much longer.",
+      tip: "Counter-strafe instead of letting go: A then a tap of D, D then a tap of A. Practice the rhythm in a deathmatch until it's automatic.", practice: "warmupserver" },
+    { key: "counter_strafe", name: "Counter-strafing", fmt: mPct, what: "Rifle shots at a spotted enemy fired stopped (under 34% of top speed), first bullets and the rest.",
+      tip: "Shoot only when stopped; between bursts, strafe and stop again before the next one.", practice: "aimbotz" },
+    { key: "air_shot_pct", name: "Shots in the air", fmt: mPct1, lower: true, what: "Shots at a spotted enemy fired while jumping or falling. Almost every gun is wildly inaccurate in the air.",
+      tip: "Land, stop, then shoot. Jump-peek for information only, without firing.", practice: "kz" },
+  ] },
+  { key: "aim", name: "Aim", icon: "◎", blurb: "Where your bullets go, how fast you get on target, and your spray.", sprays: true, stats: [
+    { key: "head_accuracy", name: "Headshot accuracy", fmt: mPct, what: "Of your hits on enemies, those in the head (AWP excluded).", tip: "Keep your crosshair at head height everywhere you walk, and aim for the head first.", practice: "aimbotz" },
+    { key: "spotted_accuracy", name: "Accuracy (enemy spotted)", fmt: mPct, what: "Your shots that hit while an enemy was in view.", tip: "Fewer bullets, better aimed: tap and burst at range instead of spraying.", practice: "aimbotz" },
+    { key: "accuracy", name: "Accuracy (all shots)", fmt: mPct, what: "All your shots that hit, wallbangs and spam included.", tip: "Spray through smokes and walls only when you know someone's there.", practice: "aimbotz" },
+    { key: "first_bullet", name: "First bullet accuracy", fmt: mPct, what: "How often the first bullet of a fight hits (recoil reset; shotguns and snipers excluded).", tip: "Stop, then shoot: most missed first bullets are fired moving or before the crosshair settles.", practice: "aimbotz" },
+    { key: "spray_accuracy", name: "Spray accuracy", fmt: mPct, what: "Rifle bullets in sprays (3+ shots) that hit.", tip: "Learn the first 10 bullets of the AK and M4 spray: pull down, then follow the pattern (the charts above).", practice: "aimbotz" },
+    { key: "crosshair_deg", name: "Crosshair placement", fmt: (v) => `${v.toFixed(2)}°`, lower: true, what: "How far your crosshair moved from seeing an enemy to hitting them. Lower means it was already where they appeared.",
+      tip: "Pre-aim the spots enemies come from, at head height, as you move. Yprac's prefire routes drill exactly this.", practice: "yprac" },
+    { key: "ttd_ms", name: "Time to damage", fmt: mMs, lower: true, what: "From seeing an enemy to your first hit (fights under a second).", tip: "Good crosshair placement shortens it more than fast flicks do.", practice: "aimbotz" },
+    { key: "hs_kill_pct", name: "Headshot kills", fmt: mPct, what: "Of your kills, those with a headshot.", tip: "Head height, always.", practice: "aimbotz" },
+  ] },
+  { key: "utility", name: "Utility", icon: "✸", blurb: "Your grenades: flashes that blind enemies and not teammates, damage, and not dying with them.", stats: [
+    { key: "flash_assist_pct", name: "Flashes leading to kills", fmt: mPct1, what: "Your flashes after which a teammate (or you) killed a flashed enemy.", tip: "Flash for a teammate who's about to peek, and pop it right as they go.", practice: "utility" },
+    { key: "enemies_per_flash", name: "Enemies flashed per flash", fmt: f2, what: "Enemies blinded (over 1.1 s) per flash you throw.", tip: "Pop-flash over walls and corners so it explodes as it comes into view.", practice: "utility" },
+    { key: "friends_per_flash", name: "Teammates flashed per flash", fmt: f2, lower: true, what: "Teammates you blind per flash.", tip: "Call your flashes, and throw them where your teammates aren't looking.", practice: "utility" },
+    { key: "blind_time", name: "Blind time per flashed enemy", fmt: (v) => `${v.toFixed(2)} s`, what: "How long your flashes blind the enemies they catch.", tip: "Flashes that pop in front of the enemy blind longest: aim for their face, not the wall behind them.", practice: "utility" },
+    { key: "he_damage_avg", name: "Damage per HE", fmt: f1, what: "Enemy damage per HE grenade you throw.", tip: "Throw HEs at stacked enemies or after a flash, and twice with a teammate.", practice: "utility" },
+    { key: "utility_damage_pr", name: "Utility damage per round", fmt: f1, what: "Damage from your HEs and molotovs, per round.", tip: "Molotov common spots before taking a site, and HE enemies who are already hurt.", practice: "utility" },
+    { key: "nades_per_round", name: "Grenades per round", fmt: f2, what: "Grenades thrown per round.", tip: "Buy and use a full set of utility every gun round.", practice: "utility" },
+    { key: "unused_utility", name: "Utility unused at death", fmt: (v) => `$${Math.round(v)}`, lower: true, what: "The value of the grenades still on you when you die.", tip: "Use your grenades before you take a fight: dying with utility is money thrown away.", practice: "utility" },
+  ] },
+  { key: "gamesense", name: "Gamesense", icon: "✦", blurb: "Smart play: not getting caught, not dying first or alone, not chasing kills, clutching and staying steady.", game: true, stats: [
+    { key: "caught", src: "game", name: "Caught off guard", fmt: mPct, lower: true, what: "Your deaths while you were looking the other way (60°+ away from your killer as the fight started).",
+      tip: "Check the spots you walk past, listen for footsteps, and don't turn your back on an angle that isn't cleared." },
+    { key: "first_death", src: "game", name: "First of your team to die", fmt: mPct, lower: true, what: "Rounds in which you died before any teammate.",
+      tip: "Take the first fight only with a teammate close enough to trade, or with utility; otherwise let the round come to you." },
+    { key: "untraded", src: "game", name: "Died without a trade", fmt: mPct, lower: true, what: "Your deaths where nobody got your killer within 5 seconds.",
+      tip: "Play close enough to a teammate that they can trade you, and fight where they can see." },
+    { key: "advantage", src: "game", name: "Died with the numbers", fmt: mPct, lower: true, what: "Your deaths while your team had two or more players more than the enemy: chasing kills, or peeking when you didn't need to.",
+      tip: "When you're ahead, play for time and crossfires and let them come to you." },
+    { key: "solo", src: "game", name: "Sites taken alone", fmt: mPct, lower: true, what: "Of the sites you were first into on T, those you went into with no teammate within 1,000 units and none fighting anywhere else at the time (a lurk timed with your team's hit doesn't count).",
+      tip: "Go in with your team, or time a lurk with their hit: a solo entry is a 1v3 more often than not." },
+    { key: "trade_kill_success_pct", name: "Trading teammates", fmt: mPct, what: "When a teammate near you died, how often you killed their killer within 5 seconds.",
+      tip: "Stay one swing away from your entry fragger and swing as soon as they're hit." },
+  ] },
+];
+const MECH_PRACTICE = { aimbotz: "Aim Botz", warmupserver: "an FFA deathmatch", kz: "a KZ map", yprac: "Yprac Hub", utility: "your own nade practice" };
+// The Profile's bands (Great 90+, Good 70+, Average 30+, Subpar 10+, Poor).
+const mechGradeOf = (score) => (score == null ? null : ((g) => ({ g, word: BAND_WORDS[g] }))(bandOf(score / 100)));
+
+// A per-match score (0-100) from a standard score: 50 is the average player.
+const zScore = (z) => (z == null ? null : phi(Math.max(-3, Math.min(3, z))) * 100);
+
+// Gamesense from the match insights, per player and match (yours and everyone else's).
+function mechGame(sets, ids) {
+  const acc = new Map();
+  const get = (r, p) => {
+    const key = `${r.match.id}|${p}`;
+    let a = acc.get(key);
+    if (!a) {
+      a = { id: r.match.id, me: p === r.match.me, rounds: 0, deaths: 0, first: 0, untraded: 0, fights: 0, caught: 0, adv: 0, entries: 0, solo: 0, cw: [0, 0, 0, 0, 0, 0], ca: [0, 0, 0, 0, 0, 0], after: [], normal: [] };
+      acc.set(key, a);
+    }
+    return a;
+  };
+  for (const set of sets) {
+    const { D } = set, ctx = { D };
+    const byMatch = new Map();
+    for (const r of D.rounds) if (r.match.me >= 0 && ids.has(r.match.id)) { if (!byMatch.has(r.match.id)) byMatch.set(r.match.id, []); byMatch.get(r.match.id).push(r); }
+    for (const rounds of byMatch.values()) {
+      rounds.sort((a, b) => a.n - b.n);
+      const lost = new Map(); // rounds each player's side has lost in a row
+      for (const r of rounds) {
+        const deathOf = (p) => (r.death[p] >= 0 ? r.death[p] : 1e9);
+        const aliveAt = (S, t) => r.team[S].filter((q) => deathOf(q) > t).length;
+        for (const S of ["T", "C"]) {
+          const team = r.team[S], other = S === "T" ? "C" : "T";
+          if (!team.length) continue;
+          const order = [...team].sort((a, b) => deathOf(a) - deathOf(b));
+          for (const p of team) {
+            const a = get(r, p);
+            a.rounds++;
+            const kills = r.kills.filter((k) => k[1] === p && k[2] >= 0 && r.sides[k[2]] !== S).length;
+            const died = r.death[p] >= 0;
+            ((lost.get(p) || 0) >= 3 ? a.after : a.normal).push({ k: kills, died });
+            if (!died) continue;
+            a.deaths++;
+            if (order[0] === p) a.first++;
+            const death = r.kills.find((k) => k[2] === p);
+            const traded = !!death && death[1] >= 0 && r.kills.some((k) => k[2] === death[1] && k[0] >= death[0] && k[0] <= death[0] + 50);
+            if (!traded) a.untraded++;
+            if (death && death.length >= 24 && death[1] >= 0) { a.fights++; if (death[23] > 60) a.caught++; }
+            if (aliveAt(S, r.death[p] - 1) - aliveAt(other, r.death[p] - 1) >= 2) a.adv++;
+          }
+          // The clutch: the last one alive, against however many enemies were left then.
+          if (team.length >= 2) {
+            const last = order[order.length - 1], before = order[order.length - 2];
+            const tc = deathOf(before);
+            if (tc < 1e9 && deathOf(last) > tc) {
+              const vs = aliveAt(other, tc);
+              if (vs >= 1 && vs <= 5) { const a = get(r, last); a.ca[vs]++; if (r.win === S) a.cw[vs]++; }
+            }
+          }
+        }
+        // Sites taken alone: the first T in, no teammate within 1,000 units, nobody else fighting.
+        for (const e of siteEntries(ctx, [r])) {
+          const a = get(r, e.p);
+          a.entries++;
+          const me = posAt(D, r, e.p, e.t);
+          const near = r.team.T.some((q) => q !== e.p && (() => { const o = posAt(D, r, q, e.t); return o && me && Math.hypot(o[0] - me[0], o[1] - me[1]) < 1000; })());
+          const busy = r.hurts.some((h) => h[0] >= e.t - 50 && h[0] <= e.t + 20 && h[1] !== e.p && h[2] !== e.p && ((h[1] >= 0 && r.sides[h[1]] === "T") || r.sides[h[2]] === "T"));
+          if (!near && !busy) a.solo++;
+        }
+        for (const p of [...r.team.T, ...r.team.C]) lost.set(p, r.win === r.sides[p] ? 0 : (lost.get(p) || 0) + 1);
+      }
+    }
+  }
+  return [...acc.values()];
+}
+// One player-match's gamesense value per stat (null when there's too little to say).
+const MECH_GAME_VAL = {
+  caught: (a) => (a.fights >= 3 ? (100 * a.caught) / a.fights : null),
+  first_death: (a) => (a.rounds >= 8 ? (100 * a.first) / a.rounds : null),
+  untraded: (a) => (a.deaths >= 4 ? (100 * a.untraded) / a.deaths : null),
+  advantage: (a) => (a.deaths >= 4 ? (100 * a.adv) / a.deaths : null),
+  solo: (a) => (a.entries >= 2 ? (100 * a.solo) / a.entries : null),
+};
+// Pooled over a period: the same, from the totals.
+const MECH_GAME_POOL = {
+  caught: ["caught", "fights"], first_death: ["first", "rounds"], untraded: ["untraded", "deaths"], advantage: ["adv", "deaths"], solo: ["solo", "entries"],
+};
+
+async function renderMechanics(view) {
+  view.innerHTML = `<div class="ins-head"><div><div class="h1">Mechanics</div><div class="sub">Reading your matches…</div></div></div>`;
+  const [rows, bench, spray, recoil, idx] = await Promise.all([
+    loadMyStats(), loadBenchmarks(),
+    (async () => { try { const r = await fetch(assetUrl("my_spray.json"), { cache: "no-store" }); return r.ok ? await r.json() : {}; } catch (e) { return {}; } })(),
+    loadRecoil(), loadInsightsIndex(),
+  ]);
+  const maps = Object.keys(idx?.maps || {});
+  const sets = (await Promise.all(maps.map((m) => loadInsights(m)))).map((D, i) => (D ? { D, map: maps[i] } : null)).filter(Boolean);
+  mechPage(view, { rows: rows || [], bench: bench || {}, spray: spray || {}, recoil: recoil || {}, sets });
+}
+
+function mechPage(view, data) {
+  const rerender = () => { saveMech(); mechPage(view, data); };
+  const all = data.rows.map((r) => ({ ...r, map: summaryOf(r.id)?.map || "" })).filter((r) => r.map && (mech.src === "all" || r.source === mech.src));
+  const mapsHere = [...new Set(all.map((r) => r.map))].sort((a, b) => all.filter((r) => r.map === b).length - all.filter((r) => r.map === a).length);
+  if (mech.map !== "all" && !mapsHere.includes(mech.map)) mech.map = "all";
+  const rows = all.filter((r) => mech.map === "all" || r.map === mech.map).sort((a, b) => a.ts - b.ts);
+  const n = mech.n || 30;
+  const cur = rows.slice(-n), prev = rows.slice(-2 * n, -n);
+  const ids = new Set(rows.map((r) => r.id));
+  const game = mechGame(data.sets, ids);
+  const myGame = new Map(game.filter((a) => a.me).map((a) => [a.id, a]));
+  const others = game.filter((a) => !a.me);
+
+  // Each stat: its per-match values (this period), period values, the average player's, a score.
+  const statOf = (s) => {
+    if (s.src === "game") {
+      const val = MECH_GAME_VAL[s.key];
+      const dist = others.map(val).filter((v) => v != null);
+      const dm = mean(dist), dsd = dist.length > 1 ? Math.sqrt(mean(dist.map((v) => (v - dm) ** 2))) : 0;
+      const [num, den] = MECH_GAME_POOL[s.key];
+      const pool = (list) => { const g = list.map((r) => myGame.get(r.id)).filter(Boolean); const d = sum(g.map((a) => a[den])); return d ? (100 * sum(g.map((a) => a[num]))) / d : null; };
+      const avgDen = sum(others.map((a) => a[den]));
+      const series = cur.map((r) => ({ r, v: myGame.get(r.id) ? val(myGame.get(r.id)) : null })).filter((x) => x.v != null);
+      const scores = dsd ? series.map((x) => zScore(((x.v - dm) / dsd) * (s.lower ? -1 : 1))) : [];
+      const score = scores.length >= 3 ? mean(scores) : null;
+      return { s, series, cur: pool(cur), prev: pool(prev), avg: avgDen ? (100 * sum(others.map((a) => a[num]))) / avgDen : null, score, n: series.length };
+    }
+    const b = data.bench[s.key];
+    const series = cur.map((r) => ({ r, v: r.stats?.[s.key] })).filter((x) => x.v != null && !Number.isNaN(x.v));
+    const periodMean = (list) => { const v = list.map((r) => r.stats?.[s.key]).filter((x) => x != null && !Number.isNaN(x)); return v.length ? mean(v) : null; };
+    // As the Profile's ratings: each match's standard score against every player in your library.
+    const scores = series.map((x) => zScore(zOf(s.key, x.v))).filter((v) => v != null);
+    const score = scores.length >= 3 ? mean(scores) : null;
+    return { s, series, cur: periodMean(cur), prev: periodMean(prev), avg: b?.mean ?? null, score, n: series.length, missing: cur.length - series.length };
+  };
+  const sections = MECH_SECTIONS.map((sec) => {
+    const stats = sec.stats.map(statOf);
+    const extra = [];
+    if (sec.key === "gamesense") extra.push(mechClutch(game, cur, prev), mechTilt(game, cur, prev));
+    const scored = [...stats, ...extra].filter((x) => x && x.score != null);
+    // Movement, aim and utility: the Profile's rating of the same name, so both pages agree.
+    const rating = customRatings.find((r) => r.id === sec.key);
+    const rated = rating ? cur.map((r) => customRating(rating, r.stats || {})).filter((v) => v != null) : [];
+    const score = rated.length >= 3 ? mean(rated) : scored.length ? mean(scored.map((x) => x.score)) : null;
+    return { sec, stats, extra: extra.filter(Boolean), score };
+  });
+  const sprays = mechSprays(data.spray, data.recoil, cur);
+  const waiting = cur.filter((r) => r.stats?.first_stop == null && r.stats?.counter_strafe != null).length;
+  const segBtns = (key, opts, val) => opts.map(([k, l]) => `<button data-${key}="${k}" class="${String(val) === String(k) ? "on" : ""}">${l}</button>`).join("");
+  const period = (list) => (list.length ? `${new Date(list[0].ts * 1000).toLocaleDateString([], { month: "short", day: "numeric" })} – ${new Date(list[list.length - 1].ts * 1000).toLocaleDateString([], { month: "short", day: "numeric" })}` : "");
+
+  view.innerHTML = `
+    <div class="ins-head"><div><div class="h1">Mechanics</div>
+      <div class="sub">How good your movement, aim, utility and gamesense are, stat by stat, against the average player in your matches. Scores: 50 is the average player; higher is better.</div></div></div>
+    <div class="ln-bar ins-filters mc-filters">
+      <div class="seg">${segBtns("mn", [[10, "Last 10"], [30, "Last 30"], [60, "Last 60"], [100, "Last 100"]], n)}</div>
+      <div class="seg">${segBtns("msrc", [["all", "All"], ["faceit", "FACEIT"], ["valve", "Premier"]], mech.src)}</div>
+      <select class="mc-map" data-mmap><option value="all">All maps</option>${mapsHere.map((m) => `<option value="${esc(m)}" ${m === mech.map ? "selected" : ""}>${esc(mapName(m))}</option>`).join("")}</select>
+      <span class="sub">This period: ${cur.length} match${cur.length === 1 ? "" : "es"} (${period(cur)})${prev.length ? ` · before: ${prev.length} (${period(prev)})` : ""}</span>
+    </div>
+    ${waiting ? `<div class="note">${waiting} of these matches don't have the new movement stats yet (first bullet stopped, time to stop) or your spray pull: Veloxify is re-reading their demos in the background, while CS2 is closed.</div>` : ""}
+    ${!cur.length ? `<div class="empty">No analyzed matches with these filters yet.</div>` : `
+    <div class="mc-scores">${sections.map(({ sec, score }) => { const g = mechGradeOf(score); return `<a class="mc-score ${g?.g || ""}" href="#/mechanics" data-jump="${sec.key}">
+      <span class="mc-ring ${g?.g || ""}" style="--p:${score == null ? 0 : Math.round(score)}"><b>${score == null ? "–" : Math.round(score)}</b></span>
+      <span><b>${esc(sec.name)}</b><span class="sub">${g ? g.word : "Not enough yet"}</span></span></a>`; }).join("")}</div>
+    ${sections.map(({ sec, stats, extra, score }) => `<section class="mc-section" id="mc-${sec.key}">
+      <div class="mc-sec-head"><div class="h2">${esc(sec.name)}</div>${score != null ? `<span class="ps-grade ${mechGradeOf(score).g}">${Math.round(score)} · ${mechGradeOf(score).word}</span>` : ""}<span class="sub">${esc(sec.blurb)}</span></div>
+      ${sec.sprays ? mechSprayHtml(sprays) : ""}
+      ${stats.map((st) => mechCard(st, sec.key)).join("")}
+      ${extra.map((x) => x.html).join("")}
+    </section>`).join("")}`}
+    <div class="note">Each chart is your last ${n} matches, one point per match; the dashed line is the average player in your matches (every player in every match in your library). Click a point to open that match. Scores are the Profile's ratings (Movement, Aim, Utility; you can change what goes into them under Profile → Edit ratings): each match's stats against every player in your library, averaged. Great 90+, Good 70+, Average 30+, Subpar 10+, Poor under 10.</div>`;
+
+  view.querySelectorAll("[data-mn]").forEach((b) => (b.onclick = () => { mech.n = Number(b.dataset.mn); rerender(); }));
+  view.querySelectorAll("[data-msrc]").forEach((b) => (b.onclick = () => { mech.src = b.dataset.msrc; rerender(); }));
+  view.querySelector("[data-mmap]")?.addEventListener("change", (e) => { mech.map = e.target.value; rerender(); });
+  view.querySelectorAll("[data-jump]").forEach((a) => (a.onclick = (e) => { e.preventDefault(); view.querySelector(`#mc-${a.dataset.jump}`)?.scrollIntoView({ behavior: "smooth" }); }));
+  mechWireCharts(view);
+}
+const mean = (a) => (a.length ? sum(a) / a.length : null);
+
+// A stat card: the chart (one point per match) and the summary.
+function mechCard(st, secKey) {
+  const { s, series, score } = st;
+  const g = mechGradeOf(score);
+  const fmt = (v) => (v == null ? "–" : s.fmt(v));
+  const delta = st.cur != null && st.prev != null ? st.cur - st.prev : null;
+  const better = delta == null ? null : s.lower ? delta < 0 : delta > 0;
+  return `<div class="mc-card">
+    <div class="mc-chart-wrap">${series.length >= 2 ? mechChart(series, st.avg, s, `${secKey}-${s.key}`) : `<div class="mc-nochart sub">${series.length ? "One match so far" : "Not measured yet in these matches"}</div>`}</div>
+    <div class="mc-sum">
+      <div class="mc-name">${esc(s.name)}</div>
+      <div class="mc-grade ${g?.g || ""}">${g ? g.word : "–"}</div>
+      <div class="mc-nums">
+        <div><b>${fmt(st.cur)}</b><span>This period</span></div>
+        <div><b>${fmt(st.avg)}</b><span>Average player</span></div>
+        <div><b class="${better == null ? "" : better ? "up" : "down"}">${fmt(st.prev)}</b><span>Period before</span></div>
+      </div>
+      <div class="mc-what">${esc(s.what)}</div>
+      ${g && (g.g === "g3" || g.g === "g4" || g.g === "g2") && s.tip ? `<div class="ps-tip"><b>How to improve:</b> ${esc(s.tip)}${s.practice && MECH_PRACTICE[s.practice] ? ` <a href="#/practice">Practice: ${esc(MECH_PRACTICE[s.practice])} →</a>` : ""}</div>` : ""}
+    </div></div>`;
+}
+
+// Smooth line through points (Catmull-Rom as cubic Béziers).
+function smoothPath(pts) {
+  if (pts.length < 2) return "";
+  let d = `M${pts[0][0].toFixed(1)},${pts[0][1].toFixed(1)}`;
+  for (let i = 0; i < pts.length - 1; i++) {
+    const p0 = pts[i - 1] || pts[i], p1 = pts[i], p2 = pts[i + 1], p3 = pts[i + 2] || p2;
+    const c1 = [p1[0] + (p2[0] - p0[0]) / 6, p1[1] + (p2[1] - p0[1]) / 6], c2 = [p2[0] - (p3[0] - p1[0]) / 6, p2[1] - (p3[1] - p1[1]) / 6];
+    d += ` C${c1[0].toFixed(1)},${c1[1].toFixed(1)} ${c2[0].toFixed(1)},${c2[1].toFixed(1)} ${p2[0].toFixed(1)},${p2[1].toFixed(1)}`;
+  }
+  return d;
+}
+// The chart: your value per match, the average player's as a dashed line, green where you beat
+// it and red where you fall short. Hover for the match; click to open it.
+function mechChart(series, avg, s, id) {
+  const W = 1000, H = 200, PX = 4, PY = 14;
+  const vals = series.map((x) => x.v).concat(avg == null ? [] : [avg]);
+  let lo = Math.min(...vals), hi = Math.max(...vals);
+  const pad = (hi - lo) * 0.12 || Math.abs(hi) * 0.1 || 1;
+  lo -= pad; hi += pad;
+  const X = (i) => PX + (i * (W - 2 * PX)) / (series.length - 1), Y = (v) => PY + ((hi - v) / (hi - lo)) * (H - 2 * PY);
+  const pts = series.map((x, i) => [X(i), Y(x.v)]);
+  const line = smoothPath(pts);
+  const ya = avg == null ? H : Y(avg);
+  const area = `${line} L${pts[pts.length - 1][0].toFixed(1)},${ya.toFixed(1)} L${pts[0][0].toFixed(1)},${ya.toFixed(1)} Z`;
+  const upGood = !s.lower;
+  const ticks = [hi - pad, (hi + lo) / 2, lo + pad];
+  const tips = series.map((x) => ({ id: x.r.id, label: `${mapName(x.r.map)} · ${new Date(x.r.ts * 1000).toLocaleDateString([], { month: "short", day: "numeric" })}`, v: s.fmt(x.v) }));
+  return `<div class="mc-chart" data-tips="${esc(JSON.stringify(tips))}" data-n="${series.length}">
+    <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-label="${esc(s.name)}, one point per match">
+      <defs><clipPath id="up-${id}"><rect x="0" y="0" width="${W}" height="${Math.max(0, ya)}"/></clipPath><clipPath id="dn-${id}"><rect x="0" y="${ya}" width="${W}" height="${Math.max(0, H - ya)}"/></clipPath></defs>
+      ${avg == null ? "" : `<path d="${area}" clip-path="url(#up-${id})" class="mc-fill ${upGood ? "good" : "bad"}"/><path d="${area}" clip-path="url(#dn-${id})" class="mc-fill ${upGood ? "bad" : "good"}"/>
+      <line x1="0" x2="${W}" y1="${ya.toFixed(1)}" y2="${ya.toFixed(1)}" class="mc-avg" vector-effect="non-scaling-stroke"/>`}
+      <path d="${line}" class="mc-line" vector-effect="non-scaling-stroke"/>
+    </svg>
+    <div class="mc-ticks">${ticks.map((v) => `<span style="top:${((Y(v) / H) * 100).toFixed(1)}%">${esc(s.fmt(v))}</span>`).join("")}</div>
+    <div class="mc-dots">${pts.map(([x, y], i) => `<i style="left:${((x / W) * 100).toFixed(2)}%;top:${((y / H) * 100).toFixed(2)}%" data-i="${i}"></i>`).join("")}</div>
+    <div class="mc-tip" hidden></div></div>`;
+}
+function mechWireCharts(view) {
+  view.querySelectorAll(".mc-chart").forEach((c) => {
+    const tips = JSON.parse(c.dataset.tips || "[]"), n = tips.length, tip = c.querySelector(".mc-tip"), dots = c.querySelectorAll(".mc-dots i");
+    const at = (e) => { const r = c.getBoundingClientRect(); return Math.max(0, Math.min(n - 1, Math.round(((e.clientX - r.left) / r.width) * (n - 1)))); };
+    c.onmousemove = (e) => {
+      const i = at(e), d = dots[i];
+      dots.forEach((x) => x.classList.toggle("on", x === d));
+      tip.hidden = false;
+      tip.innerHTML = `<b>${esc(tips[i].v)}</b> <span>${esc(tips[i].label)}</span>`;
+      tip.style.left = d.style.left;
+      tip.style.top = d.style.top;
+    };
+    c.onmouseleave = () => { tip.hidden = true; dots.forEach((x) => x.classList.remove("on")); };
+    c.onclick = (e) => { const t = tips[at(e)]; if (t) location.hash = matchHref(t.id); };
+  });
+}
+
+// Clutches: won against what the average player wins from the same 1vXs.
+function mechClutch(game, cur, prev) {
+  const rates = [0, 1, 2, 3, 4, 5].map((x) => { const a = sum(game.filter((g) => !g.me).map((g) => g.ca[x])), w = sum(game.filter((g) => !g.me).map((g) => g.cw[x])); return x && a >= 20 ? w / a : CLUTCH_AVG[x]; });
+  const totals = (list) => { const ids = new Set(list.map((r) => r.id)), mine = game.filter((g) => g.me && ids.has(g.id)); return [[0, 1, 2, 3, 4, 5].map((x) => sum(mine.map((g) => g.cw[x]))), [0, 1, 2, 3, 4, 5].map((x) => sum(mine.map((g) => g.ca[x])))]; };
+  const [cw, ca] = totals(cur), [pw, pa] = totals(prev);
+  const g = clutchGrade(cw, ca, rates), gp = clutchGrade(pw, pa, rates);
+  if (!g) return null;
+  const z = (() => { let e = 0, v = 0; for (let x = 1; x <= 5; x++) { e += ca[x] * rates[x]; v += ca[x] * rates[x] * (1 - rates[x]); } return v > 0 ? (g.w - e) / Math.sqrt(v) : 0; })();
+  const score = zScore(z);
+  const grade = mechGradeOf(score);
+  const cells = [1, 2, 3, 4, 5].map((x) => {
+    const gx = clutchGrade(cw.map((v, i) => (i === x ? v : 0)), ca.map((v, i) => (i === x ? v : 0)), rates);
+    return `<div class="mc-cl ${gx ? gx.g : ""}"><span>1v${x}</span><b>${ca[x] ? `${cw[x]}/${ca[x]}` : "–"}</b><small>${ca[x] ? `${pctOf(cw[x], ca[x])}%` : ""} · avg ${Math.round(rates[x] * 100)}%</small></div>`;
+  }).join("");
+  return { score, html: `<div class="mc-card mc-special"><div class="mc-chart-wrap"><div class="mc-cls">${cells}</div></div>
+    <div class="mc-sum"><div class="mc-name">Clutching</div><div class="mc-grade ${grade.g}">${grade.word}</div>
+      <div class="mc-nums"><div><b>${g.w}/${g.n}</b><span>Won this period</span></div><div><b>${f1(g.expected)}</b><span>The average player would win</span></div><div><b>${gp ? `${gp.w}/${gp.n}` : "–"}</b><span>Period before</span></div></div>
+      <div class="mc-what">As the last one alive, against however many enemies were left. Each 1vX is compared with what the average player in your matches wins.</div>
+      ${grade.g === "g3" || grade.g === "g4" ? `<div class="ps-tip"><b>How to improve:</b> take one fight at a time, use the bomb and the clock, and listen: isolate duels instead of being seen by two.</div>` : ""}</div></div>` };
+}
+// Tilt: how you play after your team loses 3 rounds in a row, against your usual (and the average
+// player's drop in the same spot).
+function mechTilt(game, cur) {
+  const ids = new Set(cur.map((r) => r.id));
+  const mine = game.filter((g) => g.me && ids.has(g.id)), others = game.filter((g) => !g.me);
+  const rate = (list) => rating1(list);
+  const myAfter = mine.flatMap((g) => g.after), myNormal = mine.flatMap((g) => g.normal);
+  const oAfter = others.flatMap((g) => g.after), oNormal = others.flatMap((g) => g.normal);
+  if (myAfter.length < 15 || !myNormal.length) return null;
+  const mine1 = rate(myAfter) / rate(myNormal) - 1, avg1 = rate(oAfter) / rate(oNormal) - 1;
+  const score = Math.max(0, Math.min(100, 50 + 250 * (mine1 - avg1) * Math.min(1, myAfter.length / 40)));
+  const grade = mechGradeOf(score);
+  const pc = (v) => `${v >= 0 ? "+" : ""}${Math.round(v * 100)}%`;
+  return { score, html: `<div class="mc-card mc-special"><div class="mc-chart-wrap"><div class="mc-tilt">
+      <div><span>Your usual rounds</span><b>${f2(rate(myNormal))}</b></div><div><span>After 3+ lost in a row</span><b class="${mine1 >= avg1 ? "up" : "down"}">${f2(rate(myAfter))}</b><small>${pc(mine1)}</small></div><div><span>The average player after 3+ lost</span><b>${pc(avg1)}</b></div></div></div>
+    <div class="mc-sum"><div class="mc-name">Staying steady (tilt)</div><div class="mc-grade ${grade.g}">${grade.word}</div>
+      <div class="mc-nums"><div><b>${pc(mine1)}</b><span>Your rating after a losing streak</span></div><div><b>${pc(avg1)}</b><span>The average player's</span></div><div><b>${myAfter.length}</b><span>Rounds after a streak</span></div></div>
+      <div class="mc-what">Your rating (HLTV 1.0, from rounds) in the rounds after your team lost 3 or more in a row, against your other rounds. Everyone drops a little; less than the average player is good.</div>
+      ${grade.g === "g3" || grade.g === "g4" ? `<div class="ps-tip"><b>How to improve:</b> after a losing streak, reset: play a standard round with your team, talk less about the last round, and don't force hero plays.</div>` : ""}</div></div>` };
+}
+// Your spray per rifle this period: your average mouse pull per bullet against the gun's recoil.
+const SPRAY_GUNS = ["ak47", "m4a1", "m4a1_silencer", "famas", "galilar", "aug", "sg556"];
+function mechSprays(spray, recoil, cur) {
+  const out = [];
+  for (const w of SPRAY_GUNS) {
+    const pattern = recoil?.[w];
+    const sumRows = [];
+    for (const r of cur) {
+      const row = spray?.[r.id]?.[w];
+      if (!row) continue;
+      row.forEach((b, k) => { const s = (sumRows[k] = sumRows[k] || [0, 0, 0]); s[0] += b[0]; s[1] += b[1]; s[2] += b[2]; });
+    }
+    const sprays = sumRows[0]?.[2] || 0;
+    if (!pattern || sprays < 10) continue;
+    // Your line goes as far as 6 or more of your sprays reach.
+    let reach = sumRows.findIndex((b) => !b || b[2] < 6);
+    if (reach < 0) reach = sumRows.length;
+    const len = Math.min(reach, pattern.length);
+    if (len < 4) continue;
+    // Degrees: where the recoil pushes the bullets (twice the punch; x right, y the climb), the
+    // gun's whole pattern; and your pull, which countering it perfectly lands on the same points.
+    const full = pattern.map(([pp, py]) => [-2 * py, -2 * pp]);
+    const rec = full.slice(0, len);
+    const you = sumRows.slice(0, len).map(([p, y, c]) => [y / c, p / c]);
+    // Control: how closely your pull down follows the recoil from the 4th bullet on (before that
+    // the recoil is too small to measure against). Sideways is left out: following a moving
+    // enemy moves it too.
+    const from = Math.min(3, len - 1);
+    let err = 0, size = 0, early = 0;
+    for (let i = from; i < len; i++) {
+      err += Math.abs(you[i][1] - rec[i][1]);
+      size += Math.abs(rec[i][1]);
+      if (i + 1 < pattern.length) early += Math.abs(you[i][1] + 2 * pattern[i + 1][0]);
+    }
+    const control = size ? Math.max(0, Math.min(100, 100 * (1 - err / size))) : null;
+    // Where it goes wrong: a bullet ahead of the recoil (pulling early), too little or too much
+    // pull, or drifting to one side.
+    const late = you.slice(from), lateRec = rec.slice(from);
+    const dy = mean(late.map((p, i) => p[1] - lateRec[i][1])), dx = mean(late.map((p, i) => p[0] - lateRec[i][0]));
+    const notes = [];
+    if (early < err * 0.6 && dy > 0) notes.push("you pull down about a bullet early, ahead of the recoil (so your bullets drop below the target)");
+    else if (Math.abs(dy) > 0.6) notes.push(dy < 0 ? "you pull down too little (your bullets climb)" : "you pull down too much (your bullets drop)");
+    if (Math.abs(dx) > 0.6) notes.push(dx < 0 ? "you drift left of the pattern" : "you drift right of the pattern");
+    out.push({ w, full, rec, you, sprays, bullets: len, control, note: notes.join("; ") });
+  }
+  return out;
+}
+function mechSprayHtml(list) {
+  if (!list.length) return `<div class="note">Your spray patterns show here once your demos are re-read (Veloxify reads your mouse pull in every rifle spray) and you've sprayed a rifle 10+ times this period.</div>`;
+  return `<div class="mc-sprays">${list.map((g) => {
+    // Like a spray chart: from the top down as the gun climbs, then its sideways sweeps.
+    const pts = g.full.concat(g.you);
+    const ys = pts.map((p) => p[1]), xs = pts.map((p) => p[0]);
+    const SW = 220, SH = 260;
+    const sc = Math.min((SH - 28) / Math.max(2, Math.max(...ys) - Math.min(0, ...ys)), (SW - 24) / Math.max(2, Math.max(...xs) - Math.min(...xs)));
+    const cx = SW / 2 - ((Math.max(...xs) + Math.min(...xs)) / 2) * sc, top = 14 - Math.min(0, ...ys) * sc;
+    const P = ([x, y]) => [cx + x * sc, top + y * sc];
+    const path = (arr) => arr.map((p, i) => { const [x, y] = P(p); return `${i ? "L" : "M"}${x.toFixed(1)},${y.toFixed(1)}`; }).join("");
+    const dots = (arr, cls) => arr.map((p) => { const [x, y] = P(p); return `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="2.2" class="${cls}"/>`; }).join("");
+    const grade = g.control == null ? null : mechGradeOf(g.control >= 80 ? 92 : g.control >= 65 ? 75 : g.control >= 45 ? 50 : g.control >= 30 ? 20 : 5);
+    return `<div class="mc-spray"><div class="mc-spray-h"><b>${esc(weaponName(g.w))}</b>${g.control != null ? `<span class="ps-grade ${grade.g}" title="How closely your pull down follows the recoil, bullets 4 to ${g.bullets}">${Math.round(g.control)}% control</span>` : ""}</div>
+      <svg viewBox="0 0 ${SW} ${SH}" role="img" aria-label="${esc(weaponName(g.w))}: the gun's spray pattern against your pull"><path d="${path(g.full)}" class="mc-rec"/>${dots(g.full, "mc-rec-dot")}<path d="${path(g.you)}" class="mc-you"/>${dots(g.you, "mc-you-dot")}</svg>
+      <div class="mc-legend"><span><i class="you"></i>You</span><span><i class="rec"></i>${esc(weaponName(g.w))}</span><span class="sub">${g.sprays} sprays · your line: ${g.bullets} bullets</span></div>
+      ${g.note ? `<div class="ps-tip">From the 4th bullet, ${esc(g.note)}.</div>` : `<div class="sub">Your pull follows the recoil.</div>`}</div>`;
+  }).join("")}</div>`;
+}
 // ---- ESEA league ------------------------------------------------------------------------------------
 
 // "S59 NA Open9-10 East A - Regular Season" (a FACEIT league game's competition) -> its parts.
@@ -7353,7 +7785,8 @@ function renderBanner() {
       ],
     };
   } else if (st?.state === "details" && st.total) {
-    b = { kind: "busy", title: "Analyzing older matches", count: `${Math.min(st.done + 1, st.total)}/${st.total}`, frac: st.done / st.total, actions: [] };
+    b = { kind: "busy", title: "Re-reading your matches", count: `${Math.min(st.done + 1, st.total)}/${st.total}`, frac: st.done / st.total,
+      note: "An update added new stats, so each match's demo is read once more (about 5 seconds each, only while CS2 is closed).", actions: [] };
   } else if (st?.state === "importing" && st.total) {
     b = { kind: "busy", title: "Analyzing matches", count: `${Math.min(st.done + 1, st.total)}/${st.total}`, frac: st.done / st.total, actions: [] };
   } else if (st?.state === "rendering") {
