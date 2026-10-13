@@ -2637,6 +2637,7 @@ async function renderReplayTab(body, m, id) {
     </div>`;
 
   const svg = body.querySelector("#rp-svg"), scrub = body.querySelector("#rp-scrub"), timeEl = body.querySelector("#rp-time"), teamsEl = body.querySelector("#rp-teams"), playBtn = body.querySelector("#rp-play");
+  fitMapToScreen(body.querySelector(".rp-stage"), body.querySelector(".rp-controls"));
   const lerpYaw = (a, b, f) => a + ((((b - a) % 360) + 540) % 360 - 180) * f;
   // Everyone at round time t (interpolated between samples).
   const stateAt = (t) => {
@@ -5019,7 +5020,14 @@ function psRecords(sets) {
   for (const set of sets) {
     const { D } = set, ctx = { D };
     const entries = new Map(), lurkers = new Map();
-    for (const e of siteEntries(ctx, set.rounds)) { const m = entries.get(e.r) || new Map(); if (!m.has(e.p)) m.set(e.p, e); entries.set(e.r, m); }
+    // Entries: the first T into a site with CTs there to fight (walking into a site that's already
+    // empty, after the defenders died elsewhere or rotated, isn't entry fragging).
+    for (const r of set.rounds) for (const [, p, , , , present] of r.entries || []) {
+      if (!present) continue;
+      const m = entries.get(r) || new Map();
+      m.set(p, true);
+      entries.set(r, m);
+    }
     for (const l of lurks(ctx, set.rounds)) { const s = lurkers.get(l.r) || new Set(); s.add(l.p); lurkers.set(l.r, s); }
     for (const r of set.rounds) {
       const deathOf = (p) => (r.death[p] >= 0 ? r.death[p] : 1e9);
@@ -5056,7 +5064,7 @@ function psRecords(sets) {
 // Roles: how often you play each (against the average player) and how well (your rating in those
 // rounds against the average player's in the same role).
 const ROLE_DEFS = [
-  ["entry", "T", "Entry fragger", "First T into the site", (x) => x.role === "entry"],
+  ["entry", "T", "Entry fragger", "First T into a site with CTs there to fight", (x) => x.role === "entry"],
   ["lurk", "T", "Lurker", "Alone, far from your team, in the first minute", (x) => x.role === "lurk"],
   ["support", "T", "Support", "Two or more smokes or flashes before the plant (not the entry or a lurker)", (x) => x.role === "support"],
   ["anchor", "C", "Anchor", "Stayed on the site you held at 1:30 until 1:05 (or until you died)", (x) => x.role === "anchor"],
@@ -5217,9 +5225,16 @@ function psPage(view, maps, sets, waiting = 0) {
   const bar = (b) => `<span class="ps-bar" title="Your ${Math.round(b.rate * 100)}%${b.avg != null ? ` · the average player in your matches: ${Math.round(b.avg * 100)}% (the white line)` : ""}"><i style="width:${Math.round(b.rate * 100)}%" class="${isGood(b.grade) ? "good" : isBad(b.grade) ? "bad" : ""}"></i>${b.avg != null ? `<b style="left:${Math.round(b.avg * 100)}%"></b>` : ""}</span>`;
   const bucketBtn = (b) => `<button class="ps-bucket ${sel?.key === b.key ? "on" : ""}" data-bucket="${b.key}"><span class="ps-bucket-name"><b>${esc(b.name)}</b>${b.sub ? `<span class="sub">${esc(b.sub)}</span>` : ""}</span>${bar(b)}<span class="ps-bucket-n">${pctOf(b.w, b.n)}%<small>${b.avg != null ? `avg ${Math.round(b.avg * 100)}% · ` : ""}${b.w}-${b.n - b.w}</small></span>${gradeChip(b.grade)}</button>`;
   const swItem = (b, tip) => `<div class="ps-sw-item" data-bucket="${b.key}">${gradeChip(b.grade)} <b>${esc(b.name)}</b>: you win <b>${pctOf(b.w, b.n)}%</b> <span class="sub">(the average player ${Math.round(b.avg * 100)}%, ${b.n} duels)</span>${tip && b.tip ? `<div class="ps-tip">${esc(b.tip)}</div>` : ""}</div>`;
+  // Your rating against the average player's in the same role or spot: "+12%" (raw ratings in
+  // small print: they run above or below 1.00 depending on the kind of rounds the role is in).
+  const relRating = (x) => {
+    if (x.s.rating == null || !x.a.rating) return "—";
+    const rel = Math.round(100 * (x.s.rating / x.a.rating - 1));
+    return `<span class="${rel >= 5 ? "up" : rel <= -5 ? "down" : ""}">${rel > 0 ? "+" : rel < 0 ? "−" : "±"}${Math.abs(rel)}%</span> <small class="sub">${f2(x.s.rating)} vs ${f2(x.a.rating)}</small>`;
+  };
   const roleRow = (r) => `<tr class="${isGood(r.grade) ? "good" : isBad(r.grade) ? "bad" : ""}"><td><b>${esc(r.name)}</b><div class="sub">${esc(r.how)}</div></td>
     <td>${r.s.n ? `${pct(r.share)} <small class="sub">avg ${pct(r.avgShare)}</small>` : `<span class="sub">never</span>`}</td>
-    <td>${r.s.n >= 5 ? vsAvg(r.s.rating, r.a.rating, f2) : "—"}</td>
+    <td>${r.s.n >= 5 ? relRating(r) : "—"}</td>
     <td>${r.s.n >= 5 ? vsAvg(r.s.kpr, r.a.kpr, f2) : "—"}</td>
     <td>${r.s.n >= 5 ? vsAvg(r.s.surv, r.a.surv, pct) : "—"}</td>
     <td>${gradeChip(r.grade)}</td></tr>`;
@@ -5230,9 +5245,9 @@ function psPage(view, maps, sets, waiting = 0) {
   const posRow = (g, withMap = false) => `<tr class="ps-pos-row ${isGood(g.grade) ? "good" : isBad(g.grade) ? "bad" : ""} ${ps.pos === `${g.set.map}|${g.S}|${g.pos}` ? "on" : ""}" data-pos="${esc(`${g.set.map}|${g.S}|${g.pos}`)}">
     <td><b>${esc(g.name)}</b>${withMap ? ` <span class="sub">${esc(mapName(g.set.map))} ${SIDE_NAME[g.S]}</span>` : ""}</td>
     <td>${g.s.n} <small class="sub">${pct(g.share)}</small></td>
-    <td>${vsAvg(g.s.rating, g.a.rating, f2)}</td><td>${vsAvg(g.s.kpr, g.a.kpr, f2)}</td><td>${vsAvg(g.s.surv, g.a.surv, pct)}</td>
+    <td>${relRating(g)}</td><td>${vsAvg(g.s.kpr, g.a.kpr, f2)}</td><td>${vsAvg(g.s.surv, g.a.surv, pct)}</td>
     <td>${vsAvg(g.s.adr, g.a.adr, (v) => Math.round(v))}</td><td>${gradeChip(g.grade)}</td></tr>`;
-  const posHead = `<thead><tr><th>Position</th><th>Your rounds</th><th>Rating</th><th>Kills a round</th><th>Survived</th><th>ADR</th><th></th></tr></thead>`;
+  const posHead = `<thead><tr><th>Position</th><th>Your rounds</th><th title="Your rating in those rounds against the average player's at the same spot">Rating vs others there</th><th>Kills a round</th><th>Survived</th><th>ADR</th><th></th></tr></thead>`;
   const selPos = positions.find((g) => `${g.set.map}|${g.S}|${g.pos}` === ps.pos) || null;
   const survRow = (label, key, fmt, lowerBetter, hint) => `<tr><td>${label}${hint ? `<div class="sub">${hint}</div>` : ""}</td>${sideStats.filter((x) => shownSides.includes(x.S)).map(({ s, a }) => {
     if (!s.n) return "<td>—</td>";
@@ -5259,9 +5274,9 @@ function psPage(view, maps, sets, waiting = 0) {
     ${psLately(ps.sdata)}
     <div class="ps-grid">
       <section class="panel"><div class="panel-head"><div class="h3">Your roles</div><span class="grow"></span><span class="sub">How often you play each, and how well against the average player in that role</span></div>
-        <table class="ins-table ps-roles-t"><thead><tr><th>Role</th><th>How often</th><th>Rating</th><th>Kills a round</th><th>Survived</th><th></th></tr></thead><tbody>
+        <table class="ins-table ps-roles-t"><thead><tr><th>Role</th><th>How often</th><th title="Your rating in those rounds against the average player's in the same role">Rating vs the role</th><th>Kills a round</th><th>Survived</th><th></th></tr></thead><tbody>
           ${roleGroup("T side", "T")}${roleGroup("CT side", "C")}${roleGroup("Weapon", "")}</tbody></table>
-        <div class="note" style="padding:0 20px 14px;margin:0">Rating is HLTV Rating 1.0 (kills, survival and multi-kills; 1.00 is average), so it can be split by role and position. Small numbers: the average player in the same role in your matches.</div></section>
+        <div class="note" style="padding:0 20px 14px;margin:0">Rating vs the role: your rating in those rounds against the average player's in the same role (+10% is 10% better). The raw ratings (HLTV Rating 1.0, small print) run above or below 1.00 because roles come in different kinds of rounds: you're only the entry when your team gets into a site, so everyone's rating in entry rounds is high, and that's why each role is compared with itself. Small numbers elsewhere: the average player in the same role.</div></section>
       <section class="panel"><div class="panel-head"><div class="h3">T or CT? Staying alive</div><span class="grow"></span>${better ? `<span class="tag main">Better on ${better}</span>` : ""}</div>
         <table class="ins-table ps-sides"><thead><tr><th></th>${shownSides.map((S) => `<th>${SIDE_NAME[S]} side</th>`).join("")}</tr></thead><tbody>
           <tr><td>Rounds</td>${sideStats.filter((x) => shownSides.includes(x.S)).map(({ s }) => `<td>${s.n}</td>`).join("")}</tr>
@@ -5334,21 +5349,22 @@ function psProfile({ roles, sideStats, buckets, positions, mapRows, caught }) {
     if (!list.length) continue;
     const S = SIDE_NAME[side];
     const top = [...list].sort((a, b) => b.often - a.often)[0];
+    const by = (r) => Math.abs(Math.round(100 * (r.s.rating / r.a.rating - 1)));
     if (top.often >= 1.15) {
       const g = top.grade, like = ROLE_LIKE[top.key];
-      const how = !g ? "" : g.rel >= 0.05 ? `, and you're good at it: rating <b>${f2(top.s.rating)}</b> when you do, the average ${ROLE_NOUN[top.key]} ${f2(top.a.rating)}`
-        : g.rel <= -0.05 ? `, but you do worse than the average ${ROLE_NOUN[top.key]} at it: rating <b>${f2(top.s.rating)}</b>, theirs ${f2(top.a.rating)}`
-        : `, about as well as the average ${ROLE_NOUN[top.key]} (rating ${f2(top.s.rating)}, theirs ${f2(top.a.rating)})`;
+      const how = !g ? "" : g.rel >= 0.05 ? `, and you're good at it: <b>${by(top)}% better</b> than the average ${ROLE_NOUN[top.key]}`
+        : g.rel <= -0.05 ? `, but you're <b>${by(top)}% worse</b> at it than the average ${ROLE_NOUN[top.key]}`
+        : `, about as well as the average ${ROLE_NOUN[top.key]}`;
       out.push([isGood(g) ? "good" : isBad(g) ? "bad" : "", `On ${S} you play most like <b>${like}</b>: ${pct(top.share)} of your ${S} rounds, the average player ${pct(top.avgShare)}${how}.`]);
     } else if (side === "C") {
       // Every CT round is one of these: say which you play most.
       const common = [...list].sort((a, b) => b.share - a.share)[0];
       const VERB = { anchor: "anchor a site", rotator: "rotate between sites", mid: "play mid" };
       const g = common.grade;
-      out.push([isGood(g) ? "good" : isBad(g) ? "bad" : "", `On CT you mostly <b>${VERB[common.key]}</b> (${pct(common.share)} of your CT rounds, about as often as the average player)${g ? `: rating <b>${f2(common.s.rating)}</b> when you do, the average ${ROLE_NOUN[common.key]} ${f2(common.a.rating)}` : ""}.`]);
+      out.push([isGood(g) ? "good" : isBad(g) ? "bad" : "", `On CT you mostly <b>${VERB[common.key]}</b> (${pct(common.share)} of your CT rounds, about as often as the average player)${g ? (g.rel >= 0.05 ? `, <b>${by(common)}% better</b> than the average ${ROLE_NOUN[common.key]}` : g.rel <= -0.05 ? `, <b>${by(common)}% worse</b> than the average ${ROLE_NOUN[common.key]}` : `, about as well as the average ${ROLE_NOUN[common.key]}`) : ""}.`]);
     } else out.push(["", `On ${S} you don't lean to one role: a flexible player.`]);
     const best = list.filter((r) => r.grade && r.key !== top.key && r.grade.rel >= 0.08).sort((a, b) => b.grade.rel - a.grade.rel)[0];
-    if (best) out.push(["good", `You're at your best on ${S} as <b>${ROLE_LIKE[best.key]}</b>: rating <b>${f2(best.s.rating)}</b> in those ${best.s.n} rounds, the average ${ROLE_NOUN[best.key]} ${f2(best.a.rating)}.`]);
+    if (best) out.push(["good", `You're at your best on ${S} as <b>${ROLE_LIKE[best.key]}</b>: <b>${by(best)}% better</b> than the average ${ROLE_NOUN[best.key]} (${best.s.n} rounds).`]);
   }
   // Rifler or AWPer.
   const rifle = roles.find((r) => r.key === "rifle"), awp = roles.find((r) => r.key === "awp");
@@ -5374,8 +5390,9 @@ function psProfile({ roles, sideStats, buckets, positions, mapRows, caught }) {
   const bestPos = graded.filter((g) => g.grade.rel >= 0.1).sort((a, b) => b.grade.rel - a.grade.rel)[0];
   const worstPos = graded.filter((g) => g.grade.rel <= -0.1).sort((a, b) => a.grade.rel - b.grade.rel)[0];
   const posName = (g) => `<b>${esc(g.name)}</b> on ${esc(mapName(g.set.map))} ${SIDE_NAME[g.S]}`;
-  if (bestPos) out.push(["good", `Your best position: ${posName(bestPos)} (rating ${f2(bestPos.s.rating)} in ${bestPos.s.n} rounds, the average player there ${f2(bestPos.a.rating)}).`]);
-  if (worstPos) out.push(["bad", `Your weakest position: ${posName(worstPos)} (rating ${f2(worstPos.s.rating)} in ${worstPos.s.n} rounds, the average player there ${f2(worstPos.a.rating)}).`]);
+  const posBy = (g) => Math.abs(Math.round(100 * (g.s.rating / g.a.rating - 1)));
+  if (bestPos) out.push(["good", `Your best position: ${posName(bestPos)}, <b>${posBy(bestPos)}% better</b> than the average player there (${bestPos.s.n} rounds).`]);
+  if (worstPos) out.push(["bad", `Your weakest position: ${posName(worstPos)}, <b>${posBy(worstPos)}% worse</b> than the average player there (${worstPos.s.n} rounds).`]);
   // Duels.
   const open = buckets.find((b) => b.key === "opening");
   if (open?.grade) out.push([isGood(open.grade) ? "good" : isBad(open.grade) ? "bad" : "", `You win <b>${pctOf(open.w, open.n)}%</b> of your opening duels (the average player ${Math.round(open.avg * 100)}%): <b>${open.grade.word.toLowerCase()}</b>.`]);
@@ -6127,11 +6144,33 @@ const HIST_COLS = [["date", "Date", "112px"], ["score", "Score", "112px"], ["elo
   ["fk", "First kills", "72px"], ["fd", "First deaths", "80px"], ["trades", "Trade kills", "76px"], ["clutch", "Clutches", "70px"], ["ud", "Utility dmg", "80px"],
   ["ef", "Flashed", "62px"], ["fa", "Flash assists", "86px"], ["mvps", "MVPs", "52px"], ["acc", "Accuracy", "70px"], ["dmg", "Damage", "68px"], ["rounds", "Rounds", "60px"],
   ["length", "Length", "64px"], ["source", "Source", "82px"]];
-const HIST_DEFAULT = ["date", "score", "elo", "rating", "rws", "kda", "adr", "map"];
+const HIST_DEFAULT = ["date", "score", "elo", "rating", "swing", "rws", "kda", "adr", "map"];
 const HIST_GROUPS = [["Match", ["date", "score", "elo", "map", "source", "rounds", "length"]], ["Ratings", ["rating", "rating2", "rating1", "rws", "swing"]],
   ["Kills and damage", ["kda", "kills", "deaths", "assists", "kd", "kr", "hs", "adr", "dmg", "kast", "mvps"]], ["Multi-kills, openings, clutches", ["multi", "fk", "fd", "trades", "clutch"]],
   ["Utility and aim", ["ud", "ef", "fa", "acc"]]];
-const histCols = () => pickedCols("veloxify.historyCols", HIST_COLS, HIST_DEFAULT);
+const histCols = () => {
+  // Swing became a default column: put it next to HLTV 3.0 in a layout saved before (once).
+  try {
+    if (!localStorage.getItem("veloxify.historyCols.swing")) {
+      localStorage.setItem("veloxify.historyCols.swing", "1");
+      const saved = JSON.parse(localStorage.getItem("veloxify.historyCols") || "null");
+      const list = Array.isArray(saved) ? saved : saved?.cols;
+      if (Array.isArray(list) && !list.includes("swing")) {
+        list.splice(list.includes("rating") ? list.indexOf("rating") + 1 : list.length, 0, "swing");
+        savePickedCols("veloxify.historyCols", HIST_COLS, list);
+      }
+    }
+  } catch (e) { /* defaults */ }
+  return pickedCols("veloxify.historyCols", HIST_COLS, HIST_DEFAULT);
+};
+// The column editor for match lists (match history, a session's matches).
+function editHistCols(btn, rerender) {
+  openColPicker(btn, {
+    catalog: HIST_COLS.map(([k, l]) => [k, l]), groups: HIST_GROUPS, cols: histCols(),
+    onChange: (list) => { savePickedCols("veloxify.historyCols", HIST_COLS, list); rerender(); },
+    onReset: () => { try { localStorage.removeItem("veloxify.historyCols"); } catch (err) { /* nothing saved */ } rerender(); },
+  });
+}
 const histTemplate = (cols) => `${cols.map((k) => HIST_COLS.find((c) => c[0] === k)[2]).join(" ")} 96px`;
 // The narrowest a row can be: with many columns the list scrolls sideways, every row as wide.
 const histMinWidth = (cols) => sum(cols.map((k) => parseInt(/(\d+)px/.exec(HIST_COLS.find((c) => c[0] === k)[2])[1], 10))) + 96 + 12 * cols.length + 28;
@@ -6140,7 +6179,7 @@ const histGridStyle = (cols) => `grid-template-columns:${histTemplate(cols)};min
 // The match list with your columns (Match history, and each session's matches).
 function historyTable(rows, cols) {
   return `<div class="ml-table"><div class="ml-grid ml-head" style="${histGridStyle(cols)}">
-      ${cols.map((k) => `<div data-col="${k}" title="Drag to move">${k === "rating" ? `<span class="ic">${ICONS.rating}</span>` : ""}${esc(HIST_COLS.find((c) => c[0] === k)[1])}</div>`).join("")}<div></div>
+      ${cols.map((k) => `<div data-col="${k}" title="Drag to move">${k === "rating" ? `<span class="ic">${ICONS.rating}</span>` : ""}${esc(HIST_COLS.find((c) => c[0] === k)[1])}</div>`).join("")}<div class="ml-addcol-cell"><button class="ml-addcol" data-addcol title="Add, remove or move columns">+ Columns</button></div>
     </div>
     ${rows.map((r) => historyRow(r, cols)).join("")}</div>`;
 }
@@ -6229,11 +6268,7 @@ function renderMatchHistory(view) {
   view.querySelector("#mhmap").onchange = (e) => { mh.map = e.target.value; mh.shown = 50; renderMatchHistory(view); };
   const setCols = (list) => { savePickedCols("veloxify.historyCols", HIST_COLS, list); renderMatchHistory(view); };
   wireColDrag([...view.querySelectorAll(".ml-head [data-col]")], () => cols, setCols);
-  view.querySelector("#mh-cols").onclick = (e) => openColPicker(e.currentTarget, {
-    catalog: HIST_COLS.map(([k, l]) => [k, l]), groups: HIST_GROUPS, cols,
-    onChange: setCols,
-    onReset: () => { try { localStorage.removeItem("veloxify.historyCols"); } catch (err) { /* nothing saved */ } renderMatchHistory(view); },
-  });
+  view.querySelectorAll("#mh-cols, [data-addcol]").forEach((b) => (b.onclick = (e) => { e.stopPropagation(); editHistCols(e.currentTarget, () => renderMatchHistory(view)); }));
   const more = view.querySelector("#mhmore");
   if (more) more.onclick = () => { mh.shown += 50; renderMatchHistory(view); };
   view.querySelectorAll(".ml-row").forEach((row) => (row.onclick = (e) => {
@@ -6416,6 +6451,10 @@ async function renderSession(view, date, idx) {
   const entries = await Promise.all(withDemo.map((m) => loadMatch(m.id)));
   const me = state.index.me;
   const players = sumPlayers(entries, me);
+  // Your highlights this session, best first (the player plays them in this order).
+  const sessHls = entries
+    .flatMap((m) => (m.highlights || []).filter((h) => String(h.player) === String(me)).map((h) => ({ ...h, match: m, name: m.players.find((p) => String(p.steamid) === String(me))?.name || "" })))
+    .sort((a, b) => (b.hand || 0) - (a.hand || 0) || (b.score || 0) - (a.score || 0));
   // Duels in pistol rounds (each half's first): kills and deaths, from the match details.
   const dets = await Promise.all(withDemo.map((m) => loadDetails(m.id)));
   const pistolDuels = new Map();
@@ -6544,8 +6583,10 @@ async function renderSession(view, date, idx) {
       <a class="btn ghost" href="#/sessions" title="Every session on a calendar, colored by how you played">${ICONS.calendar} Calendar</a>
       ${nextSess ? `<a class="btn ghost" href="${nextSess}">Next session ▶</a>` : ""}
     </div>
-    ${objectiveHtml(meRow, sdata)}
-    ${verdictHtml(judged)}
+    ${(() => {
+      // Your highlights across the top, then the two verdicts side by side.
+      return `${sessHls.length ? `<div class="sv-top">${sessHighlightsHtml(sessHls, date)}</div>` : ""}<div class="sv-verdicts">${objectiveHtml(meRow, sdata)}${verdictHtml(judged)}</div>`;
+    })()}
     ${sobj ? setupHtml(sdata, sobj) : ""}
     ${notice.length ? `<section class="panel sv-noticed"><div class="panel-head"><div class="h3">What we noticed</div><span class="grow"></span><span class="sub">From all your matches: things that were true of this session too</span></div>
       <ul>${notice.map((n) => `<li>${noticedText(n)}</li>`).join("")}</ul></section>` : ""}
@@ -6573,7 +6614,13 @@ async function renderSession(view, date, idx) {
     renderSession(view, date, idx);
   }));
   wireColDrag([...view.querySelectorAll(".ml-head [data-col]")], histCols, (list) => { savePickedCols("veloxify.historyCols", HIST_COLS, list); renderSession(view, date, idx); });
+  view.querySelectorAll("[data-addcol]").forEach((b) => (b.onclick = (e) => { e.stopPropagation(); editHistCols(e.currentTarget, () => renderSession(view, date, idx)); }));
   wireNotes(view, sdata, skey);
+  view.querySelectorAll(".sv-top [data-hl]").forEach((c) => (c.onclick = () => {
+    state.playlist = sessHls.filter((h) => h.clip);
+    const i = state.playlist.findIndex((h) => h.id === c.dataset.hl);
+    if (i >= 0) play(i);
+  }));
   view.querySelectorAll(".ml-row").forEach((row) => (row.onclick = (e) => {
     const act = e.target.closest("[data-act]")?.dataset.act;
     if (act === "room") return openFaceitRoom(row.dataset.room);
@@ -6773,6 +6820,24 @@ function sessGrade(kind, v, n) {
   if (!t || v == null) return "g2";
   const f = 1 / Math.sqrt(Math.min(Math.max(n || 1, 1), 4)), mid = (t[1] + t[2]) / 2;
   return `g${t.map((x) => mid + (x - mid) * f).filter((x) => v < x).length}`;
+}
+
+// The session's best moments, front and center: the top one big, the next four beside it.
+function sessHighlightsHtml(list, date) {
+  const card = (h, big) => `
+    <div class="hl-card sh-card ${big ? "big" : ""} ${h.clip ? "" : "pending"}" data-hl="${esc(h.id)}" ${clipAttr(h)}>
+      <div class="hl-thumb" style="--map-bg:${mapColor(h.match.map)};${h.thumb ? `background-image:url('${assetUrl(h.thumb)}')` : ""}">
+        ${h.clip ? `<span class="play">▶</span>` : `<span class="state">${h.render_error ? esc(h.render_error) : "Filming soon"}</span>`}
+        <span class="dur">${fmtClip(h.duration_s)}</span>
+      </div>
+      <div class="hl-info"><div class="hl-title">${esc(h.title)}</div>
+        <div class="hl-meta"><span>${esc(mapName(h.match.map))} · round ${h.round}</span></div>
+        ${big ? `<div class="tags">${h.tags.map((t) => tagHtml(t)).join("")}</div>` : ""}</div>
+    </div>`;
+  const [top, ...rest] = list;
+  return `<section class="sh-wrap"><div class="sh-head"><div class="h3">Your top highlights</div><span class="grow"></span>
+      <a class="sub" href="#/day/${esc(date)}/o/x/highlights">All ${list.length} from this day →</a></div>
+    <div class="sh-grid">${card(top, true)}${rest.length ? `<div class="sh-rest">${rest.slice(0, 4).map((h) => card(h, false)).join("")}</div>` : ""}</div></section>`;
 }
 
 // How the session went objectively: against the usual marks for any player, not your own average.
@@ -7907,9 +7972,32 @@ function paintDemoRows() {
 // analyzing them, then capturing clips) with progress, or what needs you.
 const live = { queue: null, status: null };
 let bannerKey = "";
+// Filming time: how long this batch has run, and about how long is left (from how fast the clips
+// done so far went; about 40 s a clip until the first is done).
+function filmTime(st) {
+  if (!st?.since) return "";
+  const el = Math.max(0, Date.now() / 1000 - st.since);
+  const clock = (s) => (s >= 3600 ? `${Math.floor(s / 3600)}:${String(Math.floor((s % 3600) / 60)).padStart(2, "0")}:` : `${Math.floor(s / 60)}:`) + String(Math.floor(s % 60)).padStart(2, "0");
+  let left = "";
+  if (st.total) {
+    const per = st.done >= 1 ? el / st.done : 40;
+    const rest = Math.max(0, per * (st.total - st.done) - (st.done >= 1 ? 0 : el));
+    left = rest >= 30 ? ` · about ${rest < 90 ? "1 minute" : rest < 3600 ? `${Math.round(rest / 60)} minutes` : `${(rest / 3600).toFixed(1)} hours`} left` : st.done < st.total ? " · almost done" : "";
+  }
+  return `${clock(el)} elapsed${left}`;
+}
+let filmTicker = null;
+
 function renderBanner() {
   const el = document.getElementById("banner");
   if (!el) return;
+  // While filming, the elapsed time ticks every second.
+  if (live.status?.state === "rendering" && live.status?.since) {
+    if (!filmTicker) filmTicker = setInterval(renderBanner, 1000);
+  } else if (filmTicker) {
+    clearInterval(filmTicker);
+    filmTicker = null;
+  }
   const q = live.queue, st = live.status;
   const total = q?.items?.length || 0;
   let b = null;
@@ -7940,7 +8028,7 @@ function renderBanner() {
       title: st.total ? `${what} capture in progress` : `Starting ${what.toLowerCase()} capture`,
       count: st.total ? `${Math.min(st.done + 1, st.total)}/${st.total}` : "",
       frac: st.total ? st.done / st.total : 0,
-      note: [now && `Now filming: ${now}`, st.kind === "lineups" && st.more ? `Most thrown first, ${st.total} at a time · ${st.more} more after this batch` : ""].filter(Boolean).join(" · "),
+      note: [filmTime(st), now && `Now filming: ${now}`, st.kind === "lineups" && st.more ? `Most thrown first, ${st.total} at a time · ${st.more} more after this batch` : ""].filter(Boolean).join(" · "),
       actions: [["Stop", () => tauri.core.invoke("stop_rendering")]],
     };
   } else if (st?.state === "error") {
@@ -8011,6 +8099,28 @@ function bannerMin() {
 }
 
 // Sticky rows (the League standings' own team) sit under the top bar and the status banner.
+// A map and its controls fully on screen: the map as big as the space below it allows (it's square),
+// and when that's too little, the page scrolls it up under the header first. Again on resize.
+let fitMapListener = null;
+function fitMapToScreen(stage, controls) {
+  if (fitMapListener) window.removeEventListener("resize", fitMapListener);
+  if (!stage) return;
+  const fit = (scroll) => {
+    if (!document.body.contains(stage)) { window.removeEventListener("resize", fitMapListener); fitMapListener = null; return; }
+    const header = parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--sticky-top")) || 60;
+    const below = (controls?.offsetHeight || 0) + 20;
+    let top = stage.getBoundingClientRect().top;
+    if (scroll && window.innerHeight - top - below < 480) {
+      window.scrollBy({ top: top - header - 8 });
+      top = header + 8;
+    }
+    stage.style.maxWidth = `${Math.round(Math.max(320, Math.min(900, window.innerHeight - Math.max(top, header + 8) - below)))}px`;
+  };
+  fitMapListener = () => fit(false);
+  window.addEventListener("resize", fitMapListener);
+  setTimeout(() => fit(true), 30);
+}
+
 function syncStickyTop() {
   const el = document.getElementById("banner");
   const h = el && !el.hidden ? el.offsetHeight : 0;

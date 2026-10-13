@@ -507,21 +507,10 @@ pub fn migrate_lineup_clips(lib: &Path) -> Result<usize> {
     // Notes on why a lineup couldn't be filmed are checked again once its throws change.
     let counts: HashMap<&str, usize> = all.maps.values().flat_map(|m| m.lineups.iter().map(|l| (l.id.as_str(), l.count))).collect();
     let recheck: Vec<String> = clips.iter().filter(|(k, c)| c.clip.is_none() && counts.get(k.as_str()).is_some_and(|n| *n != c.count)).map(|(k, _)| k.clone()).collect();
-    // Videos of a less common crosshair placement: filmed again from the most common one.
-    let off_aim: std::collections::HashSet<&str> = all.maps.values().flat_map(|m| m.off_aim.iter().map(String::as_str)).collect();
-    let refilm: Vec<String> = clips.iter().filter(|(_, c)| c.clip.is_some() && off_aim.contains(format!("{}@{}", c.match_id, c.tick).as_str())).map(|(k, _)| k.clone()).collect();
-    for k in &refilm {
-        if let Some(c) = clips.remove(k) {
-            for f in [c.clip, c.thumb].into_iter().flatten() {
-                let _ = std::fs::remove_file(lib.join(f));
-            }
-        }
-    }
+    // A video is never thrown away to be filmed again (a "more common" crosshair placement comes
+    // and goes as matches are added): it stays, or moves with its lineup.
     let stale: Vec<String> = clips.keys().filter(|k| !ids.contains(k.as_str())).cloned().collect();
     if stale.is_empty() && recheck.is_empty() {
-        if !refilm.is_empty() {
-            save_lineup_clips(lib, &clips)?;
-        }
         return Ok(0);
     }
     for k in recheck {
@@ -532,7 +521,29 @@ pub fn migrate_lineup_clips(lib: &Path) -> Result<usize> {
         let Some(c) = clips.remove(&old) else { continue };
         let Some(rel) = c.clip.clone() else { continue };
         let key = format!("{}@{}", c.match_id, c.tick);
-        let new = all.maps.values().find_map(|m| m.by_throw.get(&key)).filter(|n| !clips.get(n.as_str()).is_some_and(|x| x.clip.is_some())).cloned();
+        let free = |n: &str| !clips.get(n).is_some_and(|x| x.clip.is_some());
+        // Its filmed throw's lineup now; else the lineup thrown from the same spot with the same
+        // aim (an id is the map, grenade, side, spot and aim of the lineup's first throw).
+        let new = all
+            .maps
+            .values()
+            .find_map(|m| m.by_throw.get(&key))
+            .filter(|n| free(n))
+            .cloned()
+            .or_else(|| {
+                let (map, kind, side, at) = parse_lineup_id(&old)?;
+                let m = all.maps.get(&map)?;
+                m.lineups
+                    .iter()
+                    .filter(|l| l.kind == kind && l.side == side && free(&l.id))
+                    .map(|l| {
+                        let yaw = ((l.yaw - at[3] + 540.0).rem_euclid(360.0) - 180.0).abs();
+                        ((l.from[0] - at[0]).hypot(l.from[1] - at[1]), (l.pitch - at[2]).abs(), yaw, &l.id)
+                    })
+                    .filter(|&(d, p, y, _)| d < 64.0 && p < 2.5 && y < 2.5)
+                    .min_by(|a, b| (a.0 + 20.0 * (a.1 + a.2)).total_cmp(&(b.0 + 20.0 * (b.1 + b.2))))
+                    .map(|(_, _, _, id)| id.clone())
+            });
         match new {
             Some(new) => {
                 let clip = format!("lineups/{new}.mp4");
@@ -544,16 +555,33 @@ pub fn migrate_lineup_clips(lib: &Path) -> Result<usize> {
                 clips.insert(new, LineupClip { clip: Some(clip), thumb, ..c });
                 moved += 1;
             }
+            // Its lineup is gone (thrown differently now, or a miss): the video is kept aside under
+            // its old id, and comes back if the lineup does.
             None => {
-                let _ = std::fs::remove_file(lib.join(&rel));
-                if let Some(t) = &c.thumb {
-                    let _ = std::fs::remove_file(lib.join(t));
-                }
+                clips.insert(old, c);
             }
         }
     }
     save_lineup_clips(lib, &clips)?;
     Ok(moved)
+}
+
+/// A lineup id's parts: map, grenade, side, and the first throw's spot and aim `[x, y, pitch, yaw]`
+/// (`de_mirage-smoke-T--84--65--45--20`; a trailing `b` tells same-id lineups apart).
+fn parse_lineup_id(id: &str) -> Option<(String, String, String, [f32; 4])> {
+    let mut parts = id.trim_end_matches('b').split('-');
+    let (map, kind, side) = (parts.next()?.to_string(), parts.next()?.to_string(), parts.next()?.to_string());
+    let (mut nums, mut neg) = (vec![], false);
+    for p in parts {
+        if p.is_empty() {
+            neg = true;
+            continue;
+        }
+        let v: f32 = p.parse().ok()?;
+        nums.push(if neg { -v } else { v });
+        neg = false;
+    }
+    (nums.len() == 4).then(|| (map, kind, side, [nums[0] * 16.0, nums[1] * 16.0, nums[2], nums[3]]))
 }
 
 pub fn load_lineup_clips(lib: &Path) -> BTreeMap<String, LineupClip> {

@@ -1783,3 +1783,24 @@ ul.ins-list { list-style: none; padding-left: 0; }
 .player-share .btn:hover { background: #4752c4; }
 .player-share .btn:disabled { opacity: 0.8; cursor: progress; }
 .player-share select { background: var(--row); color: var(--text); border: 1px solid var(--line-2); border-left: 0; border-radius: 0 var(--radius-sm) var(--radius-sm) 0; padding: 0 6px; font: inherit; font-size: 12px; }
+
+/* Match lists: the "+ Columns" button at the end of the header row */
+.ml-addcol-cell { display: flex; justify-content: flex-end; }
+.ml-addcol { background: var(--accent-soft); color: var(--accent); border: 1px solid var(--accent-line); border-radius: 999px; padding: 2px 9px; font: inherit; font-size: 11px; font-weight: 700; cursor: pointer; white-space: nowrap; }
+.ml-addcol:hover { background: var(--accent); color: #fff; }
+
+/* Sessions: your top highlights front and center, the verdict beside them */
+.sv-top { margin-bottom: 14px; }
+.sv-verdicts { display: grid; grid-template-columns: repeat(auto-fit, minmax(360px, 1fr)); gap: 14px; align-items: stretch; margin-bottom: 14px; }
+.sv-verdicts > .sv-obj, .sv-verdicts > .sv-box { margin-bottom: 0; }
+.sh-wrap { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.sh-head { display: flex; align-items: baseline; gap: 10px; }
+.sh-head a { text-decoration: none; }
+.sh-head a:hover { color: var(--text); }
+.sh-grid { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); gap: 12px; }
+.sh-rest { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; align-content: start; }
+.sh-card .hl-info { padding: 6px 8px 8px; gap: 2px; }
+.sh-card:not(.big) .hl-title { font-size: 12px; }
+.sh-card:not(.big) .hl-meta { font-size: 11px; }
+.sh-card:not(.big) .play { width: 30px; height: 30px; font-size: 12px; }
+@media (max-width: 700px) { .sh-grid { grid-template-columns: 1fr; } }

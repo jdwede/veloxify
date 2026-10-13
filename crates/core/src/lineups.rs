@@ -38,18 +38,21 @@ const SAME_AIM: f32 = 0.5;
 /// is picked out of them).
 const MERGE_AIM: f32 = 2.0;
 const MERGE_LANDING: f32 = 250.0;
-/// A smoke or molotov landing farther than this from anywhere a player has stood (in the
-/// library's kills) is off the map or on a roof: a miss.
+/// A grenade landing farther than this from anywhere a player has stood (in the library's kills)
+/// is off the map or on a roof: a miss. Flashes pop in the air (over a wall, above a site), so
+/// they get more room.
 const OFF_MAP: f32 = 150.0;
+const OFF_MAP_FLASH: f32 = 450.0;
 /// From the same spot, a landing thrown at most this many times and under this share of that
-/// spot's most thrown landing is a miss of it (players hit their lineups far more often than not).
+/// spot's most thrown landing is a miss of it (players hit their lineups far more often than not:
+/// 2 throws next to a lineup thrown 17 times are its misses).
 const RARE_MAX: usize = 4;
-const RARE_SHARE: f32 = 0.10;
+const RARE_SHARE: f32 = 0.20;
 /// ... aimed within this many degrees of it (a different aim from the same spot is a different
 /// lineup, not a miss).
 const MISS_AIM: f32 = 5.0;
 /// Bumped when the rules above change: `lineups.json` from older rules is rebuilt.
-pub const VERSION: u32 = 7;
+pub const VERSION: u32 = 8;
 /// Spawn spots closer than this are one spot.
 const SPAWN_RADIUS: f32 = 48.0;
 /// Example throws kept per lineup.
@@ -466,10 +469,10 @@ pub fn write(root: &Path) -> Result<()> {
         }
         let groups = joined;
 
-        // Misses: smokes and molotovs landing where no player has stood (off the map, on a roof),
-        // and rare landings from a spot whose lineup usually lands elsewhere.
+        // Misses: grenades landing where no player has stood (off the map, on a roof), and rare
+        // landings from a spot whose lineup usually lands elsewhere.
         let stood: Vec<[f32; 2]> = places.get(map).map(|pl| pl.iter().map(|(p, _)| *p).collect()).unwrap_or_default();
-        let off_map = |to: [f32; 2]| !stood.is_empty() && stood.iter().all(|p| (p[0] - to[0]).hypot(p[1] - to[1]) > OFF_MAP);
+        let off_map = |to: [f32; 2], room: f32| !stood.is_empty() && stood.iter().all(|p| (p[0] - to[0]).hypot(p[1] - to[1]) > room);
         let aim = |g: &Group| group_aim(&g.members);
         let top_from_spot = |g: &Group| -> usize {
             let (p, y) = aim(g);
@@ -486,7 +489,7 @@ pub fn write(root: &Path) -> Result<()> {
         };
         let missed = |g: &Group| -> bool {
             let n = g.members.len();
-            ((g.kind == "smoke" || g.kind == "molotov") && off_map(g.to)) || (n <= RARE_MAX && (n as f32) < RARE_SHARE * top_from_spot(g) as f32)
+            off_map(g.to, if g.kind == "flash" { OFF_MAP_FLASH } else { OFF_MAP }) || (n <= RARE_MAX && (n as f32) < RARE_SHARE * top_from_spot(g) as f32)
         };
         let mut misses = 0;
         let mut off_aim: Vec<String> = vec![];

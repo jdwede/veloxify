@@ -74,6 +74,9 @@ pub struct Status {
     pub kind: String,
     /// Lineup videos waiting for later batches.
     pub more: usize,
+    /// When this batch of filming started (Unix seconds; 0 when not filming), for the elapsed time
+    /// and the time left.
+    pub since: u64,
 }
 
 /// What a batch films, in words: "highlights", "lowlights", "clips", "lineup videos".
@@ -122,11 +125,21 @@ impl Worker {
 
     fn set(&self, state: &str, message: impl Into<String>, done: usize, total: usize) {
         // What's rendering stays known through the batch.
-        let (kind, more) = {
+        let (kind, more, since) = {
             let cur = self.status.lock().unwrap();
-            if state == "rendering" { (cur.kind.clone(), cur.more) } else { (String::new(), 0) }
+            if state == "rendering" {
+                // The batch's start: kept while it films, set when filming starts.
+                let since = if cur.state == "rendering" && cur.since > 0 {
+                    cur.since
+                } else {
+                    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+                };
+                (cur.kind.clone(), cur.more, since)
+            } else {
+                (String::new(), 0, 0)
+            }
         };
-        let s = Status { state: state.into(), message: message.into(), done, total, kind, more };
+        let s = Status { state: state.into(), message: message.into(), done, total, kind, more, since };
         let changed_state = self.status.lock().unwrap().state != s.state;
         if changed_state || self.status.lock().unwrap().message != s.message {
             vlog!("[{}] {}", s.state, s.message);
