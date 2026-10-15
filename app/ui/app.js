@@ -2989,50 +2989,84 @@ function formChart(form) {
     </div>`;
 }
 
-// FACEIT ELO after each recent match, oldest to newest, with hover details.
+// FACEIT ELO over the recent matches, oldest to newest: one dot per match, and on hover a card
+// with that match like FACEIT's (result, map, rating and swing from the demo, K/D/A, ELO).
+let eloPts = [];
 function eloChart(list) {
-  const pts = list.filter((m) => m.elo).slice().reverse();
-  if (pts.length < 2) return "";
-  const w = 600, h = 110, padL = 38, padR = 8, top = 10, bottom = 18;
-  const lo = Math.min(...pts.map((p) => p.elo)), hi = Math.max(...pts.map((p) => p.elo));
-  const span = Math.max(40, hi - lo), y0 = lo - span * 0.1, y1 = hi + span * 0.1;
-  const x = (i) => padL + (i * (w - padL - padR)) / (pts.length - 1);
-  const y = (e) => top + ((y1 - e) * (h - top - bottom)) / (y1 - y0);
-  const line = pts.map((p, i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${y(p.elo).toFixed(1)}`).join(" ");
-  const area = `${line} L${x(pts.length - 1).toFixed(1)},${h - bottom} L${x(0).toFixed(1)},${h - bottom} Z`;
-  const dots = pts.map((p, i) => `<circle class="pt" cx="${x(i).toFixed(1)}" cy="${y(p.elo).toFixed(1)}" r="3.5" stroke="${p.result === "win" ? WIN : LOSS}"/>`).join("");
-  const data = pts.map((p, i) => ({ x: x(i), y: y(p.elo), tip: `${mapName(p.map)} · ${new Date((p.started_ts || p.finished_ts) * 1000).toLocaleDateString("en-GB", { day: "numeric", month: "short" })} · ${p.result === "win" ? "W" : "L"} ${p.score_mine}-${p.score_theirs} · ${p.elo.toLocaleString("en-US")}${p.elo_delta != null ? ` (${p.elo_delta >= 0 ? "+" : ""}${p.elo_delta})` : ""}` }));
+  const ms = list.slice().reverse();
+  if (ms.length < 2) return "";
+  const lo = Math.min(...ms.map((m) => m.elo)), hi = Math.max(...ms.map((m) => m.elo)), span = Math.max(30, hi - lo);
+  // Percent of the box: a little room at the edges so the end dots aren't cut.
+  const x = (i) => 1.5 + (i * 97) / (ms.length - 1);
+  const y = (e) => 10 + ((hi + (span - (hi - lo)) / 2 - e) / span) * 78;
+  eloPts = ms.map((m, i) => {
+    const lib = state.byId?.get(faceitLibId(m));
+    const line = lib && !lib.stats_only ? lib.line : null;
+    return { m, x: x(i), y: y(m.elo), rating: line ? r3(line) : null, swing: line ? line.swing || 0 : null };
+  });
+  const line = eloPts.map((p, i) => `${i ? "L" : "M"}${p.x.toFixed(2)},${p.y.toFixed(2)}`).join(" ");
   return `
-    <div class="elo-chart" data-points='${esc(JSON.stringify(data))}' data-w="${w}">
-      <svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" role="img" aria-label="FACEIT ELO over recent matches">
-        <defs><linearGradient id="eloFill" x1="0" x2="0" y1="0" y2="1"><stop offset="0" style="stop-color:var(--accent)" stop-opacity="0.28"/><stop offset="1" style="stop-color:var(--accent)" stop-opacity="0"/></linearGradient></defs>
-        <text x="0" y="${y(hi) + 4}" class="axis">${hi.toLocaleString("en-US")}</text>
-        <text x="0" y="${y(lo) + 4}" class="axis">${lo.toLocaleString("en-US")}</text>
-        <path class="area" d="${area}"/><path class="line" d="${line}"/>
-        <line class="cross" x1="0" x2="0" y1="${top}" y2="${h - bottom}" visibility="hidden"/>
-        ${dots}
+    <div class="elo-chart">
+      <svg viewBox="0 0 100 100" preserveAspectRatio="none" role="img" aria-label="FACEIT ELO over your last ${ms.length} matches">
+        <defs><linearGradient id="eloFill" x1="0" x2="0" y1="0" y2="1"><stop offset="0" style="stop-color:var(--accent)" stop-opacity="0.3"/><stop offset="1" style="stop-color:var(--accent)" stop-opacity="0"/></linearGradient></defs>
+        <path class="area" d="${line} L${eloPts[eloPts.length - 1].x.toFixed(2)},100 L${eloPts[0].x.toFixed(2)},100 Z"/>
+        <path class="line" d="${line}" vector-effect="non-scaling-stroke"/>
       </svg>
-      <div class="tooltip" hidden></div>
+      ${eloPts.map((p, i) => `<i class="elo-dot ${p.m.result}" data-i="${i}" style="left:${p.x.toFixed(2)}%;top:${p.y.toFixed(2)}%"></i>`).join("")}
+      <div class="elo-tip" hidden></div>
     </div>`;
+}
+
+function eloTipHtml(p) {
+  const m = p.m, d = new Date((m.started_ts || m.finished_ts) * 1000);
+  const when = `${WEEKDAYS[d.getDay()]}, ${d.getDate()} ${MONTHS[d.getMonth()]} ${d.getFullYear()}, ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+  const row = (label, v) => `<div class="et-row"><span>${label}</span><b>${v}</b></div>`;
+  const delta = m.elo_delta;
+  return `<div class="et-date">${esc(when.toUpperCase())}</div>
+    <div class="et-res"><span class="wl ${m.result}">${m.result === "win" ? "W" : "L"}</span><b class="${m.result}">${m.score_mine}</b><span class="sub">:</span><span>${m.score_theirs}</span><span class="et-map">${mapIcon(m.map)}${esc(mapName(m.map))}</span></div>
+    ${p.rating != null ? row("Rating 3.0", `<span class="rchip ${ratingClass(p.rating)}">${f2(p.rating)}<i style="width:${Math.min(100, (p.rating / 2) * 100)}%"></i></span>`) : ""}
+    ${p.swing != null ? row("Swing", `<span class="${p.swing > 0 ? "up" : p.swing < 0 ? "down" : ""}">${fmtSwing(p.swing)}</span>`) : ""}
+    ${row("K/D/A", `${m.kills} / ${m.deaths} / ${m.assists}`)}
+    ${row("ADR", f1(m.adr || 0))}
+    ${row("ELO", `<span class="et-elo">${levelBadge(levelFor(m.elo), 18)}${m.elo.toLocaleString("en-US")}</span>`)}
+    ${delta != null ? row("Elo change", `<span class="${delta >= 0 ? "up" : "down"}">${delta >= 0 ? "↑" : "↓"} ${Math.abs(delta)}</span>`) : ""}
+    ${p.rating == null ? `<div class="et-note">Rating and swing come from the demo.</div>` : ""}`;
 }
 
 function wireEloChart(root) {
   const el = root.querySelector(".elo-chart");
-  if (!el) return;
-  const pts = JSON.parse(el.dataset.points), w = Number(el.dataset.w);
-  const svg = el.querySelector("svg"), cross = el.querySelector(".cross"), tip = el.querySelector(".tooltip");
-  svg.addEventListener("mousemove", (e) => {
-    const r = svg.getBoundingClientRect(), vx = ((e.clientX - r.left) / r.width) * w;
-    const p = pts.reduce((a, b) => (Math.abs(b.x - vx) < Math.abs(a.x - vx) ? b : a));
-    cross.setAttribute("x1", p.x); cross.setAttribute("x2", p.x); cross.setAttribute("visibility", "visible");
-    tip.textContent = p.tip; tip.hidden = false;
-    const left = (p.x / w) * r.width + (r.left - el.getBoundingClientRect().left);
-    tip.style.left = `${Math.min(left + 12, el.clientWidth - tip.offsetWidth - 4)}px`;
-    tip.style.top = "0px";
+  if (!el || !eloPts.length) return;
+  const tip = el.querySelector(".elo-tip"), dots = [...el.querySelectorAll(".elo-dot")];
+  let on = -1;
+  const show = (i) => {
+    if (i === on) return;
+    on = i;
+    dots.forEach((d, k) => d.classList.toggle("on", k === i));
+    const p = eloPts[i];
+    tip.innerHTML = eloTipHtml(p);
+    tip.hidden = false;
+    // Beside the dot, on whichever side has room; never off the chart.
+    const w = el.clientWidth, dx = (p.x / 100) * w, tw = tip.offsetWidth;
+    tip.style.left = `${dx + 14 + tw <= w ? dx + 14 : Math.max(0, dx - 14 - tw)}px`;
+    tip.style.top = `${Math.max(-8, Math.min((p.y / 100) * el.clientHeight - 40, el.clientHeight - tip.offsetHeight))}px`;
+  };
+  // The nearest match to the pointer, so the dots don't have to be hit exactly.
+  el.addEventListener("mousemove", (e) => {
+    const r = el.getBoundingClientRect(), vx = ((e.clientX - r.left) / r.width) * 100;
+    let best = 0;
+    eloPts.forEach((p, i) => { if (Math.abs(p.x - vx) < Math.abs(eloPts[best].x - vx)) best = i; });
+    show(best);
   });
-  svg.addEventListener("mouseleave", () => { cross.setAttribute("visibility", "hidden"); tip.hidden = true; });
+  el.addEventListener("mouseleave", () => { on = -1; tip.hidden = true; dots.forEach((d) => d.classList.remove("on")); });
+  // A dot opens its match (when it's in the library).
+  el.addEventListener("click", () => {
+    const p = eloPts[on];
+    if (p && state.byId?.has(faceitLibId(p.m))) location.hash = `#/match/${faceitLibId(p.m)}`;
+  });
 }
 
+// FACEIT's recent performance, like FACEIT shows it: the last 30 matches with an ELO (league matches
+// have none and aren't counted), the ELO change across them, wins and losses.
 function faceitPanel() {
   const f = state.faceit;
   const head = (extra = "") => `<div class="panel-head"><div class="h3">FACEIT</div><span class="grow"></span>${extra}</div>`;
@@ -3040,32 +3074,40 @@ function faceitPanel() {
   if (!f.player_id) {
     return `${head()}<div class="fc-msg">No FACEIT account is linked to this Steam account. If you play FACEIT on a different account, add its nickname in <a class="link" href="#/settings">Settings</a>.</div>`;
   }
-  const recent = f.matches.slice(0, 30);
-  const firstUnrated = recent.findIndex((m) => !m.elo);
-  const rated = firstUnrated < 0 ? recent : recent.slice(0, firstUnrated);
-  const change = sum(rated.map((m) => m.elo_delta || 0));
+  const recent = f.matches.filter((m) => m.elo).slice(0, 30);
+  const change = recent.length > 1 ? recent[0].elo - recent[recent.length - 1].elo : 0;
   const wins = recent.filter((m) => m.result === "win").length;
-  const k = sum(recent.map((m) => m.kills)), dth = sum(recent.map((m) => m.deaths)), hs = sum(recent.map((m) => m.headshots));
+  const k = sum(recent.map((m) => m.kills)), dth = sum(recent.map((m) => m.deaths)), a = sum(recent.map((m) => m.assists)), hs = sum(recent.map((m) => m.headshots));
   const adr = recent.length ? sum(recent.map((m) => m.adr)) / recent.length : 0;
+  const lobby = recent.filter((m) => m.team_elo && m.enemy_elo).map((m) => (m.team_elo + m.enemy_elo) / 2);
+  const avgElo = lobby.length ? Math.round(sum(lobby) / lobby.length) : 0;
+  // Rating 3.0 and swing from the matches whose demo is analyzed.
+  const lines = recent.map((m) => state.byId?.get(faceitLibId(m))).filter((m) => m && !m.stats_only).map((m) => m.line);
+  const rating = lines.length ? sum(lines.map((l) => r3(l))) / lines.length : null;
+  const swing = lines.length ? sum(lines.map((l) => l.swing || 0)) / lines.length : null;
+  const n = recent.length || 1;
   const L = f.lifetime || {};
   return `
-    ${head(`<span class="sub">Last ${recent.length} matches</span>`)}
+    ${head(`<span class="sub">Last <b class="fc-n">${recent.length}</b> matches${avgElo ? ` · <span class="fc-avg" title="Average ELO of everyone in these matches">${levelBadge(levelFor(avgElo), 18)}<b>${avgElo.toLocaleString("en-US")}</b> avg match ELO</span>` : ""}</span>`)}
     <div class="fc-summary">
       ${f.avatar ? `<img class="fc-avatar" src="${esc(f.avatar)}" alt="">` : ""}
       ${levelBadge(f.level, 46)}
       <div class="who"><span class="elo">${f.elo.toLocaleString("en-US")}</span><span class="sub">${esc(f.nickname)}${f.region ? ` · ${esc(f.region)}` : ""}</span></div>
-      <span class="grow"></span>
-      <div style="text-align:right"><div class="sub">Elo change${rated.length < recent.length ? `, last ${rated.length}` : ""}</div><div class="h3 ${change >= 0 ? "up" : "down"}">${change >= 0 ? "+" : ""}${change}</div></div>
-      <div style="text-align:right"><div class="sub">Record</div><div class="h3"><span class="up">${wins}</span> / <span class="down">${recent.length - wins}</span></div></div>
     </div>
-    ${eloChart(rated)}
+    <div class="fc-chart-head">
+      <span class="sub">Elo change <b class="${change >= 0 ? "up" : "down"}">${change >= 0 ? "+" : ""}${change}</b></span>
+      <span class="fc-wl"><span class="wl win">W</span><b class="up">${wins}</b><span class="sub">/</span><span class="wl loss">L</span><b class="down">${recent.length - wins}</b></span>
+    </div>
+    ${eloChart(recent)}
     <div class="fc-stats">
+      ${rating != null ? `<div class="kpi" title="Average of the ${lines.length} of these matches whose demo is analyzed"><div class="v"><span class="rchip ${ratingClass(rating)}">${f2(rating)}<i style="width:${Math.min(100, (rating / 2) * 100)}%"></i></span></div><div class="l">Rating 3.0 · swing <span class="${swing > 0 ? "up" : swing < 0 ? "down" : ""}">${fmtSwing(swing)}</span></div></div>` : ""}
+      <div class="kpi"><div class="v">${Math.round(k / n)} / ${Math.round(dth / n)} / ${Math.round(a / n)}</div><div class="l">K/D/A</div></div>
       <div class="kpi"><div class="v">${dth ? f2(k / dth) : "–"}</div><div class="l">K/D</div></div>
       <div class="kpi"><div class="v">${f1(adr)}</div><div class="l">ADR</div></div>
       <div class="kpi"><div class="v">${k ? Math.round((hs / k) * 100) : 0}%</div><div class="l">HS%</div></div>
-      <div class="kpi"><div class="v">${recent.length ? Math.round((wins / recent.length) * 100) : 0}%</div><div class="l">Win rate</div></div>
+      <div class="kpi"><div class="v">${Math.round((wins / n) * 100)}%</div><div class="l">Win rate</div></div>
       <div class="kpi"><div class="v">${(L.matches || 0).toLocaleString("en-US")}</div><div class="l">Lifetime matches</div></div>
-      <div class="kpi"><div class="v">${Math.round(L.win_rate || 0)}%</div><div class="l">Lifetime win rate</div></div>
+      ${rating == null ? `<div class="kpi"><div class="v">${Math.round(L.win_rate || 0)}%</div><div class="l">Lifetime win rate</div></div>` : ""}
     </div>`;
 }
 

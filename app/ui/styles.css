@@ -443,13 +443,38 @@ table.sb { width: 100%; border-collapse: separate; border-spacing: 0; font-varia
 .fc-summary .elo { font-size: 26px; font-weight: 800; font-variant-numeric: tabular-nums; }
 .fc-summary .who { display: flex; flex-direction: column; }
 .fc-avatar { width: 36px; height: 36px; border-radius: 50%; object-fit: cover; background: var(--chip); }
-.fc-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; padding: 0 20px 16px; }
+.fc-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; padding: 0 20px 16px; }
 .fc-stats .kpi { padding: 10px 12px; }
-.elo-chart svg { width: 100%; height: 110px; display: block; overflow: visible; }
+.fc-stats .rchip { font-size: 18px; }
+.fc-n { color: var(--text); }
+.fc-avg { display: inline-flex; align-items: center; gap: 5px; vertical-align: middle; }
+.fc-avg b { color: var(--text); }
+/* Elo change on the left, wins and losses on the right, over the chart (as on FACEIT) */
+.fc-chart-head { display: flex; align-items: center; justify-content: space-between; padding: 4px 20px 0; font-size: 13px; }
+.fc-chart-head b { font-size: 14px; margin-left: 3px; }
+.fc-wl { display: inline-flex; align-items: center; gap: 6px; font-weight: 800; }
+.fc-wl b { margin: 0; }
+/* The ELO line: one dot per match (HTML, so they stay round); the nearest one lights up with its card. */
+.elo-chart { position: relative; height: 150px; margin: 6px 20px 16px; padding: 0; cursor: pointer; }
+.elo-chart > svg { position: absolute; inset: 0; width: 100%; height: 100%; display: block; overflow: visible; }
 .elo-chart .line { fill: none; stroke: var(--accent); stroke-width: 2; }
 .elo-chart .area { fill: url(#eloFill); }
-.elo-chart .pt { fill: var(--card); stroke-width: 2; }
-.elo-chart .cross { stroke: rgba(255, 255, 255, 0.35); stroke-width: 1; }
+.elo-dot { position: absolute; width: 9px; height: 9px; margin: -4.5px 0 0 -4.5px; border-radius: 50%; background: var(--card); border: 2px solid var(--win); box-sizing: border-box; transition: transform 0.1s; }
+.elo-dot.loss { border-color: var(--loss); }
+.elo-dot.on { transform: scale(1.6); background: var(--win); box-shadow: 0 0 0 3px color-mix(in srgb, var(--win) 25%, transparent); }
+.elo-dot.loss.on { background: var(--loss); box-shadow: 0 0 0 3px color-mix(in srgb, var(--loss) 25%, transparent); }
+.elo-tip { position: absolute; z-index: 6; width: 210px; pointer-events: none; background: var(--row-hi); border: 1px solid var(--line-2); border-radius: var(--radius-sm); box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5); font-size: 13px; }
+.et-date { padding: 9px 12px 2px; font-size: 10.5px; letter-spacing: 0.06em; color: var(--muted); }
+.et-res { display: flex; align-items: center; gap: 5px; padding: 2px 12px 9px; border-bottom: 1px solid var(--line-2); font-weight: 700; }
+.et-res b.win { color: var(--win); }
+.et-res b.loss { color: var(--loss); }
+.et-map { display: inline-flex; align-items: center; gap: 5px; margin-left: auto; }
+.et-map svg, .et-map img { width: 18px; height: 18px; }
+.et-row { display: flex; align-items: center; justify-content: space-between; padding: 7px 12px; border-top: 1px solid var(--line); }
+.et-row:first-of-type { border-top: 0; }
+.et-row span:first-child { color: var(--muted); }
+.et-elo { display: inline-flex; align-items: center; gap: 5px; }
+.et-note { padding: 6px 12px 9px; font-size: 11.5px; color: var(--faint); border-top: 1px solid var(--line); }
 .rank-row { display: flex; align-items: center; gap: 12px; padding: 12px 20px; border-top: 1px solid var(--line); }
 .rank-row .grow { min-width: 0; }
 .fc-msg { padding: 0 20px 18px; color: var(--muted); }
