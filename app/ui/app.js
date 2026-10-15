@@ -3111,131 +3111,174 @@ function formChart(form) {
     </div>`;
 }
 
-// FACEIT ELO over the recent matches, oldest to newest: one dot per match, and on hover a card
-// with that match like FACEIT's (result, map, rating and swing from the demo, K/D/A, ELO).
-let eloPts = [];
-function eloChart(list) {
+// Rating graphs on the profile (FACEIT ELO, Premier rating), oldest to newest: one dot per match,
+// and on hover a card with that match (result, map, rating and swing from the demo, K/D/A, rating).
+// Points: { value, delta, result, mine, theirs, map, ts, libId, kills, deaths, assists, adr }.
+const rankCharts = {};
+function rankChart(kind, list) {
   const ms = list.slice().reverse();
   if (ms.length < 2) return "";
-  const lo = Math.min(...ms.map((m) => m.elo)), hi = Math.max(...ms.map((m) => m.elo)), span = Math.max(30, hi - lo);
+  const lo = Math.min(...ms.map((m) => m.value)), hi = Math.max(...ms.map((m) => m.value)), span = Math.max(30, hi - lo);
   // Percent of the box: a little room at the edges so the end dots aren't cut.
   const x = (i) => 1.5 + (i * 97) / (ms.length - 1);
   const y = (e) => 10 + ((hi + (span - (hi - lo)) / 2 - e) / span) * 78;
-  eloPts = ms.map((m, i) => {
-    const lib = state.byId?.get(faceitLibId(m));
+  const pts = ms.map((m, i) => {
+    const lib = state.byId?.get(m.libId);
     const line = lib && !lib.stats_only ? lib.line : null;
-    return { m, x: x(i), y: y(m.elo), rating: line ? r3(line) : null, swing: line ? line.swing || 0 : null };
+    return { m, x: x(i), y: y(m.value), rating: line ? r3(line) : null, swing: line ? line.swing || 0 : null };
   });
-  const line = eloPts.map((p, i) => `${i ? "L" : "M"}${p.x.toFixed(2)},${p.y.toFixed(2)}`).join(" ");
+  rankCharts[kind] = pts;
+  const line = pts.map((p, i) => `${i ? "L" : "M"}${p.x.toFixed(2)},${p.y.toFixed(2)}`).join(" ");
   return `
-    <div class="elo-chart">
-      <svg viewBox="0 0 100 100" preserveAspectRatio="none" role="img" aria-label="FACEIT ELO over your last ${ms.length} matches">
-        <defs><linearGradient id="eloFill" x1="0" x2="0" y1="0" y2="1"><stop offset="0" style="stop-color:var(--accent)" stop-opacity="0.3"/><stop offset="1" style="stop-color:var(--accent)" stop-opacity="0"/></linearGradient></defs>
-        <path class="area" d="${line} L${eloPts[eloPts.length - 1].x.toFixed(2)},100 L${eloPts[0].x.toFixed(2)},100 Z"/>
+    <div class="elo-chart" data-kind="${kind}">
+      <svg viewBox="0 0 100 100" preserveAspectRatio="none" role="img" aria-label="${kind === "faceit" ? "FACEIT ELO" : "Premier rating"} over your last ${ms.length} matches">
+        <defs><linearGradient id="fill-${kind}" x1="0" x2="0" y1="0" y2="1"><stop offset="0" style="stop-color:var(--accent)" stop-opacity="0.3"/><stop offset="1" style="stop-color:var(--accent)" stop-opacity="0"/></linearGradient></defs>
+        <path class="area" style="fill:url(#fill-${kind})" d="${line} L${pts[pts.length - 1].x.toFixed(2)},100 L${pts[0].x.toFixed(2)},100 Z"/>
         <path class="line" d="${line}" vector-effect="non-scaling-stroke"/>
       </svg>
-      ${eloPts.map((p, i) => `<i class="elo-dot ${p.m.result}" data-i="${i}" style="left:${p.x.toFixed(2)}%;top:${p.y.toFixed(2)}%"></i>`).join("")}
+      ${pts.map((p, i) => `<i class="elo-dot ${p.m.result}" data-i="${i}" style="left:${p.x.toFixed(2)}%;top:${p.y.toFixed(2)}%"></i>`).join("")}
       <div class="elo-tip" hidden></div>
     </div>`;
 }
 
-function eloTipHtml(p) {
-  const m = p.m, d = new Date((m.started_ts || m.finished_ts) * 1000);
+function rankTipHtml(kind, p) {
+  const m = p.m, d = new Date(m.ts * 1000);
   const when = `${WEEKDAYS[d.getDay()]}, ${d.getDate()} ${MONTHS[d.getMonth()]} ${d.getFullYear()}, ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
   const row = (label, v) => `<div class="et-row"><span>${label}</span><b>${v}</b></div>`;
-  const delta = m.elo_delta;
+  const delta = m.delta;
+  const rank = kind === "faceit" ? `<span class="et-elo">${levelBadge(levelFor(m.value), 18)}${m.value.toLocaleString("en-US")}</span>` : premierChip(m.value);
   return `<div class="et-date">${esc(when.toUpperCase())}</div>
-    <div class="et-res"><span class="wl ${m.result}">${m.result === "win" ? "W" : "L"}</span><b class="${m.result}">${m.score_mine}</b><span class="sub">:</span><span>${m.score_theirs}</span><span class="et-map">${mapIcon(m.map)}${esc(mapName(m.map))}</span></div>
+    <div class="et-res"><span class="wl ${m.result}">${m.result === "win" ? "W" : m.result === "loss" ? "L" : "T"}</span><b class="${m.result}">${m.mine}</b><span class="sub">:</span><span>${m.theirs}</span><span class="et-map">${mapIcon(m.map)}${esc(mapName(m.map))}</span></div>
     ${p.rating != null ? row("Rating 3.0", `<span class="rchip ${ratingClass(p.rating)}">${f2(p.rating)}<i style="width:${Math.min(100, (p.rating / 2) * 100)}%"></i></span>`) : ""}
     ${p.swing != null ? row("Swing", `<span class="${p.swing > 0 ? "up" : p.swing < 0 ? "down" : ""}">${fmtSwing(p.swing)}</span>`) : ""}
     ${row("K/D/A", `${m.kills} / ${m.deaths} / ${m.assists}`)}
     ${row("ADR", f1(m.adr || 0))}
-    ${row("ELO", `<span class="et-elo">${levelBadge(levelFor(m.elo), 18)}${m.elo.toLocaleString("en-US")}</span>`)}
-    ${delta != null ? row("Elo change", `<span class="${delta >= 0 ? "up" : "down"}">${delta >= 0 ? "↑" : "↓"} ${Math.abs(delta)}</span>`) : ""}
+    ${row(kind === "faceit" ? "ELO" : "Premier", rank)}
+    ${delta != null ? row(kind === "faceit" ? "Elo change" : "Rating change", `<span class="${delta >= 0 ? "up" : "down"}">${delta >= 0 ? "↑" : "↓"} ${Math.abs(delta).toLocaleString("en-US")}</span>`) : ""}
     ${p.rating == null ? `<div class="et-note">Rating and swing come from the demo.</div>` : ""}`;
 }
 
-function wireEloChart(root) {
-  const el = root.querySelector(".elo-chart");
-  if (!el || !eloPts.length) return;
-  const tip = el.querySelector(".elo-tip"), dots = [...el.querySelectorAll(".elo-dot")];
-  let on = -1;
-  const show = (i) => {
-    if (i === on) return;
-    on = i;
-    dots.forEach((d, k) => d.classList.toggle("on", k === i));
-    const p = eloPts[i];
-    tip.innerHTML = eloTipHtml(p);
-    tip.hidden = false;
-    // Beside the dot, on whichever side has room; never off the chart.
-    const w = el.clientWidth, dx = (p.x / 100) * w, tw = tip.offsetWidth;
-    tip.style.left = `${dx + 14 + tw <= w ? dx + 14 : Math.max(0, dx - 14 - tw)}px`;
-    tip.style.top = `${Math.max(-8, Math.min((p.y / 100) * el.clientHeight - 40, el.clientHeight - tip.offsetHeight))}px`;
-  };
-  // The nearest match to the pointer, so the dots don't have to be hit exactly.
-  el.addEventListener("mousemove", (e) => {
-    const r = el.getBoundingClientRect(), vx = ((e.clientX - r.left) / r.width) * 100;
-    let best = 0;
-    eloPts.forEach((p, i) => { if (Math.abs(p.x - vx) < Math.abs(eloPts[best].x - vx)) best = i; });
-    show(best);
-  });
-  el.addEventListener("mouseleave", () => { on = -1; tip.hidden = true; dots.forEach((d) => d.classList.remove("on")); });
-  // A dot opens its match (when it's in the library).
-  el.addEventListener("click", () => {
-    const p = eloPts[on];
-    if (p && state.byId?.has(faceitLibId(p.m))) location.hash = `#/match/${faceitLibId(p.m)}`;
+function wireRankCharts(root) {
+  root.querySelectorAll(".elo-chart[data-kind]").forEach((el) => {
+    const kind = el.dataset.kind, pts = rankCharts[kind];
+    if (!pts?.length) return;
+    const tip = el.querySelector(".elo-tip"), dots = [...el.querySelectorAll(".elo-dot")];
+    let on = -1;
+    const show = (i) => {
+      if (i === on) return;
+      on = i;
+      dots.forEach((d, k) => d.classList.toggle("on", k === i));
+      const p = pts[i];
+      tip.innerHTML = rankTipHtml(kind, p);
+      tip.hidden = false;
+      // Beside the dot, on whichever side has room; never off the chart.
+      const w = el.clientWidth, dx = (p.x / 100) * w, tw = tip.offsetWidth;
+      tip.style.left = `${dx + 14 + tw <= w ? dx + 14 : Math.max(0, dx - 14 - tw)}px`;
+      tip.style.top = `${Math.max(-8, Math.min((p.y / 100) * el.clientHeight - 40, el.clientHeight - tip.offsetHeight))}px`;
+    };
+    // The nearest match to the pointer, so the dots don't have to be hit exactly.
+    el.addEventListener("mousemove", (e) => {
+      const r = el.getBoundingClientRect(), vx = ((e.clientX - r.left) / r.width) * 100;
+      let best = 0;
+      pts.forEach((p, i) => { if (Math.abs(p.x - vx) < Math.abs(pts[best].x - vx)) best = i; });
+      show(best);
+    });
+    el.addEventListener("mouseleave", () => { on = -1; tip.hidden = true; dots.forEach((d) => d.classList.remove("on")); });
+    // A dot opens its match (when it's in the library).
+    el.addEventListener("click", () => {
+      const p = pts[on];
+      if (p && state.byId?.has(p.m.libId)) location.hash = `#/match/${p.m.libId}`;
+    });
   });
 }
 
-// FACEIT's recent performance, like FACEIT shows it: the last 30 matches with an ELO (league matches
-// have none and aren't counted), the ELO change across them, wins and losses.
-function faceitPanel() {
-  const f = state.faceit;
-  const head = (extra = "") => `<div class="panel-head"><div class="h3">FACEIT</div><span class="grow"></span>${extra}</div>`;
-  if (!f) return `${head()}<div class="fc-msg">Looking up your FACEIT account. Veloxify finds it from your Steam account; there's nothing to connect.</div>`;
-  if (!f.player_id) {
-    return `${head()}<div class="fc-msg">No FACEIT account is linked to this Steam account. If you play FACEIT on a different account, add its nickname in <a class="link" href="#/settings">Settings</a>.</div>`;
-  }
-  const recent = f.matches.filter((m) => m.elo).slice(0, 30);
-  const change = recent.length > 1 ? recent[0].elo - recent[recent.length - 1].elo : 0;
-  const wins = recent.filter((m) => m.result === "win").length;
-  const k = sum(recent.map((m) => m.kills)), dth = sum(recent.map((m) => m.deaths)), a = sum(recent.map((m) => m.assists)), hs = sum(recent.map((m) => m.headshots));
-  const adr = recent.length ? sum(recent.map((m) => m.adr)) / recent.length : 0;
-  const lobby = recent.filter((m) => m.team_elo && m.enemy_elo).map((m) => (m.team_elo + m.enemy_elo) / 2);
-  const avgElo = lobby.length ? Math.round(sum(lobby) / lobby.length) : 0;
-  // Rating 3.0 and swing from the matches whose demo is analyzed.
-  const lines = recent.map((m) => state.byId?.get(faceitLibId(m))).filter((m) => m && !m.stats_only).map((m) => m.line);
+// The stats under a rating graph, over the same matches: rating 3.0 and swing (from demos), average
+// K/D/A, K/D, ADR, HS% and win rate, then `extra` tiles.
+function rankStats(list, extra = []) {
+  const n = list.length || 1;
+  const k = sum(list.map((m) => m.kills)), dth = sum(list.map((m) => m.deaths)), a = sum(list.map((m) => m.assists)), hs = sum(list.map((m) => m.hs || 0));
+  const adr = sum(list.map((m) => m.adr || 0)) / n;
+  const wins = list.filter((m) => m.result === "win").length;
+  const lines = list.map((m) => state.byId?.get(m.libId)).filter((m) => m && !m.stats_only).map((m) => m.line);
   const rating = lines.length ? sum(lines.map((l) => r3(l))) / lines.length : null;
   const swing = lines.length ? sum(lines.map((l) => l.swing || 0)) / lines.length : null;
-  const n = recent.length || 1;
-  const L = f.lifetime || {};
-  return `
-    ${head(`<span class="sub">Last <b class="fc-n">${recent.length}</b> matches${avgElo ? ` · <span class="fc-avg" title="Average ELO of everyone in these matches">${levelBadge(levelFor(avgElo), 18)}<b>${avgElo.toLocaleString("en-US")}</b> avg match ELO</span>` : ""}</span>`)}
-    <div class="fc-summary">
-      ${f.avatar ? `<img class="fc-avatar" src="${esc(f.avatar)}" alt="">` : ""}
-      ${levelBadge(f.level, 46)}
-      <div class="who"><span class="elo">${f.elo.toLocaleString("en-US")}</span><span class="sub">${esc(f.nickname)}${f.region ? ` · ${esc(f.region)}` : ""}</span></div>
-    </div>
-    <div class="fc-chart-head">
-      <span class="sub">Elo change <b class="${change >= 0 ? "up" : "down"}">${change >= 0 ? "+" : ""}${change}</b></span>
-      <span class="fc-wl"><span class="wl win">W</span><b class="up">${wins}</b><span class="sub">/</span><span class="wl loss">L</span><b class="down">${recent.length - wins}</b></span>
-    </div>
-    ${eloChart(recent)}
-    <div class="fc-stats">
+  return `<div class="fc-stats">
       ${rating != null ? `<div class="kpi" title="Average of the ${lines.length} of these matches whose demo is analyzed"><div class="v"><span class="rchip ${ratingClass(rating)}">${f2(rating)}<i style="width:${Math.min(100, (rating / 2) * 100)}%"></i></span></div><div class="l">Rating 3.0 · swing <span class="${swing > 0 ? "up" : swing < 0 ? "down" : ""}">${fmtSwing(swing)}</span></div></div>` : ""}
       <div class="kpi"><div class="v">${Math.round(k / n)} / ${Math.round(dth / n)} / ${Math.round(a / n)}</div><div class="l">K/D/A</div></div>
       <div class="kpi"><div class="v">${dth ? f2(k / dth) : "–"}</div><div class="l">K/D</div></div>
       <div class="kpi"><div class="v">${f1(adr)}</div><div class="l">ADR</div></div>
       <div class="kpi"><div class="v">${k ? Math.round((hs / k) * 100) : 0}%</div><div class="l">HS%</div></div>
       <div class="kpi"><div class="v">${Math.round((wins / n) * 100)}%</div><div class="l">Win rate</div></div>
-      <div class="kpi"><div class="v">${(L.matches || 0).toLocaleString("en-US")}</div><div class="l">Lifetime matches</div></div>
-      ${rating == null ? `<div class="kpi"><div class="v">${Math.round(L.win_rate || 0)}%</div><div class="l">Lifetime win rate</div></div>` : ""}
+      ${extra.map(([v, l]) => `<div class="kpi"><div class="v">${v}</div><div class="l">${l}</div></div>`).join("")}
     </div>`;
+}
+
+// Elo change on the left, wins and losses on the right, over the chart (as on FACEIT).
+const rankHead = (label, change, wins, losses) => `
+    <div class="fc-chart-head">
+      <span class="sub">${label} <b class="${change >= 0 ? "up" : "down"}">${change >= 0 ? "+" : ""}${change.toLocaleString("en-US")}</b></span>
+      <span class="fc-wl"><span class="wl win">W</span><b class="up">${wins}</b><span class="sub">/</span><span class="wl loss">L</span><b class="down">${losses}</b></span>
+    </div>`;
+const periodLabel = (n, shown) => (n ? `Last <b class="fc-n">${shown}</b> matches` : `All <b class="fc-n">${shown}</b> matches`);
+
+// FACEIT, like FACEIT shows it: the matches with an ELO in the chosen period (league matches have
+// none and aren't counted), the ELO change across them, wins and losses.
+function faceitPanel(last) {
+  const f = state.faceit;
+  const head = (extra = "") => `<div class="panel-head"><div class="h3">FACEIT</div><span class="grow"></span>${extra}</div>`;
+  if (!f) return `${head()}<div class="fc-msg">Looking up your FACEIT account. Veloxify finds it from your Steam account; there's nothing to connect.</div>`;
+  if (!f.player_id) {
+    return `${head()}<div class="fc-msg">No FACEIT account is linked to this Steam account. If you play FACEIT on a different account, add its nickname in <a class="link" href="#/settings">Settings</a>.</div>`;
+  }
+  const recent = f.matches.filter((m) => m.elo).slice(0, last || Infinity).map((m) => ({
+    value: m.elo, delta: m.elo_delta, result: m.result, mine: m.score_mine, theirs: m.score_theirs, map: m.map, ts: m.started_ts || m.finished_ts,
+    libId: faceitLibId(m), kills: m.kills, deaths: m.deaths, assists: m.assists, adr: m.adr, hs: m.headshots,
+  }));
+  const change = recent.length > 1 ? recent[0].value - recent[recent.length - 1].value : 0;
+  const wins = recent.filter((m) => m.result === "win").length;
+  const lobby = f.matches.filter((m) => m.elo && m.team_elo && m.enemy_elo).slice(0, last || Infinity).map((m) => (m.team_elo + m.enemy_elo) / 2);
+  const avgElo = lobby.length ? Math.round(sum(lobby) / lobby.length) : 0;
+  const L = f.lifetime || {};
+  return `
+    ${head(`<span class="sub">${periodLabel(last, recent.length)}${avgElo ? ` · <span class="fc-avg" title="Average ELO of everyone in these matches">${levelBadge(levelFor(avgElo), 18)}<b>${avgElo.toLocaleString("en-US")}</b> avg match ELO</span>` : ""}</span>`)}
+    <div class="fc-summary">
+      ${f.avatar ? `<img class="fc-avatar" src="${esc(f.avatar)}" alt="">` : ""}
+      ${levelBadge(f.level, 46)}
+      <div class="who"><span class="elo">${f.elo.toLocaleString("en-US")}</span><span class="sub">${esc(f.nickname)}${f.region ? ` · ${esc(f.region)}` : ""}</span></div>
+    </div>
+    ${rankHead("Elo change", change, wins, recent.length - wins)}
+    ${rankChart("faceit", recent)}
+    ${rankStats(recent, [[(L.matches || 0).toLocaleString("en-US"), "Lifetime matches"]])}`;
+}
+
+// Premier, the same way: your Premier matches (with a rating) in the chosen period.
+function premierPanel(last) {
+  const head = (extra = "") => `<div class="panel-head"><div class="h3">Premier</div><span class="grow"></span>${extra}</div>`;
+  const all = (state.all || []).filter((m) => m.source === "valve" && m.premier).sort((a, b) => b.played_ts - a.played_ts);
+  if (!all.length) {
+    return `${head()}<div class="fc-msg">No Premier matches yet. After you play one, Veloxify downloads it from Valve once you close CS2.</div>`;
+  }
+  const recent = all.slice(0, last || Infinity).map((m) => {
+    const l = m.line || {};
+    return {
+      value: m.premier, delta: m.premier_delta, result: m.result, mine: m.score_mine, theirs: m.score_theirs, map: m.map, ts: m.played_ts,
+      libId: m.id, kills: l.kills || 0, deaths: l.deaths || 0, assists: l.assists || 0, adr: l.adr || 0, hs: ((l.hs_pct || 0) * (l.kills || 0)) / 100,
+    };
+  });
+  const change = recent.length > 1 ? recent[0].value - recent[recent.length - 1].value : 0;
+  const wins = recent.filter((m) => m.result === "win").length;
+  const peak = Math.max(...all.map((m) => m.premier));
+  return `
+    ${head(`<span class="sub">${periodLabel(last, recent.length)}</span>`)}
+    <div class="fc-summary big-chip">${premierChip(all[0].premier)}<div class="who"><span class="sub">as of ${esc(fmtDate(all[0].played_at.slice(0, 10)))}</span></div></div>
+    ${rankHead("Rating change", change, wins, recent.length - wins)}
+    ${recent.length > 1 ? rankChart("premier", recent) : `<div class="fc-msg">The graph starts after your second Premier match.</div>`}
+    ${rankStats(recent, [[premierChip(peak), "Peak rating"]])}`;
 }
 
 function renderProfile(view) {
   const ps = state.index.profiles || [];
-  const p = ps.find((x) => x.last === prof.last && x.source === prof.source) || ps.find((x) => x.source === prof.source) || ps[0];
+  const p = ps.find((x) => x.last === prof.last && x.source === "all") || ps.find((x) => x.source === "all") || ps[0];
   const seg = (key, opts) => `<div class="seg" data-pkey="${key}">${opts.map(([v, label]) =>
     `<button data-v="${v}" class="${String(prof[key]) === String(v) ? "on" : ""}">${label}</button>`).join("")}</div>`;
   if (!p) { view.innerHTML = `<div class="empty">No FACEIT or Premier matches yet.</div>`; return; }
@@ -3261,7 +3304,6 @@ function renderProfile(view) {
     <div class="profile-head">
       <div class="profile-id">${avatarHtml(state.index.me, 64)}<div><div class="h2">Profile</div><div class="h1" style="display:flex;align-items:center;gap:10px">${esc(state.faceit?.nickname || state.index.me_name || "You")}${state.faceit?.level ? `<span class="rank-chip faceit" title="FACEIT level ${state.faceit.level} · ${(state.faceit.elo || 0).toLocaleString("en-US")} ELO">${levelBadge(state.faceit.level, 24)}<b>${(state.faceit.elo || 0).toLocaleString("en-US")}</b></span>` : ""}${premier ? premierChip(premier[0]) : ""}</div></div></div>
       <div class="profile-controls">${seg("last", [[10, "Last 10"], [30, "Last 30"], [50, "Last 50"], [0, "All time"]])}
-        ${seg("source", [["all", "All"], ["faceit", "FACEIT"], ["valve", "Premier"]])}
         <a class="btn ghost" href="#/crosshairs" title="Every crosshair you've played with, and your favorites">${XH_ICON} Crosshairs</a></div>
     </div>
     <div class="profile-grid">
@@ -3288,21 +3330,18 @@ function renderProfile(view) {
       </section>
     </div>
     <div class="profile-grid lower">
-      <section class="panel faceit">${faceitPanel()}</section>
-      <div style="display:grid;gap:20px;align-content:start">
-      <section class="panel premier-panel">
-        <div class="panel-head"><div class="h3">Premier</div><span class="grow"></span>
-          ${premier ? `<span class="sub">as of ${parseLocal(premier[1]).toLocaleDateString("en-GB", { month: "short", year: "numeric" })}</span>` : ""}</div>
-        <div class="fc-summary big-chip">${premier ? premierChip(premier[0]) : `<span class="sub">No Premier demo yet. Your rating shows here after your next Premier match.</span>`}</div>
-      </section>
-      <section class="panel tiles">
+      <section class="panel faceit">${faceitPanel(prof.last)}</section>
+      <section class="panel faceit premier">${premierPanel(prof.last)}</section>
+    </div>
+    <section class="panel tiles-wide">
+      <div class="panel-head"><div class="h3">All your matches</div><span class="grow"></span><span class="sub">${p.last ? `last ${p.matches}` : `all ${p.matches}`}, FACEIT and Premier</span></div>
+      <div class="tiles">
         ${[["K/D", f2(d.kd)], ["ADR", f1(d.adr)], ["KAST", `${f1(d.kast)}%`], ["HS%", `${Math.round(d.hs_pct)}%`],
           ["Swing / round", fmtSwing(d.swing || 0)], ["Accuracy", `${f1(d.accuracy)}%`], ["Entries", `${c.opening_kills}-${c.opening_deaths}`],
           ["Multi-kills", `${c.multikill_rounds.slice(2).reduce((a, b) => a + b, 0)}`]].map(([l, v]) =>
           `<div class="kpi"><div class="v">${v}</div><div class="l">${l}</div></div>`).join("")}
-      </section>
       </div>
-    </div>
+    </section>
     <div id="my-ratings"></div>
     <div id="trends"></div>
     <section class="panel form">
@@ -3321,7 +3360,7 @@ function renderProfile(view) {
     try { localStorage.setItem("veloxify.profile", JSON.stringify(prof)); } catch (e) { /* not persisted */ }
     renderProfile(view);
   })));
-  wireEloChart(view);
+  wireRankCharts(view);
   view.querySelectorAll(".skill").forEach((el) => (el.onclick = () => { const det = el.querySelector(".skill-detail"); det.hidden = !det.hidden; }));
   const chart = view.querySelector(".form-chart");
   if (chart) {
