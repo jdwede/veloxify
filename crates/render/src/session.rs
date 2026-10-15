@@ -483,6 +483,11 @@ impl Renderer {
         }
     }
 
+    /// Films from another player's view (by their name in the loaded demo) from the next clip on.
+    pub fn set_pov(&self, player: &str) {
+        *self.pov_name.lock().unwrap() = player.to_string();
+    }
+
     /// Loads a demo; `player` is the recorded player's name in it.
     pub fn load_demo(&self, path: &Path, player: &str) -> Result<()> {
         *self.pov_name.lock().unwrap() = player.to_string();

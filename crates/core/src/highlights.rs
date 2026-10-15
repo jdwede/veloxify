@@ -458,6 +458,87 @@ pub fn detect(m: &Match, a: &Analysis, player: u64, flicks: &HashMap<usize, f64>
     out
 }
 
+/// The least montage score ([`montage_score`]) a play of the match needs: a clean 3K on a gun round,
+/// a 1v2 clutch with both kills, or a rare kill in a multi-kill. Below it the match has none.
+pub const POTM_MIN: f64 = 30.0;
+
+/// The play of the match, by anyone in it: the flashiest moment, the one for a montage. Every
+/// player's moments are found (without the reaction-flick parse, so it's the same for all) and
+/// ranked by [`montage_score`].
+pub fn play_of_the_match(m: &Match, a: &Analysis) -> Option<Highlight> {
+    let no_flicks = HashMap::new();
+    m.players
+        .iter()
+        .flat_map(|p| detect(m, a, p.steamid, &no_flicks))
+        .map(|h| (montage_score(m, a, &h), h))
+        .filter(|(s, _)| *s >= POTM_MIN)
+        .max_by(|x, y| x.0.partial_cmp(&y.0).unwrap())
+        .map(|(_, h)| h)
+}
+
+/// How much a moment belongs in a montage: big multi-kills and big clutches first; kills on
+/// players who'd saved count for little unless they were blindingly fast; a pistol-round
+/// multi-kill, a fast spree, noscopes, collaterals, jumping and knife kills, wallbangs and ninja
+/// defuses add to it.
+pub fn montage_score(m: &Match, a: &Analysis, h: &Highlight) -> f64 {
+    let ks: Vec<&Kill> = h.kills.iter().map(|&i| &m.kills[i]).collect();
+    let n = ks.len();
+    let pistol = crate::analysis::pistol_rounds(m).contains(&h.round);
+    let ecos = ks.iter().filter(|k| eco_kill(k, pistol)).count();
+    let mut s = match n {
+        0 => 0.0,
+        1 => 4.0,
+        2 => 12.0,
+        3 => 35.0,
+        4 => 60.0,
+        _ => 100.0,
+    };
+    // Seconds between kills, on average: an ACE in 5 seconds is a different thing from one over
+    // the whole round.
+    let gap = if n >= 2 {
+        let (first, last) = (ks.iter().map(|k| k.tick).min().unwrap(), ks.iter().map(|k| k.tick).max().unwrap());
+        (last - first) as f64 / TICKRATE / (n - 1) as f64
+    } else {
+        f64::MAX
+    };
+    let blitz = n >= 3 && gap <= 0.8;
+    if n >= 3 {
+        s *= if gap <= 0.8 { 1.45 } else if gap <= 2.0 { 1.25 } else if gap <= 4.0 { 1.1 } else { 1.0 };
+    }
+    // Kills on saved players: a quarter of the value (half for a blitz).
+    if n > 0 && ecos > 0 {
+        let share = ecos as f64 / n as f64;
+        s *= 1.0 - share * if blitz { 0.5 } else { 0.75 };
+    }
+    if let Some(c) = a.rounds[h.round].clutches.iter().find(|c| c.player == h.player && c.won) {
+        s += [0.0, 6.0, 18.0, 38.0, 65.0, 95.0][(c.vs as usize).min(5)];
+    }
+    if pistol && n - ecos >= 2 {
+        s *= 1.25;
+    }
+    for (j, k) in ks.iter().enumerate() {
+        if (k.noscope && SNIPERS.contains(&k.weapon.as_str())) || k.weapon.starts_with("knife") || k.weapon == "bayonet" || k.attacker_in_air || IMPACT_NADES.contains(&k.weapon.as_str()) {
+            s += 10.0;
+        }
+        if j > 0 && ks[j - 1].tick == k.tick {
+            s += 8.0;
+        }
+        s += 3.0 * ((k.penetrated > 0) as u8 + k.through_smoke as u8 + k.attacker_blind as u8) as f64;
+        s += if k.headshot { 0.5 } else { 0.0 };
+    }
+    if h.tags.iter().any(|t| t == "ninja defuse") {
+        s += 15.0;
+    }
+    if h.tags.iter().any(|t| t.starts_with("critical round")) {
+        s *= 1.1;
+    }
+    // A multi-kill in a round the team still lost is less of a moment.
+    if m.team_of(h.player).is_some_and(|t| m.rounds[h.round].winner_team() != t) {
+        s *= 0.85;
+    }
+    s
+}
+
 /// Kill count x100 plus a flashiness kicker (capped at 99).
 fn hand(n: usize, ks: &[&Kill], tags: &[String], clutch: Option<&Clutch>) -> u32 {
     let has = |t: &str| tags.iter().any(|x| x.contains(t));

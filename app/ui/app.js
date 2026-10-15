@@ -712,7 +712,14 @@ const MATCH_SORTS = {
   trades: (p) => p.counts.trade_kills, clutch: (p) => sum(p.counts.clutches_won.slice(1)), ud: (p) => p.counts.utility_damage,
   ef: (p) => p.counts.enemies_flashed, fa: (p) => p.counts.flash_assists, acc: (p) => p.derived.accuracy, hacc: (p) => p.derived.head_accuracy,
   plants: (p) => p.counts.bomb_plants, defuses: (p) => p.counts.bomb_defuses,
+  // From the match details, once loaded (see renderMatchScoreboard); -1 sorts them last.
+  aim: (p) => p._aim ?? -1, util: (p) => p._util ?? -1,
 };
+// The Aim and Utility ratings (Profile > Your ratings: 0-100, 50 = the average player in your
+// library) for one set of stats.
+const ratingDef = (id) => customRatings.find((r) => r.id === id) || DEFAULT_RATINGS.find((r) => r.id === id);
+const rateCell = (v, tag = "td") => (v == null || v < 0 ? `<${tag} class="na">–</${tag}>`
+  : `<${tag}><span class="rate-bar ${v >= 60 ? "good" : v <= 40 ? "poor" : ""}"><i style="width:${v}%"></i><b>${v}</b></span></${tag}>`);
 const matchSort = { key: "rating", desc: true };
 
 async function renderMatchPage(view, id, tab) {
@@ -775,9 +782,9 @@ const BOARD_COLS = [["rank", "Rank"], ["rating", "HLTV 3.0"], ["rws", "RWS"], ["
   ["adr", "ADR"], ["kr", "K/R"], ["kast", "KAST"], ["k2", "2K"], ["k3", "3K"], ["k4", "4K"], ["k5", "5K"], ["xhair", "Crosshair"],
   ["rating2", "Rating 2.0"], ["rating1", "Rating 1.0"], ["hs", "HS%"], ["dpr", "D/R"], ["mvps", "MVPs"], ["dmg", "Damage"], ["fk", "First kills"], ["fd", "First deaths"],
   ["trades", "Trade kills"], ["clutch", "Clutches"], ["ud", "Utility dmg"], ["ef", "Flashed"], ["fa", "Flash assists"], ["acc", "Accuracy"], ["hacc", "Head accuracy"],
-  ["plants", "Plants"], ["defuses", "Defuses"]];
-const BOARD_DEFAULT = ["rank", "rating", "rws", "swing", "kills", "assists", "deaths", "kd", "adr", "kr", "kast", "k2", "k3", "k4", "k5", "xhair"];
-const BOARD_GROUPS = [["Ratings", ["rating", "rating2", "rating1", "rws", "swing", "rank"]], ["Kills and damage", ["kills", "assists", "deaths", "kd", "kr", "dpr", "hs", "adr", "dmg", "kast", "mvps"]],
+  ["plants", "Plants"], ["defuses", "Defuses"], ["aim", "Aim"], ["util", "Utility"]];
+const BOARD_DEFAULT = ["rank", "rating", "rws", "swing", "kills", "assists", "deaths", "kd", "adr", "kr", "kast", "aim", "util", "k2", "k3", "k4", "k5", "xhair"];
+const BOARD_GROUPS = [["Ratings", ["rating", "rating2", "rating1", "rws", "swing", "aim", "util", "rank"]], ["Kills and damage", ["kills", "assists", "deaths", "kd", "kr", "dpr", "hs", "adr", "dmg", "kast", "mvps"]],
   ["Multi-kills", ["k2", "k3", "k4", "k5"]], ["Openings, trades, clutches", ["fk", "fd", "trades", "clutch"]], ["Utility", ["ud", "ef", "fa"]], ["Aim", ["acc", "hacc"]],
   ["Bomb", ["plants", "defuses"]], ["Other", ["xhair"]]];
 function boardCols() {
@@ -788,6 +795,20 @@ function boardCols() {
 // Both teams, Leetify's match-details columns (no Leetify rating), sortable by any column.
 function renderMatchScoreboard(body, m) {
   const me = state.index.me;
+  // Each player's Aim and Utility ratings, from the match details (every player's aim and utility stats).
+  if (m._rated === undefined) {
+    m._rated = false;
+    Promise.all([loadDetails(m.id), loadBenchmarks()]).then(([d]) => {
+      const stats = new Map((d?.players || []).map((p) => [String(p.steamid), p.stats || {}]));
+      for (const p of m.players) {
+        const st = stats.get(String(p.steamid));
+        p._aim = st ? customRating(ratingDef("aim"), st) : null;
+        p._util = st ? customRating(ratingDef("utility"), st) : null;
+      }
+      m._rated = true;
+      if (document.body.contains(body)) renderMatchScoreboard(body, m);
+    });
+  }
   // Crosshairs come from crosshairs.json: draw again once it's loaded.
   if (!state.xh) loadCrosshairs().then(() => { if (document.body.contains(body)) renderMatchScoreboard(body, m); });
   const codes = state.xh?.matches?.[m.id] || {};
@@ -829,6 +850,8 @@ function renderMatchScoreboard(body, m) {
       case "hacc": return `<td>${Math.round(d.head_accuracy)}%</td>`;
       case "plants": return `<td class="${c.bomb_plants ? "" : "zero"}">${c.bomb_plants}</td>`;
       case "defuses": return `<td class="${c.bomb_defuses ? "" : "zero"}">${c.bomb_defuses}</td>`;
+      case "aim": return rateCell(p._aim);
+      case "util": return rateCell(p._util);
       default: return `<td class="${c.multikill_rounds[Number(k[1])] ? "" : "zero"}">${c.multikill_rounds[Number(k[1])]}</td>`;
     }
   };
@@ -1700,19 +1723,24 @@ async function renderMatchSummary(el, m, id) {
   const top = Math.max(1.5, ...players.map((p) => r3(p.derived) + 0.1));
   // The match's best highlight (rendered ones first) next to the rating chart, the rest below it.
   const names = new Map(m.players.map((p) => [p.steamid, p.name]));
-  const hls = [...(m.highlights || [])].sort((a, b) => !!b.clip - !!a.clip || (b.tier || 0) - (a.tier || 0) || (b.hand || 0) - (a.hand || 0));
+  // The play of the match (anyone's) leads; when it's one of yours, it's that highlight.
+  const potmSrc = m.potm ? (m.highlights || []).find((h) => h.id === m.potm.id) || m.potm : null;
+  const potm = potmSrc ? { ...potmSrc, potm: true } : null;
+  const hls = [...(m.highlights || [])].filter((h) => h.id !== potm?.id).sort((a, b) => !!b.clip - !!a.clip || (b.tier || 0) - (a.tier || 0) || (b.hand || 0) - (a.hand || 0));
+  if (potm) hls.unshift(potm);
   const best = hls[0];
   const thumb = (h) => (h.thumb ? `background-image:url('${assetUrl(h.thumb)}')` : "");
   const hlPanel = best ? `
       <section class="hs-hl">
-        <div class="hs-perf-head"><div class="h3">Highlights</div>${hls.length > 1 ? `<a class="link" href="${matchHref(id, "highlights")}">All ${hls.length}</a>` : ""}</div>
+        <div class="hs-perf-head"><div class="h3">${potm ? "Play of the match" : "Highlights"}</div>${(m.highlights || []).length ? `<a class="link" href="${matchHref(id, "highlights")}">Your highlights (${m.highlights.length})</a>` : ""}</div>
         <div class="hs-hl-body ${hls.length > 1 ? "" : "solo"}">
           <div class="hl-card hs-hl-main ${best.clip ? "" : "pending"}" data-hl="${esc(best.id)}" ${clipAttr(best)}>
             <div class="hl-thumb" style="--map-bg:${mapColor(m.map)};${thumb(best)}">
-              ${best.clip ? `<span class="play">▶</span>` : `<span class="state">${best.render_error ? esc(best.render_error) : "Rendering…"}</span>`}
+              ${best.clip ? `<span class="play">▶</span>` : `<span class="state">${best.render_error ? esc(best.render_error) : best.potm && tauri ? `<button class="btn small" data-film-potm>Film it</button>` : "Rendering…"}</span>`}
+              ${best.potm ? `<span class="potm-badge"><span class="star">★</span> Play of the match</span>` : ""}
               <span class="dur">${fmtClip(best.duration_s)}</span></div>
             <div class="hl-info"><div class="hl-title">${esc(best.title)}</div>
-              <div class="hl-meta"><span>${esc(names.get(best.player) || "")}</span><span>round ${best.round}</span></div>
+              <div class="hl-meta"><span class="potm-who">${best.potm ? avatarHtml(best.player, 20) : ""}${esc(names.get(best.player) || "")}${best.player === state.index.me ? " (you)" : ""}</span><span>round ${best.round}</span></div>
               <div class="tags">${best.tags.map((t) => tagHtml(t)).join("")}</div></div>
           </div>
           ${hls.length > 1 ? `<div class="hs-hl-side">${hls.slice(1, 4).map((h) => `
@@ -1726,6 +1754,15 @@ async function renderMatchSummary(el, m, id) {
   const x = (v) => `${(v / top) * 100}%`;
   el.innerHTML = `
     <div class="hs-wrap">
+      <section class="hs-leaders">
+        ${mvp ? mvpHtml(mvp) : ""}
+        <div class="hs-leader-list">
+          ${leader("Most kills", (p) => p.counts.kills)}
+          ${leader("Most ADR", (p) => p.derived.adr, f1)}
+          ${leader("Most opening kills", (p) => p.counts.opening_kills, (x) => x, openings)}
+          ${leader("Best KAST", (p) => p.derived.kast, (v) => `${Math.round(v)}%`)}
+        </div>
+      </section>
       <section class="hs-card">
         <div class="hs-teams"><b class="mine">My Team</b><span class="sub">Team stats</span><b class="enemy">Enemy Team</b></div>
         ${cmp("Rating 3.0", avg(teams.mine, (p) => r3(p.derived)), avg(teams.enemy, (p) => r3(p.derived)), f2)}
@@ -1736,15 +1773,6 @@ async function renderMatchSummary(el, m, id) {
         ${cmp("Clutches won", total(teams.mine, (p) => sum(p.counts.clutches_won)), total(teams.enemy, (p) => sum(p.counts.clutches_won)))}
         ${cmp("Utility damage", total(teams.mine, (p) => p.counts.utility_damage), total(teams.enemy, (p) => p.counts.utility_damage))}
         ${cmp("Headshot kills", hsPct(teams.mine), hsPct(teams.enemy), pct0)}
-      </section>
-      <section class="hs-leaders">
-        ${mvp ? mvpHtml(mvp) : ""}
-        <div class="hs-leader-list">
-          ${leader("Most kills", (p) => p.counts.kills)}
-          ${leader("Most ADR", (p) => p.derived.adr, f1)}
-          ${leader("Most opening kills", (p) => p.counts.opening_kills, (x) => x, openings)}
-          ${leader("Best KAST", (p) => p.derived.kast, (v) => `${Math.round(v)}%`)}
-        </div>
       </section>
     </div>
     <div class="hs-split">
@@ -1763,6 +1791,12 @@ async function renderMatchSummary(el, m, id) {
     </div>`;
   // Play from the match's rendered clips.
   state.playlist = hls.filter((h) => h.clip).map((h) => ({ ...h, name: names.get(h.player), match: m }));
+  el.querySelector("[data-film-potm]")?.addEventListener("click", async (e) => {
+    e.stopPropagation();
+    e.target.disabled = true;
+    e.target.textContent = "Queued: it films when CS2 is closed";
+    await tauri.core.invoke("render_clips", { items: [[m.id, potm.id]] });
+  });
   el.querySelectorAll("[data-hl]").forEach((c) => (c.onclick = () => {
     const i = state.playlist.findIndex((h) => h.id === c.dataset.hl);
     if (i >= 0) play(i);
@@ -1834,6 +1868,7 @@ async function loadMyStats() {
       const r = await fetch(assetUrl("my_stats.json"), { cache: "no-store" });
       state.myStats = r.ok ? await r.json() : [];
     } catch (e) { state.myStats = []; }
+    state.myStatsById = new Map(state.myStats.map((x) => [x.id, x.stats || {}]));
   }
   return state.myStats;
 }
@@ -6271,9 +6306,9 @@ const HIST_COLS = [["date", "Date", "112px"], ["score", "Score", "112px"], ["elo
   ["kast", "KAST", "60px"], ["swing", "Swing", "70px"], ["rating2", "Rating 2.0", "84px"], ["rating1", "Rating 1.0", "84px"], ["multi", "2K / 3K / 4K / 5K", "120px"],
   ["fk", "First kills", "72px"], ["fd", "First deaths", "80px"], ["trades", "Trade kills", "76px"], ["clutch", "Clutches", "70px"], ["ud", "Utility dmg", "80px"],
   ["ef", "Flashed", "62px"], ["fa", "Flash assists", "86px"], ["mvps", "MVPs", "52px"], ["acc", "Accuracy", "70px"], ["dmg", "Damage", "68px"], ["rounds", "Rounds", "60px"],
-  ["length", "Length", "64px"], ["source", "Source", "82px"]];
+  ["length", "Length", "64px"], ["source", "Source", "82px"], ["aim", "Aim", "72px"], ["util", "Utility", "72px"]];
 const HIST_DEFAULT = ["date", "score", "elo", "rating", "swing", "rws", "kda", "adr", "map"];
-const HIST_GROUPS = [["Match", ["date", "score", "elo", "map", "source", "rounds", "length"]], ["Ratings", ["rating", "rating2", "rating1", "rws", "swing"]],
+const HIST_GROUPS = [["Match", ["date", "score", "elo", "map", "source", "rounds", "length"]], ["Ratings", ["rating", "rating2", "rating1", "rws", "swing", "aim", "util"]],
   ["Kills and damage", ["kda", "kills", "deaths", "assists", "kd", "kr", "hs", "adr", "dmg", "kast", "mvps"]], ["Multi-kills, openings, clutches", ["multi", "fk", "fd", "trades", "clutch"]],
   ["Utility and aim", ["ud", "ef", "fa", "acc"]]];
 const histCols = () => {
@@ -6339,6 +6374,10 @@ function historyRow(r, cols) {
       case "swing": return `<div>${demo ? num(l.swing || 0, fmtSwing(l.swing || 0), "swing") : na}</div>`;
       case "rating2": return `<div>${demo && l.rating2 ? num(l.rating2, f2(l.rating2), "rating") : na}</div>`;
       case "rating1": return `<div>${demo && l.rating1 ? num(l.rating1, f2(l.rating1), "rating") : na}</div>`;
+      case "aim": case "util": {
+        const st = state.myStatsById?.get(r.id);
+        return rateCell(st ? customRating(ratingDef(k === "aim" ? "aim" : "utility"), st) : null, "div");
+      }
       case "multi": return `<div class="ml-num">${demo && l.multi ? l.multi.slice(2).join(" / ") : "–"}</div>`;
       case "fk": return `<div>${demo && l.rounds ? num(l.opening_kills) : na}</div>`;
       case "fd": return `<div>${demo && l.rounds ? num(l.opening_deaths) : na}</div>`;
@@ -6369,6 +6408,13 @@ function historyRow(r, cols) {
 function renderMatchHistory(view) {
   const all = historyRows();
   const cols = histCols();
+  // Your Aim and Utility per match need your per-match stats and the library's averages.
+  if ((cols.includes("aim") || cols.includes("util")) && !state.myStatsById) {
+    Promise.all([loadMyStats(), loadBenchmarks()]).then(([ms]) => {
+      state.myStatsById = new Map((ms || []).map((x) => [x.id, x.stats || {}]));
+      if (document.body.contains(view)) renderMatchHistory(view);
+    });
+  }
   const rows = all.filter((r) => (mh.source === "all" || r.source === mh.source) && (mh.result === "all" || r.result === mh.result) && (mh.map === "all" || r.map === mh.map));
   const maps = [...new Set(all.map((r) => r.map))].sort();
   const missing = all.filter((r) => !r.demo).length;
@@ -6564,6 +6610,8 @@ function sumPlayers(entries, me) {
 let sessionView = { sort: "rating3", desc: true };
 
 async function renderSession(view, date, idx) {
+  // The matches table can show your Aim and Utility per match.
+  await Promise.all([loadMyStats(), loadBenchmarks()]);
   const day = dayOf(date);
   const sess = day?.sessions[idx];
   if (!sess) { view.innerHTML = `<div class="empty">No session on ${esc(date)}</div>`; return; }
@@ -6711,14 +6759,14 @@ async function renderSession(view, date, idx) {
       <a class="btn ghost" href="#/sessions" title="Every session on a calendar, colored by how you played">${ICONS.calendar} Calendar</a>
       ${nextSess ? `<a class="btn ghost" href="${nextSess}">Next session ▶</a>` : ""}
     </div>
-    ${(() => {
-      // Your highlights across the top, then the two verdicts side by side.
-      return `${sessHls.length ? `<div class="sv-top">${sessHighlightsHtml(sessHls, date)}</div>` : ""}<div class="sv-verdicts">${objectiveHtml(meRow, sdata)}${verdictHtml(judged)}</div>`;
-    })()}
-    ${sobj ? setupHtml(sdata, sobj) : ""}
-    ${notice.length ? `<section class="panel sv-noticed"><div class="panel-head"><div class="h3">What we noticed</div><span class="grow"></span><span class="sub">From all your matches: things that were true of this session too</span></div>
-      <ul>${notice.map((n) => `<li>${noticedText(n)}</li>`).join("")}</ul></section>` : ""}
+    <div class="sv-verdicts">${objectiveHtml(meRow, sdata)}${verdictHtml(judged)}</div>
     ${cards.length ? `<div class="sc-row">${cards.map(card).join("")}</div>` : `<div class="empty">No demos for this session yet.</div>`}
+    ${(() => {
+      // Then your highlights on the left half, what we noticed (and setup changes) on the right.
+      const side = `${notice.length ? `<section class="panel sv-noticed"><div class="panel-head"><div class="h3">What we noticed</div><span class="grow"></span><span class="sub">Things true of you in all your matches that showed this session too</span></div>
+        <ul>${notice.map((n) => `<li>${noticedText(n)}</li>`).join("")}</ul></section>` : ""}${sobj ? setupHtml(sdata, sobj) : ""}`;
+      return sessHls.length || side ? `<div class="sv-mid">${sessHls.length ? `<div class="sv-top">${sessHighlightsHtml(sessHls, date)}</div>` : "<div></div>"}<div class="sv-mid-side">${side}</div></div>` : "";
+    })()}
     ${statsOnly ? `<div class="ml-note" style="margin:0 0 14px">${statsOnly} match${statsOnly === 1 ? "" : "es"} without a demo yet (FACEIT stats only) aren't in these totals. ${demoButton(missingDemos(summaries, 3650), "btn")}</div>` : ""}
     <section class="panel" style="margin-bottom:20px">
       <div class="panel-head"><div class="h3">Session scoreboard</div><span class="sub">you${rows.length > 1 ? " and your party" : ""}, all ${withDemo.length} match${withDemo.length === 1 ? "" : "es"} added up</span></div>
@@ -6729,12 +6777,12 @@ async function renderSession(view, date, idx) {
       <div class="note">Your party: who FACEIT says queued with you, or (Premier, which doesn't record parties) teammates in two or more of the session's matches. HLTV 3.0, RWS, ADR, KAST and Swing are per round, so session values weight each match by its rounds. Entries: opening duels (the round's first kill) won-lost. Pistol rounds: your kills and deaths in each half's first round. Eco kills: on players with under $2,000 of equipment (not pistol rounds).
         Colors: green is good, red is poor. K/D, K/R and ADR against the usual marks (ADR 82+ is good, 95+ excellent); clutches against what the average player in your matches wins from the same 1vXs (about ${Math.round(rates[1] * 100)}% of 1v1s, ${Math.round(rates[2] * 100)}% of 1v2s, ${Math.round(rates[3] * 100)}% of 1v3s), so a few clutches lean average until the difference is clear.</div>
     </section>
-    ${baselineHtml(judged, sdata)}
-    ${notesHtml(sdata, skey)}
     <section class="fc-card" style="margin-bottom:20px">
       <div class="fc-head"><div class="h3">Matches</div></div>
       ${historyTable(historyRows().filter((r) => sess.match_ids.includes(r.id)).sort((a, b) => a.when - b.when), histCols())}
-    </section>`;
+    </section>
+    ${baselineHtml(judged, sdata)}
+    ${notesHtml(sdata, skey)}`;
   view.querySelectorAll("th[data-sort]").forEach((th) => (th.onclick = () => {
     const k = th.dataset.sort;
     sessionView.desc = sessionView.sort === k ? !sessionView.desc : k !== "name";

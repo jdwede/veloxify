@@ -132,7 +132,7 @@ mod entry_file_tests {
 
 /// Bumped when what makes a highlight (or its clip) changes: 1 = one taps tagged, kills after the
 /// round ended inside the clip.
-pub const HIGHLIGHT_RULES: u32 = 1;
+pub const HIGHLIGHT_RULES: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MatchEntry {
@@ -154,6 +154,10 @@ pub struct MatchEntry {
     /// Misses you were punished for (see `lowlights`), worst first.
     #[serde(default)]
     pub lowlights: Vec<Lowlight>,
+    /// The play of the match, by anyone (see `highlights::play_of_the_match`): filmed from that
+    /// player's view. When it's one of yours it has the same id as that highlight (one clip).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub potm: Option<HighlightEntry>,
     /// The highlight rules ([`HIGHLIGHT_RULES`]) this match was analyzed with: older ones are
     /// analyzed again in the background after an update changes them.
     #[serde(default)]
@@ -481,6 +485,7 @@ pub fn match_entry(
         })
         .collect();
     hls.sort_by(|x, y| y.score.partial_cmp(&x.score).unwrap());
+    let potm = highlights::play_of_the_match(m, a).map(|h| highlight_entry(id, &h, m, a));
     let duration_ticks = m.rounds.last().map(|r| r.end_tick).unwrap_or(0) - m.rounds.first().map(|r| r.live_tick).unwrap_or(0);
     Some(MatchEntry {
         rules: HIGHLIGHT_RULES,
@@ -503,6 +508,7 @@ pub fn match_entry(
         players,
         highlights: hls,
         lowlights: lls,
+        potm,
         competition: None,
         faceit_party: None,
         elo: None,

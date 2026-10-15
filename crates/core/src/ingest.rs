@@ -66,6 +66,14 @@ pub fn add_demo(root: &Path, path: &Path, me: u64, policy: &ClipPolicy, refresh:
                 h.thumb = old.thumb.clone();
             }
         }
+        // The play of the match keeps its clip the same way.
+        if let (Some(p), Some(old)) = (entry.potm.as_mut(), prev.potm.as_ref()) {
+            if old.id == p.id && old.segments == p.segments {
+                p.clip = old.clip.clone();
+                p.render_error = old.render_error.clone();
+                p.thumb = old.thumb.clone();
+            }
+        }
         for l in entry.lowlights.iter_mut() {
             if let Some(old) = prev.lowlights.iter().find(|o| o.id == l.id) {
                 l.clip = old.clip.clone();

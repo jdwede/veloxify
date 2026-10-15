@@ -26,7 +26,7 @@ const TICKRATE: f64 = 64.0;
 /// someone else). Empty if the demo can't be read.
 fn sample_me(demo: &[u8], me: u64, m: &MatchEntry) -> HashMap<i32, (f64, f64, f64)> {
     let settle = (SETTLE_S * TICKRATE) as i32;
-    let segments = m.highlights.iter().flat_map(|h| h.segments.iter()).chain(m.lowlights.iter().flat_map(|l| l.segments.iter()));
+    let segments = m.highlights.iter().flat_map(|h| h.segments.iter()).chain(m.lowlights.iter().flat_map(|l| l.segments.iter())).chain(m.potm.iter().flat_map(|p| p.segments.iter()));
     let mut ticks: Vec<i32> = segments.flat_map(|&(s, e)| std::iter::once(s - settle).chain((s..=e).step_by(LIFE_STEP as usize))).collect();
     ticks.sort_unstable();
     ticks.dedup();
@@ -102,7 +102,8 @@ pub fn plan(lib: &Path, scope: &Scope) -> Result<Vec<(String, String)>> {
             // longer play).
             let retry = |e: &Option<String>| e.as_deref().is_none_or(|e| !e.contains("older CS2 version"));
             let pending = m.highlights.iter().any(|h| &h.id == id && h.clip.is_none() && retry(&h.render_error))
-                || m.lowlights.iter().any(|l| &l.id == id && l.clip.is_none() && retry(&l.render_error));
+                || m.lowlights.iter().any(|l| &l.id == id && l.clip.is_none() && retry(&l.render_error))
+                || m.potm.as_ref().is_some_and(|p| &p.id == id && p.clip.is_none() && retry(&p.render_error));
             if pending && !curation.deleted.contains(id) {
                 out.push((mid.clone(), id.clone()));
             }
@@ -117,8 +118,15 @@ pub fn plan(lib: &Path, scope: &Scope) -> Result<Vec<(String, String)>> {
         Scope::Items(_) => unreachable!(),
     };
     let mut pending: Vec<(String, HighlightEntry)> = vec![];
+    // Each match's play of the match (when it isn't one of yours), after all your highlights.
+    let mut potms: Vec<(String, String)> = vec![];
     for id in &ids {
         let m = load(&lib.join("matches").join(format!("{id}.json")))?;
+        if let Some(p) = &m.potm {
+            if p.clip.is_none() && p.render_error.is_none() && !m.highlights.iter().any(|h| h.id == p.id) {
+                potms.push((id.clone(), p.id.clone()));
+            }
+        }
         pending.extend(
             m.highlights.into_iter().filter(|h| h.clip.is_none() && h.render_error.is_none() && curation.auto_render(&h.id)).map(|h| (id.clone(), h)),
         );
@@ -136,6 +144,7 @@ pub fn plan(lib: &Path, scope: &Scope) -> Result<Vec<(String, String)>> {
             order.extend(hs.into_iter().map(|h| (mid.to_string(), h.id.clone())));
         }
     }
+    order.extend(potms);
     Ok(order)
 }
 
@@ -185,6 +194,8 @@ pub fn render(
     std::fs::create_dir_all(&demos)?;
     let mut loaded: Option<String> = None;
     let mut me_at: HashMap<i32, (f64, f64, f64)> = HashMap::new();
+    // Where the play of the match's player is (when it isn't you), the same way.
+    let mut pov_at: HashMap<i32, (f64, f64, f64)> = HashMap::new();
     let mut broken: Vec<String> = vec![];
     let mut rendered = 0;
     let mut stopped = false;
@@ -211,15 +222,19 @@ pub fn render(
             for l in m.lowlights.iter_mut().filter(|l| l.clip.is_none()) {
                 l.render_error = Some(TOO_OLD.into());
             }
+            if let Some(p) = m.potm.as_mut().filter(|p| p.clip.is_none()) {
+                p.render_error = Some(TOO_OLD.into());
+            }
             save(&path, &m)?;
             broken.push(mid.clone());
             on(Event::Log(format!("skipping {}: demo from an older CS2 version", m.map)));
             continue;
         }
-        // A highlight, or a lowlight rendered on request.
+        // A highlight, a lowlight rendered on request, or the play of the match (anyone's).
         let hi = m.highlights.iter().position(|h| h.id == hid);
         let li = m.lowlights.iter().position(|l| l.id == hid);
-        if hi.is_none() && li.is_none() {
+        let pi = hi.is_none() && li.is_none() && m.potm.as_ref().is_some_and(|p| p.id == hid);
+        if hi.is_none() && li.is_none() && !pi {
             continue;
         }
         if loaded.as_deref() != Some(mid.as_str()) {
@@ -232,6 +247,10 @@ pub fn render(
                 b
             };
             me_at = sample_me(&bytes, steamid64, &m);
+            pov_at = match m.potm.as_ref() {
+                Some(p) if p.player != steamid64.to_string() => sample_me(&bytes, p.player.parse().unwrap_or(0), &m),
+                _ => HashMap::new(),
+            };
             drop(bytes);
             let me_name = m.players.iter().find(|p| p.steamid == steamid64.to_string()).map(|p| p.name.clone()).unwrap_or_default();
             match renderer.load_demo(&dem, &me_name) {
@@ -246,6 +265,9 @@ pub fn render(
                     }
                     for l in m.lowlights.iter_mut().filter(|l| l.clip.is_none()) {
                         l.render_error = Some(TOO_OLD.into());
+                    }
+                    if let Some(p) = m.potm.as_mut().filter(|p| p.clip.is_none()) {
+                        p.render_error = Some(TOO_OLD.into());
                     }
                     save(&path, &m)?;
                     broken.push(mid.clone());
@@ -263,19 +285,24 @@ pub fn render(
             }
             drain(on);
         }
-        let (segments, title, duration) = match (hi, li) {
-            (Some(i), _) => (m.highlights[i].segments.clone(), m.highlights[i].title.clone(), m.highlights[i].duration_s),
-            (None, Some(i)) => (m.lowlights[i].segments.clone(), m.lowlights[i].title.clone(), m.lowlights[i].duration_s),
+        let (segments, title, duration) = match (hi, li, m.potm.as_ref()) {
+            (Some(i), _, _) => (m.highlights[i].segments.clone(), m.highlights[i].title.clone(), m.highlights[i].duration_s),
+            (None, Some(i), _) => (m.lowlights[i].segments.clone(), m.lowlights[i].title.clone(), m.lowlights[i].duration_s),
+            (None, None, Some(p)) => (p.segments.clone(), format!("Play of the match: {}", p.title), p.duration_s),
             _ => unreachable!(),
         };
+        // Whose view: yours, or the play of the match's player's.
+        let who = if pi { m.potm.as_ref().map(|p| p.player.clone()).unwrap_or_default() } else { steamid64.to_string() };
+        renderer.set_pov(&m.players.iter().find(|p| p.steamid == who).map(|p| p.name.clone()).unwrap_or_default());
+        let life = if pi && who != steamid64.to_string() { &pov_at } else { &me_at };
         let rel = format!("clips/{hid}.mp4");
         let ts = Instant::now();
-        // Only while you're alive: after you die, CS2's camera follows someone else.
-        let segments = if me_at.is_empty() { segments } else { trim_to_life(&segments, &me_at) };
-        let eyes = |t: i32| me_at.get(&t).map(|p| (p.0, p.1));
+        // Only while they're alive: after a death, CS2's camera follows someone else.
+        let segments = if life.is_empty() { segments } else { trim_to_life(&segments, life) };
+        let eyes = |t: i32| life.get(&t).map(|p| (p.0, p.1));
         on(Event::Filming { title: title.clone() });
         let recorded = if segments.is_empty() {
-            Err(anyhow::anyhow!("you weren't alive for this moment"))
+            Err(anyhow::anyhow!("the player wasn't alive for this moment"))
         } else {
             renderer.record(&segments, &lib.join(&rel), &eyes)
         };
@@ -313,13 +340,23 @@ pub fn render(
                         m.lowlights[i].thumb = thumb;
                         m.lowlights[i].no_audio = no_audio;
                     }
-                    _ => {}
+                    _ => {
+                        if let Some(p) = m.potm.as_mut().filter(|_| pi) {
+                            p.clip = Some(rel);
+                            p.thumb = thumb;
+                            p.no_audio = no_audio;
+                        }
+                    }
                 }
                 // A retry that worked: the earlier failure no longer applies.
                 match (hi, li) {
                     (Some(i), _) => m.highlights[i].render_error = None,
                     (None, Some(i)) => m.lowlights[i].render_error = None,
-                    _ => {}
+                    _ => {
+                        if let Some(p) = m.potm.as_mut().filter(|_| pi) {
+                            p.render_error = None;
+                        }
+                    }
                 }
                 // Rendered again on request: no longer "removed for space".
                 let mut curation = cs2hl_core::curation::Curation::load(lib);
@@ -347,7 +384,11 @@ pub fn render(
                 match (hi, li) {
                     (Some(i), _) => m.highlights[i].render_error = Some(e.to_string()),
                     (None, Some(i)) => m.lowlights[i].render_error = Some(e.to_string()),
-                    _ => {}
+                    _ => {
+                        if let Some(p) = m.potm.as_mut().filter(|_| pi) {
+                            p.render_error = Some(e.to_string());
+                        }
+                    }
                 }
                 on(Event::Failed { match_id: mid.clone(), title, error: e.to_string() });
                 if e.downcast_ref::<crate::session::Cs2Crashed>().is_some() {

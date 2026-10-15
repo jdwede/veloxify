@@ -739,6 +739,12 @@ input[type=color] { width: 44px; height: 30px; padding: 2px; background: var(--r
   background: var(--pc); color: rgba(0, 0, 0, 0.78); border-radius: 6px 0 0 6px; }
 .pt-tab svg { width: 12px; height: 12px; }
 .pt-tab b { font-size: 10px; line-height: 1; font-weight: 900; }
+/* Aim / Utility rating cells (Leetify's): the number on a bar filled to it */
+.rate-bar { position: relative; display: inline-flex; align-items: center; justify-content: center; width: 54px; height: 22px; border-radius: 4px; background: var(--chip); overflow: hidden; font-weight: 800; }
+.rate-bar i { position: absolute; left: 0; top: 0; bottom: 0; background: rgba(255, 255, 255, 0.12); }
+.rate-bar.good i { background: color-mix(in srgb, var(--win) 32%, transparent); }
+.rate-bar.poor i { background: color-mix(in srgb, var(--loss) 30%, transparent); }
+.rate-bar b { position: relative; font-size: 12.5px; }
 .mp-badge { margin-left: 8px; padding: 2px 7px; border-radius: 4px; font-size: 11px; font-weight: 800; }
 .mp-badge.win { background: color-mix(in srgb, var(--win) 22%, transparent); color: var(--win); }
 .mp-badge.loss { background: color-mix(in srgb, var(--loss) 22%, transparent); color: var(--loss); }
@@ -864,6 +870,10 @@ input[type=color] { width: 44px; height: 30px; padding: 2px; background: var(--r
 .hs-hl-main .hl-thumb .dur { top: 10px; bottom: auto; }
 .hs-hl-main .hl-info { position: absolute; left: 0; right: 0; bottom: 0; padding: 28px 14px 12px; background: linear-gradient(transparent, rgba(0, 0, 0, 0.85)); pointer-events: none; }
 .hs-hl-main .hl-meta { color: rgba(255, 255, 255, 0.75); }
+/* Play of the match: its badge on the picture, who made it under the title */
+.potm-badge { position: absolute; top: 10px; left: 10px; padding: 4px 9px; border-radius: 999px; background: rgba(0, 0, 0, 0.72); color: #fff; font-size: 12px; font-weight: 800; letter-spacing: 0.02em; }
+.potm-who { display: inline-flex; align-items: center; gap: 6px; }
+.hs-hl-main .state .btn { pointer-events: auto; }
 .hs-hl-more { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
 .hs-hl-more .play { width: 34px; height: 34px; font-size: 14px; }
 .hs-hl-more .dur { right: 5px; bottom: 5px; font-size: 11px; }
@@ -1853,6 +1863,14 @@ ul.ins-list { list-style: none; padding-left: 0; }
 
 /* Sessions: your top highlights front and center, the verdict beside them */
 .sv-top { margin-bottom: 14px; }
+/* Sessions: highlights on the left half, what we noticed on the right */
+.sv-mid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 14px; align-items: start; margin-bottom: 14px; }
+.sv-mid > .sv-top { margin-bottom: 0; }
+.sv-mid-side { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.sv-mid-side > * { margin-bottom: 0 !important; }
+.sv-mid .sh-grid { grid-template-columns: 1fr; }
+.sv-mid .sh-rest { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+@media (max-width: 1000px) { .sv-mid { grid-template-columns: 1fr; } }
 .sv-verdicts { display: grid; grid-template-columns: repeat(auto-fit, minmax(360px, 1fr)); gap: 14px; align-items: stretch; margin-bottom: 14px; }
 .sv-verdicts > .sv-obj, .sv-verdicts > .sv-box { margin-bottom: 0; }
 .sh-wrap { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
