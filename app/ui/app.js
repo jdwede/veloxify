@@ -6325,7 +6325,7 @@ const HIST_COLS = [["date", "Date", "112px"], ["score", "Score", "112px"], ["elo
   ["fk", "First kills", "72px"], ["fd", "First deaths", "80px"], ["trades", "Trade kills", "76px"], ["clutch", "Clutches", "70px"], ["ud", "Utility dmg", "80px"],
   ["ef", "Flashed", "62px"], ["fa", "Flash assists", "86px"], ["mvps", "MVPs", "52px"], ["acc", "Accuracy", "70px"], ["dmg", "Damage", "68px"], ["rounds", "Rounds", "60px"],
   ["length", "Length", "64px"], ["source", "Source", "82px"], ["aim", "Aim", "72px"], ["util", "Utility", "72px"]];
-const HIST_DEFAULT = ["date", "score", "elo", "rating", "swing", "rws", "kda", "adr", "map"];
+const HIST_DEFAULT = ["date", "score", "elo", "rating", "swing", "rws", "kda", "aim", "util", "adr", "map"];
 const HIST_GROUPS = [["Match", ["date", "score", "elo", "map", "source", "rounds", "length"]], ["Ratings", ["rating", "rating2", "rating1", "rws", "swing", "aim", "util"]],
   ["Kills and damage", ["kda", "kills", "deaths", "assists", "kd", "kr", "hs", "adr", "dmg", "kast", "mvps"]], ["Multi-kills, openings, clutches", ["multi", "fk", "fd", "trades", "clutch"]],
   ["Utility and aim", ["ud", "ef", "fa", "acc"]]];
@@ -6338,6 +6338,17 @@ const histCols = () => {
       const list = Array.isArray(saved) ? saved : saved?.cols;
       if (Array.isArray(list) && !list.includes("swing")) {
         list.splice(list.includes("rating") ? list.indexOf("rating") + 1 : list.length, 0, "swing");
+        savePickedCols("veloxify.historyCols", HIST_COLS, list);
+      }
+    }
+    // Aim and Utility became default columns: right after K/D/A in a layout saved before (once).
+    if (!localStorage.getItem("veloxify.historyCols.aim")) {
+      localStorage.setItem("veloxify.historyCols.aim", "1");
+      const saved = JSON.parse(localStorage.getItem("veloxify.historyCols") || "null");
+      const list = Array.isArray(saved) ? saved : saved?.cols;
+      if (Array.isArray(list)) {
+        const add = ["aim", "util"].filter((k) => !list.includes(k));
+        list.splice(list.includes("kda") ? list.indexOf("kda") + 1 : list.length, 0, ...add);
         savePickedCols("veloxify.historyCols", HIST_COLS, list);
       }
     }

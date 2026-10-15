@@ -36,6 +36,10 @@ pub struct RecentMatch {
     /// Each player's party (same order as `players`): players who queued together share one.
     #[serde(default)]
     pub parties: Vec<u32>,
+    /// The match's CDataGCCStrike15_v2_MatchInfo, hex: saved as `<demo>.info` beside the demo, as
+    /// CS2 does, so the import knows when it was played.
+    #[serde(default)]
+    pub info: String,
 }
 
 // ---- the helper: asking the game coordinator ---------------------------------------------------
@@ -321,7 +325,8 @@ fn parse_match_list(body: &[u8]) -> Vec<RecentMatch> {
             let (players, game_type, parties) = reservation
                 .map(|r| (ints(&r, 1).into_iter().map(|v| v as u32).collect(), int(&r, 2) as u32, ints(&r, 8).into_iter().map(|v| v as u32).collect()))
                 .unwrap_or_default();
-            Some(RecentMatch { matchid: int(&mf, 1), matchtime: int(&mf, 2) as u32, url, players, game_type, parties })
+            let info = m.iter().map(|b| format!("{b:02x}")).collect();
+            Some(RecentMatch { matchid: int(&mf, 1), matchtime: int(&mf, 2) as u32, url, players, game_type, parties, info })
         })
         .filter(|m| m.matchid != 0)
         .collect()
@@ -449,6 +454,11 @@ pub fn fetch_new(lib: &Path, me: u64, dest: &Path, stop: &dyn Fn() -> bool, prog
             break;
         }
         progress(i, total);
+        // When it was played (the import reads it from here), before the demo itself appears.
+        let info: Vec<u8> = (0..m.info.len() / 2).filter_map(|i| u8::from_str_radix(&m.info[i * 2..i * 2 + 2], 16).ok()).collect();
+        if !info.is_empty() {
+            let _ = std::fs::write(dest.join(format!("{name}.info")), &info);
+        }
         match download(&m.url, &dest.join(&name), stop) {
             Ok(true) => {
                 state.matches.insert(id, "downloaded".into());
