@@ -13,9 +13,10 @@ const SETUP_AT_S: f32 = 20.0;
 const ON_SITE: f32 = 0.42;
 /// Farther than this from both sites (same share) is a push toward the other team's side.
 const PUSHED: f32 = 0.9;
-/// Team equipment value (at the start of the round) up to which it's an eco, then a force buy.
-const ECO_MAX: u32 = 8000;
-const FORCE_MAX: u32 = 18000;
+/// The team's average equipment value per player (at the start of the round) up to which it's an
+/// eco, then a force buy; above, a full buy.
+const ECO_MAX: u32 = 1600;
+const FORCE_MAX: u32 = 3500;
 /// A plant this early is a rush or fast hit.
 const FAST_PLANT_S: f32 = 35.0;
 
@@ -105,7 +106,7 @@ pub fn team_rounds(demo: &[u8], team: &[u64]) -> Result<Value> {
             spots.push(json!({ "player": names.get(&p), "zone": z, "place": place }));
         }
         let count = |z: &str| spots.iter().filter(|s| s["zone"] == z).count();
-        let plant = r.plant.as_ref().map(|(t, place, _)| json!({ "t": t, "site": if place.contains('A') && !place.contains('B') { "A" } else if place.contains('B') { "B" } else { "?" } }));
+        let plant = r.plant.as_ref().map(|(t, place, _)| json!({ "t": t, "site": if place.ends_with('A') { "A" } else if place.ends_with('B') { "B" } else { "?" } }));
         rounds.push(json!({
             "number": r.number,
             "side": r.mine_side,
