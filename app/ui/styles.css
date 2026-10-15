@@ -812,11 +812,14 @@ input[type=color] { width: 44px; height: 30px; padding: 2px; background: var(--r
   background: linear-gradient(90deg, color-mix(in srgb, var(--accent) 16%, var(--card)), var(--card) 50%, color-mix(in srgb, #f0a030 16%, var(--card))); }
 .hs-teams b.mine { color: var(--accent); }
 .hs-teams b.enemy { color: #f0a030; text-align: right; }
-.hs-row { display: grid; grid-template-columns: 64px 1fr 64px; column-gap: 8px; row-gap: 5px; align-items: center; padding: 7px 16px; border-top: 1px solid var(--line); }
+.hs-row { display: grid; grid-template-columns: 120px 1fr 120px; column-gap: 8px; row-gap: 5px; align-items: center; padding: 7px 16px; border-top: 1px solid var(--line); }
 .hs-row span { font-weight: 600; font-size: 13px; color: var(--muted); text-align: center; }
-.hs-row b { font-size: 14px; }
+.hs-row b { font-size: 14px; white-space: nowrap; }
 .hs-row b:last-of-type { text-align: right; }
-.hs-split-bar { grid-column: 1 / -1; display: flex; gap: 2px; height: 4px; }
+.hs-split-bar { position: relative; grid-column: 1 / -1; display: flex; gap: 2px; height: 4px; }
+/* Where you landed on an averaged stat: a small white tick on the bar, your number beside your team's */
+.hs-you-tick { position: absolute; top: -3px; width: 3px; height: 10px; margin-left: -1.5px; border-radius: 2px; background: #fff; box-shadow: 0 0 0 1.5px var(--card); cursor: default; }
+.hs-you-v { margin-left: 7px; font-size: 11px; font-weight: 600; color: var(--muted); }
 .hs-split-bar i { border-radius: 2px; background: #f0a030; flex: 1; }
 .hs-split-bar i:first-child { flex: none; background: var(--accent); }
 .hs-leaders { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px; }

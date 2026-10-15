@@ -1685,11 +1685,16 @@ async function renderMatchSummary(el, m, id) {
   const teams = { mine: m.players.filter((p) => p.side === "mine"), enemy: m.players.filter((p) => p.side === "enemy") };
   const avg = (ps, f) => (ps.length ? ps.reduce((a, p) => a + f(p), 0) / ps.length : 0);
   const total = (ps, f) => ps.reduce((a, p) => a + f(p), 0);
-  const cmp = (label, a, b, fmt = (x) => x) => {
+  // An averaged stat can also show where you landed: a tick on the same scale (you against the
+  // enemy's average), right of the split when you beat your team's average.
+  const cmp = (label, a, b, fmt = (x) => x, you = null) => {
     const share = a + b > 0 ? (a / (a + b)) * 100 : 50;
-    return `<div class="hs-row"><b class="${a > b ? "up" : a < b ? "down" : ""}">${fmt(a)}</b><span>${label}</span><b class="${b > a ? "up" : b < a ? "down" : ""}">${fmt(b)}</b>
-      <div class="hs-split-bar"><i style="width:${share.toFixed(1)}%"></i><i></i></div></div>`;
+    const at = you != null && you + b > 0 ? Math.min(98.5, Math.max(1.5, (you / (you + b)) * 100)) : null;
+    return `<div class="hs-row"><b class="${a > b ? "up" : a < b ? "down" : ""}">${fmt(a)}${you != null ? `<small class="hs-you-v" title="Yours">you ${fmt(you)}</small>` : ""}</b><span>${label}</span><b class="${b > a ? "up" : b < a ? "down" : ""}">${fmt(b)}</b>
+      <div class="hs-split-bar"><i style="width:${share.toFixed(1)}%"></i><i></i>${at != null ? `<em class="hs-you-tick ${you >= a ? "above" : "below"}" style="left:${at.toFixed(1)}%" title="You ${fmt(you)} · your team ${fmt(a)}"></em>` : ""}</div></div>`;
   };
+  const mine = m.players.find((p) => p.steamid === me);
+  const myHs = mine && mine.counts.kills ? (mine.counts.headshot_kills / mine.counts.kills) * 100 : null;
   const multi = (p) => (p.counts.multikill_rounds || []).slice(2).reduce((a, n) => a + n, 0);
   const hsPct = (ps) => { const k = total(ps, (p) => p.counts.kills); return k ? (total(ps, (p) => p.counts.headshot_kills) / k) * 100 : 0; };
   const awp = new Map();
@@ -1778,14 +1783,14 @@ async function renderMatchSummary(el, m, id) {
       </section>
       <section class="hs-card">
         <div class="hs-teams"><b class="mine">My Team</b><span class="sub">Team stats</span><b class="enemy">Enemy Team</b></div>
-        ${cmp("Rating 3.0", avg(teams.mine, (p) => r3(p.derived)), avg(teams.enemy, (p) => r3(p.derived)), f2)}
-        ${cmp("ADR", avg(teams.mine, (p) => p.derived.adr), avg(teams.enemy, (p) => p.derived.adr), f1)}
+        ${cmp("Rating 3.0", avg(teams.mine, (p) => r3(p.derived)), avg(teams.enemy, (p) => r3(p.derived)), f2, mine ? r3(mine.derived) : null)}
+        ${cmp("ADR", avg(teams.mine, (p) => p.derived.adr), avg(teams.enemy, (p) => p.derived.adr), f1, mine ? mine.derived.adr : null)}
         ${cmp("First kills", total(teams.mine, (p) => p.counts.opening_kills), total(teams.enemy, (p) => p.counts.opening_kills))}
         ${cmp("Trade kills", total(teams.mine, (p) => p.counts.trade_kills), total(teams.enemy, (p) => p.counts.trade_kills))}
         ${cmp("Multi-kill rounds", total(teams.mine, multi), total(teams.enemy, multi))}
         ${cmp("Clutches won", total(teams.mine, (p) => sum(p.counts.clutches_won)), total(teams.enemy, (p) => sum(p.counts.clutches_won)))}
         ${cmp("Utility damage", total(teams.mine, (p) => p.counts.utility_damage), total(teams.enemy, (p) => p.counts.utility_damage))}
-        ${cmp("Headshot kills", hsPct(teams.mine), hsPct(teams.enemy), pct0)}
+        ${cmp("Headshot kills", hsPct(teams.mine), hsPct(teams.enemy), pct0, myHs)}
       </section>
     </div>
     <div class="hs-split">
