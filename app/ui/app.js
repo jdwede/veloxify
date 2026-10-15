@@ -229,6 +229,12 @@ const ICONS = {
   external: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></svg>',
   rating: '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.4" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M12 12l4-4" stroke-linecap="round"/></svg>',
 };
+// Lineups thrown this many times or more get a video on their own (batch::LINEUP_AUTO_MIN_THROWS);
+// the rest when asked for.
+const LINEUP_AUTO_MIN = 4;
+const lineupWaitText = (count) => count >= LINEUP_AUTO_MIN
+  ? "Veloxify films it in the background, after your highlights."
+  : `Veloxify films lineups thrown ${LINEUP_AUTO_MIN}+ times on its own. This one was thrown ${count} time${count === 1 ? "" : "s"}: film it whenever you like.`;
 const faceitLibId = (fm) => `faceit-${fm.match_id.replace(/^1-/, "")}-m${Math.max(1, fm.map_number)}`;
 function openFaceitRoom(matchId) {
   const path = `en/cs2/room/${matchId}`;
@@ -2450,6 +2456,7 @@ async function renderLineupsTab(body, m, id) {
   const [d, radar, mapLineups] = await Promise.all([loadDetails(id), loadRadar(m.map), loadMapLineups(m.map), loadLineups()]);
   // The library-wide lineup each throw belongs to (its video).
   const lineupOf = (t) => mapLineups?.by_throw?.[`${id}@${t.tick}`];
+  const lineupCount = (lid) => mapLineups?.lineups?.find((l) => l.id === lid)?.count || 0;
   if (!d) return noDetails(body);
   if (!d.throws) { body.innerHTML = `<div class="empty">Lineups need this match analyzed again; Veloxify does that in the background while CS2 is closed.</div>`; return; }
   if (lineups.matchId !== id) Object.assign(lineups, { matchId: id, sel: null, player: "", zoom: 1, pan: [0, 0] });
@@ -2503,7 +2510,7 @@ async function renderLineupsTab(body, m, id) {
       <section class="tl-events ln-side">
         ${s ? `<div class="ln-detail">
           ${(() => { const lid = lineupOf(s), c = lid && lineupClip(lid); return c?.clip ? `<video class="ln-video" src="${assetUrl(c.clip)}" controls autoplay muted loop playsinline></video>`
-            : lid && tauri ? `<div class="gn-novideo"><b>No video yet</b><span>Lineups are filmed in the background, most thrown first.</span><button class="btn primary" id="ln-film" data-lid="${esc(lid)}">Film this lineup now</button></div>` : ""; })()}
+            : lid && tauri ? `<div class="gn-novideo"><b>No video yet</b><span>${esc(lineupWaitText(lineupCount(lid)))}</span><button class="btn primary" id="ln-film" data-lid="${esc(lid)}">Film this lineup now</button></div>` : ""; })()}
           <div class="ln-title">${weaponIcon(NADE_INFO[s.kind][1])}<b>${esc(callout(s.from) || "Spot")} → ${esc(callout(s.to) || "landing")}</b></div>
           <div class="sub">${esc(names.get(s.player) || "")} · ${s.side} · round${s.rounds.length > 1 ? "s" : ""} ${s.rounds.join(", ")} · ${mmss(s.t)}</div>
           <ul class="ln-facts"><li>${TECH[s.technique] || s.technique}, ${CLICK[s.click] || s.click}</li>
@@ -3375,7 +3382,7 @@ function renderGrenadeMap(view, d, map) {
         ${sel ? `<div class="gn-detail">
           <div class="gn-video">${clip?.clip ? `<video id="gn-video" src="${assetUrl(clip.clip)}" controls autoplay muted loop playsinline></video>`
             : clip?.too_old ? `<div class="gn-novideo"><b>No video</b><span>Every time this was thrown, it was in a demo from before a CS2 update, and CS2 can't play those demos any more. It gets a video the next time it's thrown in one of your matches.</span></div>`
-            : `<div class="gn-novideo">${clip?.error ? `<b>No video</b><span>${esc(clip.error)}</span>` : `<b>No video yet</b><span>Veloxify films lineups in the background after your highlights, most thrown first.</span>`}${tauri ? `<button class="btn primary" id="gn-render">Film this lineup now</button>` : ""}</div>`}</div>
+            : `<div class="gn-novideo">${clip?.error ? `<b>No video</b><span>${esc(clip.error)}</span>` : `<b>No video yet</b><span>${esc(lineupWaitText(sel.count))}</span>`}${tauri ? `<button class="btn primary" id="gn-render">Film this lineup now</button>` : ""}</div>`}</div>
           <div class="gn-title">${kindIcon(sel.kind)}${grenades.renaming ? `<input class="gn-rename-in" id="gn-rename-in" value="${esc(nm(sel))}" maxlength="60" aria-label="Lineup name">` : `<b>${esc(nm(sel))}</b>`}${sel.spawn ? `<span class="gn-spawnchip">Spawn #${sel.spawn}</span>` : ""}<span class="gn-x">×${sel.count}</span>
             ${tauri ? `<button class="btn ghost small gn-star ${isFav(sel) ? "on" : ""}" id="gn-fav" title="${isFav(sel) ? "Remove from favorites" : "Add to favorites"}">${ICONS.star}</button>` : ""}
             ${tauri ? `<button class="btn ghost small" id="gn-rename">${grenades.renaming ? "Save" : "Rename"}</button>${mapCallouts(map).names[sel.id] && !grenades.renaming ? `<button class="btn ghost small" id="gn-rename-reset" title="Back to the automatic name">Reset</button>` : ""}` : ""}</div>
@@ -7696,7 +7703,7 @@ async function renderSettings(view) {
         <div class="panel-head"><div class="h3">Highlights</div></div>
         ${row("Make highlights automatically", "After you close CS2, new demos are read and your best moments rendered in the background.", sw("auto_render", s.auto_render))}
         ${row("Capture lowlights too", "After the highlights, your 3 worst deaths from each match of the latest session are rendered too, for the whiff analyzer. Others render when you press Watch.", sw("auto_lowlights", s.auto_lowlights ?? true))}
-        ${row("Film grenade lineups", "After your clips, Veloxify films the lineups from your demos for the Grenades page (the thrower's view, then the grenade until it goes off), most thrown first, about 20 at a time.", sw("auto_lineups", s.auto_lineups ?? true))}
+        ${row("Film grenade lineups", `After your clips, Veloxify films the lineups from your demos for the Lineups page (the thrower's view, then the grenade until it goes off): the ones thrown ${LINEUP_AUTO_MIN} or more times, most thrown first. It makes way whenever new matches or clips need filming. Any other lineup films when you open it and press “Film this lineup now”.`, sw("auto_lineups", s.auto_lineups ?? true))}
         ${row("Which moments", "Best only: 3K+, aces, clutches and other always-moments. Solid plays adds 2Ks that mattered and reaction flicks. Everything adds plain 2Ks.",
           seg("selectivity", s.selectivity, [["highlights-only", "Best only"], ["solid-plays", "Solid plays"], ["everything", "Everything"]]))}
         ${row("Clips per match", "The most clips kept from one match; the best ones win.", `<input type="number" data-key="max_per_match" min="1" max="20" value="${s.max_per_match}" ${tauri ? "" : "disabled"}>`)}

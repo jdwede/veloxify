@@ -12,7 +12,7 @@ use serde::Serialize;
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -58,6 +58,15 @@ enum Batch {
 
 /// Lineup videos filmed per automatic run (about 15 s each).
 const LINEUPS_PER_RUN: usize = 30;
+
+/// Bumped each time the user asks for something to be filmed (a clip, a lineup, a match's
+/// highlights): an automatic lineup batch gives way to it (see [`Worker::run_batch`]).
+static ASKED: AtomicU64 = AtomicU64::new(0);
+
+/// The user asked for something to be filmed: lineup videos filming on their own make way for it.
+pub fn asked() {
+    ASKED.fetch_add(1, Ordering::SeqCst);
+}
 
 /// An import that fails with an error (not a skip) is tried again on later passes, up to this
 /// many times, before the demo is left alone.
@@ -202,8 +211,10 @@ impl Worker {
         let mut setup_checked = false;
         // Filming was stopped (Stop rendering, CS2 or a FACEIT match wanted): no more automatic
         // filming until they've played again, as the notification says ("more after your next
-        // game"). What they ask for still films.
+        // game"). What they ask for still films, and so do new matches' highlights (demos got
+        // after the stop): lineup videos wait for the next game.
         let mut held = false;
+        let mut lineups_held = false;
         // Right tray color from the start (the first import can take a while).
         self.set(if system::cs2_running() { "waiting" } else { "idle" }, "Starting", 0, 0);
         loop {
@@ -228,7 +239,7 @@ impl Worker {
                     Ok(Job::Faceit) => last_faceit = None,
                     Ok(Job::Import(files)) => self.forget(&files),
                     Ok(Job::RenderLineups(ids)) => pending_lineups.extend(ids),
-                    Ok(Job::Resume) => held = false,
+                    Ok(Job::Resume) => (held, lineups_held) = (false, false),
                     Err(RecvTimeoutError::Disconnected) => return,
                     _ => {}
                 }
@@ -242,7 +253,7 @@ impl Worker {
                     Ok(Job::Faceit) => last_faceit = None,
                     Ok(Job::Import(files)) => self.forget(&files),
                     Ok(Job::RenderLineups(ids)) => pending_lineups.extend(ids),
-                    Ok(Job::Resume) => held = false,
+                    Ok(Job::Resume) => (held, lineups_held) = (false, false),
                     Err(RecvTimeoutError::Disconnected) => return,
                     _ => {}
                 }
@@ -308,6 +319,10 @@ impl Worker {
                 }
             }
             if was_playing {
+                (held, lineups_held) = (false, false);
+            }
+            // New matches (Get demos after filming was stopped): their highlights still film.
+            if imported {
                 held = false;
             }
             was_playing = false;
@@ -362,7 +377,7 @@ impl Worker {
                         Job::Faceit => last_faceit = None,
                         Job::Import(files) => self.forget(&files),
                         Job::RenderLineups(ids) => pending_lineups.extend(ids),
-                        Job::Resume => held = false,
+                        Job::Resume => (held, lineups_held) = (false, false),
                         _ => {}
                     }
                 }
@@ -379,13 +394,32 @@ impl Worker {
                         held |= self.render(&settings, me, Scope::Items(items));
                     }
                 }
-                // Then grenade lineup videos, the most thrown first, a batch at a time.
-                if settings.auto_render && settings.auto_lineups && !held && !system::cs2_running() {
-                    held |= self.render_lineups(&settings, me, None);
+                // Then grenade lineup videos, the most thrown first, a batch at a time. Anything
+                // asked for meanwhile, and demos being downloaded (new matches), go first.
+                if settings.auto_render && settings.auto_lineups && !held && !lineups_held && !system::cs2_running() {
+                    let seen = ASKED.load(Ordering::SeqCst);
+                    let mut first = crate::demos::downloading(&self.app);
+                    while let Ok(job) = jobs.try_recv() {
+                        match job {
+                            Job::Render(ids) => pending_render.extend(ids),
+                            Job::RenderClips(items) => pending_clips.extend(items),
+                            Job::RenderLineups(ids) => pending_lineups.extend(ids),
+                            Job::Faceit => last_faceit = None,
+                            Job::Import(files) => self.forget(&files),
+                            Job::Resume => (held, lineups_held) = (false, false),
+                            Job::Now => {}
+                        }
+                        first = true;
+                    }
+                    if first {
+                        continue;
+                    }
+                    held |= self.run_batch(&settings, me, Batch::Lineups(None), Some(seen));
                 }
             } else if imported {
                 self.set("idle", "Up to date", 0, 0);
             }
+            lineups_held |= held;
             // Storage limits (Settings): oldest clips not in a folder, oldest saved demos.
             let (clips, demos) = crate::clips::enforce(&settings);
             if clips + demos > 0 {
@@ -401,7 +435,7 @@ impl Worker {
                 Ok(Job::Faceit) => last_faceit = None,
                 Ok(Job::Import(files)) => self.forget(&files),
                 Ok(Job::RenderLineups(ids)) => pending_lineups.extend(ids),
-                Ok(Job::Resume) => held = false,
+                Ok(Job::Resume) => (held, lineups_held) = (false, false),
                 Err(RecvTimeoutError::Disconnected) => return,
                 _ => {}
             }
@@ -684,16 +718,17 @@ impl Worker {
 
     /// Films clips; true when filming was stopped before the end.
     fn render(&self, settings: &Settings, me: u64, scope: Scope) -> bool {
-        self.run_batch(settings, me, Batch::Clips(scope))
+        self.run_batch(settings, me, Batch::Clips(scope), None)
     }
 
     fn render_lineups(&self, settings: &Settings, me: u64, ids: Option<Vec<String>>) -> bool {
-        self.run_batch(settings, me, Batch::Lineups(ids))
+        self.run_batch(settings, me, Batch::Lineups(ids), None)
     }
 
     /// Films one batch; true when it was stopped before the end (Stop rendering, CS2 or a FACEIT
-    /// match wanted).
-    fn run_batch(&self, settings: &Settings, me: u64, what: Batch) -> bool {
+    /// match wanted). With `give_way` (what [`ASKED`] was when it was planned), it stops quietly
+    /// between two videos once something's asked for or demos start downloading, and isn't held.
+    fn run_batch(&self, settings: &Settings, me: u64, what: Batch, give_way: Option<u64>) -> bool {
         let lib = settings.library_dir.clone();
         if !lib.join("index.json").exists() {
             return false;
@@ -732,21 +767,28 @@ impl Worker {
         self.abort.store(false, Ordering::SeqCst);
         let rendering = Arc::new(AtomicBool::new(true));
         let match_found = Arc::new(AtomicBool::new(false));
-        if let Some(pid) = player_id {
-            let (rendering, match_found, abort) = (rendering.clone(), match_found.clone(), self.abort.clone());
+        let gave_way = Arc::new(AtomicBool::new(false));
+        if player_id.is_some() || give_way.is_some() {
+            let (rendering, match_found, gave_way, abort, app) = (rendering.clone(), match_found.clone(), gave_way.clone(), self.abort.clone(), self.app.clone());
             std::thread::spawn(move || {
+                let mut secs = 0u32;
                 while rendering.load(Ordering::SeqCst) {
-                    if faceit::in_match(&pid) == Some(true) {
-                        match_found.store(true, Ordering::SeqCst);
+                    if give_way.is_some_and(|seen| ASKED.load(Ordering::SeqCst) != seen) || (give_way.is_some() && crate::demos::downloading(&app)) {
+                        gave_way.store(true, Ordering::SeqCst);
                         abort.store(true, Ordering::SeqCst);
                         return;
                     }
-                    for _ in 0..15 {
-                        if !rendering.load(Ordering::SeqCst) {
-                            return;
+                    if secs % 15 == 0 {
+                        if let Some(pid) = &player_id {
+                            if faceit::in_match(pid) == Some(true) {
+                                match_found.store(true, Ordering::SeqCst);
+                                abort.store(true, Ordering::SeqCst);
+                                return;
+                            }
                         }
-                        std::thread::sleep(Duration::from_secs(1));
                     }
+                    secs += 1;
+                    std::thread::sleep(Duration::from_secs(1));
                 }
             });
         }
@@ -793,8 +835,12 @@ impl Worker {
                 }
             }
             Event::Stopped { rendered, wants_cs2 } => {
+                if gave_way.load(Ordering::SeqCst) {
+                    vlog!("{noun}: {rendered} made, then made way for what's wanted first (new matches, clips)");
+                    return;
+                }
                 stopped = true;
-                vlog!("{noun}: stopped after {rendered} (CS2 wanted: {wants_cs2})");
+                vlog!("{noun}: stopped after {rendered} (CS2 wanted: {wants_cs2}, FACEIT match: {})", match_found.load(Ordering::SeqCst));
                 // Veloxify never starts CS2 for you (it could be left running with nobody there):
                 // it closes its own and you start CS2 from Steam as usual.
                 let left = total.saturating_sub(rendered);
@@ -818,6 +864,9 @@ impl Worker {
             }
         };
         rendering.store(false, Ordering::SeqCst);
+        if gave_way.load(Ordering::SeqCst) {
+            self.abort.store(false, Ordering::SeqCst);
+        }
         match result {
             Err(e) if e.downcast_ref::<cs2hl_render::session::NotDrawing>().is_some() => {
                 vlog!("{noun}: {e}");

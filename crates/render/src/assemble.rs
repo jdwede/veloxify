@@ -37,10 +37,10 @@ fn ffmpeg() -> Command {
     c
 }
 
-/// A recording with more of it frozen than this is thrown away: CS2 stopped drawing (see
-/// [`frozen_share`]). Lineup videos' camera always moves; a highlight can hold still a while (an
-/// AWP holding an angle).
-pub const FROZEN_MAX: f64 = 0.25;
+/// A lineup video with more of it frozen than this is thrown away: CS2 stopped drawing (see
+/// [`frozen_share`]). Its camera mostly moves, but a smoke that has finished blooming holds still
+/// for the last seconds (about 27%).
+pub const FROZEN_MAX: f64 = 0.45;
 // A slideshow measures 90% and up; an AWP holding an angle for a few seconds can reach 58%.
 pub const FROZEN_MAX_CLIP: f64 = 0.6;
 

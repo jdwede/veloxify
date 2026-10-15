@@ -196,6 +196,7 @@ pub fn render(
     let mut unplayable = load_unplayable(lib);
     let played = |mid: &str| load(&lib.join("matches").join(format!("{mid}.json"))).map(|m| m.played_ts).unwrap_or(i64::MIN);
     let mut cutoff = unplayable.iter().map(|m| played(m)).max().unwrap_or(i64::MIN);
+    let mut still_clips = load_still_clips(lib);
     const TOO_OLD: &str = "Recorded on an older CS2 version; CS2 can no longer play this demo.";
     for (mid, hid) in order {
         if broken.contains(&mid) {
@@ -278,14 +279,20 @@ pub fn render(
         } else {
             renderer.record(&segments, &lib.join(&rel), &eyes)
         };
-        // A frozen recording (CS2 stopped drawing, e.g. the screen went to sleep) isn't kept.
+        // A frozen recording (CS2 stopped drawing, e.g. the screen went to sleep) isn't kept,
+        // unless it came out just as still last time: then the moment itself holds still.
         let recorded = recorded.and_then(|()| match crate::assemble::frozen_share(&lib.join(&rel)) {
-            Some(f) if f > crate::assemble::FROZEN_MAX_CLIP => {
+            Some(f) if f > crate::assemble::FROZEN_MAX_CLIP && !still_clips.get(&hid).is_some_and(|&was| (was - f).abs() < 0.05) => {
+                still_clips.insert(hid.clone(), f);
+                save_still_clips(lib, &still_clips);
                 let _ = std::fs::remove_file(lib.join(&rel));
                 Err(crate::assemble::Frozen(f).into())
             }
             _ => Ok(()),
         });
+        if recorded.is_ok() && still_clips.remove(&hid).is_some() {
+            save_still_clips(lib, &still_clips);
+        }
         // Nor what a failed one left behind (ffmpeg writes part of the file before failing).
         if recorded.is_err() {
             let _ = std::fs::remove_file(lib.join(&rel));
@@ -595,8 +602,12 @@ fn save_lineup_clips(lib: &Path, clips: &BTreeMap<String, LineupClip>) -> Result
     Ok(())
 }
 
-/// Lineups still without a video, most thrown first: the ones asked for (`ids`), or every
-/// instant and set lineup (and on-the-move ones thrown 3+ times).
+/// Lineups filmed on their own are those thrown at least this many times; the rest (most of them,
+/// thrown 2 or 3 times) film when asked for ("Film this lineup now"), so filming lineups ends.
+pub const LINEUP_AUTO_MIN_THROWS: usize = 4;
+
+/// Lineups still without a video, most thrown first: the ones asked for (`ids`), or every lineup
+/// thrown [`LINEUP_AUTO_MIN_THROWS`] times or more.
 pub fn plan_lineups(lib: &Path, ids: Option<&[String]>) -> Vec<cs2hl_core::lineups::Lineup> {
     let all = cs2hl_core::lineups::load(lib);
     let done = load_lineup_clips(lib);
@@ -606,7 +617,7 @@ pub fn plan_lineups(lib: &Path, ids: Option<&[String]>) -> Vec<cs2hl_core::lineu
         .flat_map(|m| m.lineups)
         .filter(|l| match ids {
             Some(ids) => ids.contains(&l.id),
-            None => true,
+            None => l.count >= LINEUP_AUTO_MIN_THROWS,
         })
         .filter(|l| done.get(&l.id).is_none_or(|c| c.clip.is_none() && (ids.is_some() || c.error.is_none() || l.count > c.count)))
         .collect();
@@ -632,6 +643,28 @@ fn save_unplayable(lib: &Path, set: &std::collections::BTreeSet<String>) {
     let _ = std::fs::write(lib.join("unplayable_demos.json"), serde_json::to_string(set).unwrap_or_default());
 }
 
+/// Demos CS2 couldn't load for a lineup video (not known to be too old): match -> runs it failed.
+/// After [`LOAD_TRIES`] runs it's left alone: each try costs a CS2 restart.
+fn load_failures(lib: &Path) -> BTreeMap<String, u32> {
+    std::fs::read_to_string(lib.join("demo_load_failures.json")).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
+}
+
+fn save_load_failures(lib: &Path, m: &BTreeMap<String, u32>) {
+    let _ = std::fs::write(lib.join("demo_load_failures.json"), serde_json::to_string(m).unwrap_or_default());
+}
+
+const LOAD_TRIES: u32 = 2;
+
+/// Clips that came out mostly still: clip id -> the still share. The same share again means the
+/// moment itself holds still (an AWP holding an angle), not CS2 stopping, and the clip is kept.
+fn load_still_clips(lib: &Path) -> BTreeMap<String, f64> {
+    std::fs::read_to_string(lib.join("still_clips.json")).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
+}
+
+fn save_still_clips(lib: &Path, m: &BTreeMap<String, f64>) {
+    let _ = std::fs::write(lib.join("still_clips.json"), serde_json::to_string(m).unwrap_or_default());
+}
+
 /// Films lineup videos (`lineups/<id>.mp4`): the thrower's view, then the grenade followed until
 /// it goes off. Each lineup is filmed from its newest throw CS2 can play; if that doesn't work
 /// (an old demo, the camera not on the thrower), from the next one.
@@ -650,6 +683,7 @@ pub fn render_lineups(
     let todo = plan_lineups(lib, ids.as_deref());
     let entry_of = |mid: &str| -> Option<MatchEntry> { load(&lib.join("matches").join(format!("{mid}.json"))).ok() };
     let mut unplayable = load_unplayable(lib);
+    let mut load_failed = load_failures(lib);
     let mut clips = load_lineup_clips(lib);
     // Each lineup's throws to try, newest first: demo on disk, not known to be unplayable.
     struct Job {
@@ -668,13 +702,22 @@ pub fn render_lineups(
     let mut jobs: Vec<Job> = vec![];
     for l in &todo {
         let mut tries: Vec<cs2hl_core::lineups::Occurrence> = vec![];
+        let mut wont_load = false;
         for o in std::iter::once(&l.video).chain(l.examples.iter()) {
             if o.tick <= 0 || unplayable.contains(&o.match_id) || tries.iter().any(|t| t.match_id == o.match_id && t.tick == o.tick) {
+                continue;
+            }
+            if load_failed.get(&o.match_id).is_some_and(|&n| n >= LOAD_TRIES) {
+                wont_load = true;
                 continue;
             }
             if when(&o.match_id).is_some_and(|ts| ts > cutoff) {
                 tries.push(o.clone());
             }
+        }
+        if tries.is_empty() && wont_load {
+            clips.insert(l.id.clone(), LineupClip { error: Some("CS2 couldn't load the demos it was thrown in.".into()), count: l.count, ..Default::default() });
+            continue;
         }
         if tries.is_empty() {
             clips.insert(
@@ -816,7 +859,12 @@ pub fn render_lineups(
                     .unwrap_or_default();
                 let first = names.get(&o.player).cloned().unwrap_or_default();
                 match r.load_demo(&dem, &first) {
-                    Ok(()) => loaded = Some(o.match_id.clone()),
+                    Ok(()) => {
+                        loaded = Some(o.match_id.clone());
+                        if load_failed.remove(&o.match_id).is_some() {
+                            save_load_failures(lib, &load_failed);
+                        }
+                    }
                     Err(e) if e.downcast_ref::<Aborted>().is_some() => {
                         stopped = true;
                         break 'passes;
@@ -830,6 +878,8 @@ pub fn render_lineups(
                             last_error = "Recorded on an older CS2 version; CS2 can no longer play this demo.".into();
                         } else {
                             failed_loads.insert(o.match_id.clone());
+                            *load_failed.entry(o.match_id.clone()).or_default() += 1;
+                            save_load_failures(lib, &load_failed);
                             last_error = e.to_string();
                         }
                         on(Event::Log(format!("{}: {last_error}; restarting CS2", o.match_id)));

@@ -61,6 +61,7 @@ fn stop_rendering(state: State<AppState>) {
 
 #[tauri::command]
 fn render_matches(state: State<AppState>, ids: Vec<String>) {
+    worker::asked();
     let _ = state.jobs.lock().unwrap().send(Job::Render(ids));
 }
 
@@ -296,6 +297,7 @@ fn library_changed(app: &tauri::AppHandle, lib: &std::path::Path, me: Option<u64
 /// Renders these clips as soon as CS2 is free: [[match id, clip id], ...].
 #[tauri::command]
 fn render_clips(state: State<AppState>, items: Vec<(String, String)>) {
+    worker::asked();
     let _ = state.jobs.lock().unwrap().send(Job::RenderClips(items));
 }
 
@@ -360,6 +362,7 @@ fn rerender_silent_clips(app: tauri::AppHandle, state: State<AppState>) -> usize
     let n = items.len();
     if n > 0 {
         library_changed(&app, &lib, me, true);
+        worker::asked();
         let _ = state.jobs.lock().unwrap().send(Job::RenderClips(items));
     }
     n
@@ -507,6 +510,7 @@ fn yes() -> bool {
 /// Film these grenade lineups' videos now.
 #[tauri::command]
 fn render_lineups(state: State<AppState>, ids: Vec<String>) {
+    worker::asked();
     let _ = state.jobs.lock().unwrap().send(Job::RenderLineups(ids));
 }
 
