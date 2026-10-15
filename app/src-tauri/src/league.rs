@@ -392,6 +392,216 @@ pub fn division(lib: &Path) -> Result<Value> {
 
 /// A match's stats, only what the division table uses: per map, its rounds, and each team's name
 /// and players' numbers.
+// ---- Scouting another league team ---------------------------------------------------------------
+
+/// Profile, seasons and players' recent form are read again after this long.
+const SCOUT_MAX_AGE_S: i64 = 6 * 3600;
+
+/// One league match as the scout keeps it: both teams (name, premade team id, roster), the map,
+/// the score, FACEIT's map-vote history and per-player stats. Finished matches never change, so
+/// each is read once (`scout_matches.json`, shared by every team scouted).
+fn scout_match(agent: &ureq::Agent, id: &str, league_stats: &Value) -> Result<Value> {
+    let pause = || std::thread::sleep(Duration::from_millis(1000));
+    let room = get_patient(agent, &format!("https://api.faceit.com/match/v2/match/{id}"))?;
+    pause();
+    let teams: serde_json::Map<String, Value> = room["teams"]
+        .as_object()
+        .map(|t| {
+            t.iter()
+                .map(|(faction, team)| {
+                    let roster: Vec<Value> = team["roster"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .map(|p| json!({ "id": p["id"], "nickname": p["nickname"], "avatar": p["avatar"], "steamid": p["gameId"], "elo": p["elo"], "level": p["gameSkillLevel"] }))
+                        .collect();
+                    (faction.clone(), json!({ "id": team["id"], "name": team["name"], "avatar": team["avatar"], "roster": roster }))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let score = room["results"][0]["factions"].clone();
+    let map = room["voting"]["map"]["pick"][0].clone();
+    let vetoes = match get_patient(agent, &format!("https://api.faceit.com/democracy/v1/match/{id}/history")) {
+        Ok(v) => v["tickets"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|t| t["entity_type"] == "map")
+            .flat_map(|t| t["entities"].as_array().cloned().unwrap_or_default())
+            .map(|e| json!({ "map": e["guid"], "status": e["status"], "round": e["round"], "by": e["selected_by"], "random": e["random"] }))
+            .collect::<Vec<_>>(),
+        Err(e) if e.downcast_ref::<Busy>().is_some() => return Err(e),
+        Err(_) => vec![],
+    };
+    pause();
+    let stats = if league_stats.get(id).is_some() {
+        league_stats[id].clone()
+    } else {
+        let s = get_patient(agent, &format!("https://api.faceit.com/stats/v1/stats/matches/{id}")).map(|v| slim(&v)).unwrap_or(json!([]));
+        pause();
+        s
+    };
+    Ok(json!({
+        "id": id,
+        "started": room["startedAt"],
+        "finished": room["finishedAt"],
+        "teams": teams,
+        "score": score,
+        "map": map,
+        "vetoes": vetoes,
+        "demo_urls": room["demoURLs"],
+        "stats": stats,
+    }))
+}
+
+/// Everything Veloxify can find out about another league team before you play them, from FACEIT's
+/// public pages: their profile and roster, every league season (division, record, placement),
+/// every league match (score, map, how the map vote went, each player's stats) and each player's
+/// last FACEIT matches. `scout/<team>.json` keeps the summary; matches are cached for good.
+pub fn scout(lib: &Path, team: &str) -> Result<Value> {
+    if team.is_empty() || !team.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        bail!("not a team id");
+    }
+    let dir = lib.join("scout");
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join(format!("{team}.json"));
+    let mut cache: Value = std::fs::read_to_string(&path).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_else(|| json!({}));
+    let now = chrono::Utc::now().timestamp();
+    let agent = agent();
+    let pause = || std::thread::sleep(Duration::from_millis(1000));
+    let fresh = cache["fetched_at"].as_i64().is_some_and(|t| now - t < SCOUT_MAX_AGE_S);
+    if !fresh {
+        cache["profile"] = get_patient(&agent, &format!("https://api.faceit.com/teams/v3/teams/{team}"))?;
+        pause();
+        cache["seasons"] = get_patient(&agent, &format!("https://api.faceit.com/team-leagues/v1/teams/{team}/profile/leagues/summary"))?;
+        pause();
+    }
+    // Every league match this team played, season by season.
+    let champs: Vec<String> = cache["seasons"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|l| l["league_seasons_info"].as_array().cloned().unwrap_or_default())
+        .flat_map(|s| s["season_standings"].as_array().cloned().unwrap_or_default())
+        .filter_map(|st| st["championship_id"].as_str().map(String::from))
+        .collect();
+    if !fresh {
+        let mut list = vec![];
+        for c in &champs {
+            for status in ["MATCH_STATUS_FINISHED", "MATCH_STATUS_SCHEDULED"] {
+                let url = format!("https://api.faceit.com/team-leagues/v2/matches?championship_ids={c}&entityId={team}&entityType=PREMADE_TEAM&status={status}&offset=0&limit=40");
+                if let Ok(v) = get_patient(&agent, &url) {
+                    list.extend(v.as_array().or_else(|| v["items"].as_array()).cloned().unwrap_or_default());
+                }
+                pause();
+            }
+        }
+        cache["league_matches"] = Value::Array(list);
+    }
+    // Each played match's details, once.
+    let mpath = lib.join("scout_matches.json");
+    let mut matches: Value = std::fs::read_to_string(&mpath).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_else(|| json!({}));
+    let league_stats: Value = std::fs::read_to_string(lib.join("league_matches.json")).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).map(|c| c["stats"].clone()).unwrap_or(json!({}));
+    let mut busy = false;
+    let played: Vec<String> = cache["league_matches"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|m| m["status"] == "MATCH_STATUS_FINISHED" && !m["started_time"].as_str().unwrap_or("1970").starts_with("1970"))
+        .filter_map(|m| m["id"].as_str().map(String::from))
+        .collect();
+    for id in &played {
+        if matches.get(id).is_some() {
+            continue;
+        }
+        match scout_match(&agent, id, &league_stats) {
+            Ok(v) => {
+                matches[id.as_str()] = v;
+                let _ = std::fs::write(&mpath, serde_json::to_string(&matches)?);
+            }
+            Err(e) if e.downcast_ref::<Busy>().is_some() => {
+                busy = true;
+                break;
+            }
+            Err(_) => {}
+        }
+    }
+    // Each current player's last FACEIT matches (maps, results, K/D): their form and favorite maps.
+    if !fresh && !busy {
+        let mut form = serde_json::Map::new();
+        let members = cache["profile"]["members"].as_array().cloned().unwrap_or_default();
+        for p in members.iter().take(10) {
+            let Some(uid) = p["id"].as_str() else { continue };
+            match get_patient(&agent, &format!("https://api.faceit.com/stats/v1/stats/time/users/{uid}/games/cs2?page=0&size=30")) {
+                Ok(v) => {
+                    let games: Vec<Value> = v
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .map(|g| json!({ "map": g["i1"], "won": g["i10"], "kills": g["i6"], "deaths": g["i8"], "kd": g["c2"], "adr": g["c10"], "hs": g["c4"], "elo": g["elo"], "date": g["date"], "mode": g["gameMode"], "competition": g["competitionName"] }))
+                        .collect();
+                    form.insert(uid.to_string(), Value::Array(games));
+                }
+                Err(e) if e.downcast_ref::<Busy>().is_some() => {
+                    busy = true;
+                    break;
+                }
+                Err(_) => {}
+            }
+            pause();
+        }
+        if !form.is_empty() {
+            cache["form"] = Value::Object(form);
+        }
+        if !busy {
+            cache["fetched_at"] = json!(now);
+        }
+    }
+    let _ = std::fs::write(&path, serde_json::to_string(&cache)?);
+    let mut out = cache.clone();
+    out["team_id"] = json!(team);
+    out["matches"] = Value::Array(played.iter().filter_map(|id| matches.get(id).cloned()).collect());
+    if busy {
+        out["busy"] = json!(true);
+    }
+    Ok(out)
+}
+
+/// The team's rounds in each of its league demos that's downloaded (in `demos`): CT setups, T
+/// sites and plants by kind of round (see `cs2hl_core::scouting`). Each demo is read once
+/// (`scout/demo_<match>.json`). Heavy (a demo takes a few seconds): never while CS2 is open.
+pub fn scout_demos(lib: &Path, team: &str, demos: &Path) -> Result<Value> {
+    let matches: Value = std::fs::read_to_string(lib.join("scout_matches.json")).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_else(|| json!({}));
+    let files: Vec<std::path::PathBuf> = std::fs::read_dir(demos).map(|d| d.flatten().map(|e| e.path()).collect()).unwrap_or_default();
+    let mut out = vec![];
+    for (id, m) in matches.as_object().into_iter().flatten() {
+        let Some(side) = m["teams"].as_object().and_then(|t| t.values().find(|t| t["id"].as_str() == Some(team))) else { continue };
+        let Some(file) = files.iter().find(|f| f.file_name().is_some_and(|n| n.to_string_lossy().starts_with(&format!("{id}-1-")))) else { continue };
+        let cache = lib.join("scout").join(format!("demo_{id}.json"));
+        if let Some(v) = std::fs::read_to_string(&cache).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).filter(|v| v["version"] == json!(cs2hl_core::scouting::VERSION) && v["team"] == json!(team)) {
+            out.push(v);
+            continue;
+        }
+        if crate::system::cs2_running() {
+            bail!("close CS2 first: reading demos is heavy");
+        }
+        let sids: Vec<u64> = side["roster"].as_array().into_iter().flatten().filter_map(|p| p["steamid"].as_str().and_then(|s| s.parse().ok())).collect();
+        let demo = cs2hl_core::demo_io::read_demo(file)?;
+        match cs2hl_core::scouting::team_rounds(&demo, &sids) {
+            Ok(mut v) => {
+                v["team"] = json!(team);
+                v["match_id"] = json!(id);
+                v["started"] = m["started"].clone();
+                let _ = std::fs::write(&cache, serde_json::to_string(&v)?);
+                out.push(v);
+            }
+            Err(e) => out.push(json!({ "match_id": id, "error": e.to_string() })),
+        }
+    }
+    Ok(Value::Array(out))
+}
+
 fn slim(v: &Value) -> Value {
     let maps: Vec<Value> = v
         .as_array()

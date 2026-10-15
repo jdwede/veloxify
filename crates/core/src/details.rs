@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
 /// Bumped whenever what's in a details file changes, so older ones are rebuilt.
-pub const VERSION: u32 = 14;
+pub const VERSION: u32 = 15;
 
 /// Spotted state is sampled every this many ticks.
 const SPOT_STEP: i32 = 2;
@@ -25,6 +25,23 @@ const SPOT_GAP: i32 = 16;
 /// Time to damage longer than this is a held angle ("trigger discipline"), not aim: excluded
 /// (Leetify drops engagements over 1 s).
 const TTD_MAX_MS: f64 = 1000.0;
+
+/// The name a gun's damage goes under: CS2's damage events use the base item for the
+/// alternatives in a slot (the M4A1-S's damage says "m4a1", the USP-S's "hkp2000").
+pub fn base_weapon(w: &str) -> &str {
+    match w {
+        "m4a1_silencer" | "m4a1_silencer_off" => "m4a1",
+        "usp_silencer" | "usp_silencer_off" => "hkp2000",
+        "revolver" => "deagle",
+        "cz75a" => "p250",
+        "mp5sd" => "mp7",
+        w => w,
+    }
+}
+/// Crosshair placement counts the crosshair's travel over at most this long (a second).
+const CP_MAX_TICKS: i32 = 64;
+/// How far (ticks) a damage event and the shot it came from can be apart in the demo.
+const HIT_LINK_TICKS: i32 = 2;
 /// A flash counts as flashing someone from 1.1 s of blindness (Leetify).
 const FLASH_MIN_S: f32 = 1.1;
 /// Kills that took longer than this from the first hit don't count for time to kill (Leetify).
@@ -961,19 +978,24 @@ pub fn build(demo: &[u8], m: &Match, a: &Analysis, me: u64) -> Result<MatchDetai
         let start = r.live_tick - r.live_tick.rem_euclid(SPOT_STEP);
         spot_ticks.extend((start..=r.end_tick).step_by(SPOT_STEP as usize));
     }
-    let spotted = raw::players_values(demo, &["approximate_spotted_by"], &spot_ticks)?;
-    // seen[(observer, tick)] = enemies the observer had spotted then.
+    // seen[(observer, tick)] = enemies the observer could see then: from the map's geometry (line of
+    // sight, as Leetify judges it) when CS2's map files are there, else CS2's own spotted flag (which
+    // lags and lingers).
     let mut seen: HashMap<(u64, i32), Vec<u64>> = HashMap::new();
-    for ((target, tick), vals) in &spotted {
-        if let Some(Val::Ids(by)) = vals.get("approximate_spotted_by") {
-            for &obs in by {
-                if obs != *target && enemies(obs, *target) {
-                    seen.entry((obs, *tick)).or_default().push(*target);
+    if let Some(geo) = crate::mapgeo::for_map(&m.map) {
+        seen = crate::sight::seen(demo, m, &geo, &spot_ticks, crate::sight::Options::default())?;
+    } else {
+        let spotted = raw::players_values(demo, &["approximate_spotted_by"], &spot_ticks)?;
+        for ((target, tick), vals) in &spotted {
+            if let Some(Val::Ids(by)) = vals.get("approximate_spotted_by") {
+                for &obs in by {
+                    if obs != *target && enemies(obs, *target) {
+                        seen.entry((obs, *tick)).or_default().push(*target);
+                    }
                 }
             }
         }
     }
-    drop(spotted);
     let spot_at = |obs: u64, tick: i32| seen.get(&(obs, tick - tick.rem_euclid(SPOT_STEP)));
     let has_spotted = |obs: u64, tick: i32| spot_at(obs, tick).is_some_and(|v| !v.is_empty());
 
@@ -1040,7 +1062,8 @@ pub fn build(demo: &[u8], m: &Match, a: &Analysis, me: u64) -> Result<MatchDetai
             }
         }
     }
-    // A hit belongs to the shooter's latest shot of that gun at most 2 ticks earlier.
+    // A hit belongs to the shooter's shot of that gun nearest in time that hasn't hit yet (CS2 can
+    // log the shot a few ticks either side of the damage).
     let mut first_hit: HashMap<(u64, u64, i32), i32> = HashMap::new(); // (obs, target, engagement start) -> tick
     for d in &m.damages {
         let Some(att) = d.attacker else { continue };
@@ -1049,9 +1072,16 @@ pub fn build(demo: &[u8], m: &Match, a: &Analysis, me: u64) -> Result<MatchDetai
             continue;
         }
         if let Some(list) = shots.get_mut(&att) {
-            let i = list.partition_point(|s| s.tick <= d.tick);
-            if let Some(s) = list[..i].iter_mut().rev().find(|s| s.weapon == w && d.tick - s.tick <= 2) {
-                s.hit = true;
+            let lo = list.partition_point(|s| s.tick < d.tick - HIT_LINK_TICKS);
+            let hi = list.partition_point(|s| s.tick <= d.tick + HIT_LINK_TICKS);
+            let pick = list[lo..hi]
+                .iter()
+                .enumerate()
+                .filter(|(_, s)| base_weapon(&s.weapon) == base_weapon(w))
+                .min_by_key(|(_, s)| (s.hit, (s.tick - d.tick).abs()))
+                .map(|(i, _)| lo + i);
+            if let Some(i) = pick {
+                list[i].hit = true;
             }
         }
         if let Some((start, _)) = engagement_at(att, d.victim, d.tick) {
@@ -1220,7 +1250,8 @@ pub fn build(demo: &[u8], m: &Match, a: &Analysis, me: u64) -> Result<MatchDetai
         for sh in list {
             aim.shots += 1;
             aim.hits += sh.hit as u32;
-            let spotted_now = has_spotted(s, sh.tick);
+            // A shot that hit counts as at a spotted enemy (as Leetify counts it).
+            let spotted_now = has_spotted(s, sh.tick) || sh.hit;
             if spotted_now {
                 aim.spotted_shots += 1;
                 aim.spotted_hits += sh.hit as u32;
@@ -1277,18 +1308,48 @@ pub fn build(demo: &[u8], m: &Match, a: &Analysis, me: u64) -> Result<MatchDetai
         // Time to damage and crosshair placement, per engagement with a hit.
         let mut ttd = vec![];
         let mut xhair = vec![];
-        for (&(obs, target, start), &hit) in first_hit.iter().filter(|((o, _, _), _)| *o == s) {
-            let _ = target;
-            let ms = (hit - start) as f64 / TICKRATE * 1000.0;
-            if ms <= TTD_MAX_MS {
-                ttd.push(ms);
+        // Crosshair placement: how far the crosshair traveled (every tick's view change added up) from
+        // first seeing the enemy to first damaging them, in fights decided within a second (up to a
+        // second of it), as Leetify's numbers come out.
+        let fights: Vec<(i32, i32)> = first_hit
+            .iter()
+            .filter(|((o, _, _), _)| *o == s)
+            .map(|(&(_, _, start), &hit)| (start, hit))
+            .filter(|&(start, hit)| ((hit - start) as f64 / TICKRATE * 1000.0) <= TTD_MAX_MS)
+            .collect();
+        let path_angles: HashMap<i32, (f64, f64)> = {
+            let mut ticks: Vec<i32> = fights.iter().flat_map(|&(start, hit)| start..=hit.min(start + CP_MAX_TICKS)).collect();
+            ticks.sort_unstable();
+            ticks.dedup();
+            if ticks.is_empty() {
+                HashMap::new()
+            } else {
+                raw::players_table(demo, &[s], &["pitch", "yaw"], &ticks)
+                    .ok()
+                    .and_then(|mut t| t.remove(&s))
+                    .map(|rows| rows.into_iter().filter(|(_, v)| v[0].is_finite() && v[1].is_finite()).map(|(t, v)| (t, (v[0] as f64, v[1] as f64))).collect())
+                    .unwrap_or_default()
             }
-            if let (Some(a0), Some(a1)) = (angles(obs, start), angles(obs, hit)) {
-                xhair.push(view_angle(a0, a1));
+        };
+        for &(start, hit) in &fights {
+            ttd.push((hit - start) as f64 / TICKRATE * 1000.0);
+            let mut total = 0.0;
+            let mut prev: Option<(f64, f64)> = None;
+            for t in start..=hit.min(start + CP_MAX_TICKS) {
+                if let Some(&a) = path_angles.get(&t) {
+                    if let Some(p) = prev {
+                        total += view_angle(p, a);
+                    }
+                    prev = Some(a);
+                }
+            }
+            if prev.is_some() {
+                xhair.push(total);
             }
         }
         aim.ttd_n = ttd.len() as u32;
-        aim.ttd_ms = (!ttd.is_empty()).then(|| ttd.iter().sum::<f64>() / ttd.len() as f64);
+        // The median, as Leetify reports it.
+        aim.ttd_ms = median(ttd);
         aim.crosshair_n = xhair.len() as u32;
         aim.crosshair_deg = median(xhair);
         // Time to kill: spotted -> kill, unless the kill took over 5 s from the first hit.

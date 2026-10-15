@@ -307,6 +307,49 @@ pub fn players_series(demo: &[u8], steamids: &[u64], props: &[&str], ticks: &[i3
     Ok(result)
 }
 
+/// Like [`players_series`] but compact, for long stretches of ticks: per player, each tick's values
+/// in `props` order (up to 8 scalar props; NaN where the demo has none).
+pub fn players_table(demo: &[u8], steamids: &[u64], props: &[&str], ticks: &[i32]) -> Result<HashMap<u64, Vec<(i32, [f32; 8])>>> {
+    let (real, names) = friendly_to_real(props)?;
+    let out = run(demo, |i| {
+        i.wanted_player_props = real;
+        i.real_name_to_og_name = names;
+        i.wanted_ticks = ticks.to_vec();
+        i.wanted_players = steamids.to_vec();
+    })?;
+    let cols: Vec<Option<u32>> = props
+        .iter()
+        .take(8)
+        .map(|name| out.prop_controller.prop_infos.iter().find(|p| p.prop_friendly_name == *name).map(|p| p.id))
+        .collect();
+    let (Some(VarVec::U64(sids)), Some(VarVec::I32(row_ticks))) = (
+        out.df.get(&STEAMID_ID).and_then(|c| c.data.as_ref()),
+        out.df.get(&TICK_ID).and_then(|c| c.data.as_ref()),
+    ) else {
+        return Ok(HashMap::new());
+    };
+    let mut result: HashMap<u64, Vec<(i32, [f32; 8])>> = HashMap::new();
+    for (row, (sid, tick)) in sids.iter().zip(row_ticks).enumerate() {
+        let (Some(sid), Some(tick)) = (sid, tick) else { continue };
+        if !steamids.contains(sid) {
+            continue;
+        }
+        let mut vals = [f32::NAN; 8];
+        for (k, col) in cols.iter().enumerate() {
+            if let Some(data) = col.and_then(|id| out.df.get(&id)).and_then(|c| c.data.as_ref()) {
+                if let Some(v) = num_at(data, row) {
+                    vals[k] = v as f32;
+                }
+            }
+        }
+        result.entry(*sid).or_default().push((*tick, vals));
+    }
+    for v in result.values_mut() {
+        v.sort_by_key(|(t, _)| *t);
+    }
+    Ok(result)
+}
+
 /// A thrown grenade's position at a tick: which projectile (entity), whose, its class
 /// (`CSmokeGrenadeProjectile`, `CMolotovProjectile`, `CFlashbangProjectile`, `CHEGrenadeProjectile`,
 /// `CDecoyProjectile`) and where it is.

@@ -556,6 +556,22 @@ async fn league_division(state: State<'_, AppState>) -> Result<serde_json::Value
     tauri::async_runtime::spawn_blocking(move || league::division(&lib)).await.map_err(|e| e.to_string())?.map_err(|e| e.to_string())
 }
 
+/// Another league team, scouted from FACEIT (profile, seasons, league matches with map votes and
+/// stats, players' recent form). Takes a minute the first time.
+#[tauri::command]
+async fn league_scout(state: State<'_, AppState>, team_id: String) -> Result<serde_json::Value, String> {
+    let lib = state.settings.lock().unwrap().library_dir.clone();
+    tauri::async_runtime::spawn_blocking(move || league::scout(&lib, &team_id)).await.map_err(|e| e.to_string())?.map_err(|e| e.to_string())
+}
+
+/// The scouted team's setups and strategies from their downloaded demos (each read once).
+#[tauri::command]
+async fn scout_demos(state: State<'_, AppState>, team_id: String) -> Result<serde_json::Value, String> {
+    let lib = state.settings.lock().unwrap().library_dir.clone();
+    let demos = demos::demos_dir();
+    tauri::async_runtime::spawn_blocking(move || league::scout_demos(&lib, &team_id, &demos)).await.map_err(|e| e.to_string())?.map_err(|e| e.to_string())
+}
+
 /// Everyone's FACEIT ELO and level in a FACEIT match (cached).
 #[tauri::command]
 async fn faceit_roster(state: State<'_, AppState>, match_id: String) -> Result<std::collections::HashMap<String, players::FaceitPlayer>, String> {
@@ -595,6 +611,18 @@ fn main() {
         let out = args.get(i + 1).map(PathBuf::from).unwrap_or_else(|| std::env::temp_dir().join("veloxify-premier.json"));
         std::process::exit(premier::helper_main(&out));
     }
+    // `veloxify --scout <team id> <out.json>`: the scouting report's data for a league team (for
+    // troubleshooting), without starting the app.
+    if let Some(i) = args.iter().position(|a| a == "--scout") {
+        let lib = Settings::load().library_dir;
+        let out = args.get(i + 2).map(PathBuf::from).unwrap_or_else(|| std::env::temp_dir().join("veloxify-scout.json"));
+        let result = league::scout(&lib, args.get(i + 1).map(String::as_str).unwrap_or_default());
+        let _ = std::fs::write(&out, match result {
+            Ok(v) => serde_json::to_string_pretty(&v).unwrap_or_default(),
+            Err(e) => format!("{{\"error\": {:?}}}", e.to_string()),
+        });
+        return;
+    }
     if let Some(i) = args.iter().position(|a| a == "--extract-radars") {
         let lib = Settings::load().library_dir;
         let maps: Vec<String> = args[i + 1..].to_vec();
@@ -602,6 +630,10 @@ fn main() {
         let _ = std::fs::write(lib.join("radars").join("extract.log"), format!("{result:?}
 "));
         return;
+    }
+    // Line of sight in the aim stats comes from CS2's own map files.
+    if let Ok(csgo) = cs2hl_render::steam::cs2_csgo_dir() {
+        cs2hl_core::mapgeo::set_csgo_dir(csgo);
     }
     let settings = Arc::new(Mutex::new(Settings::load()));
     let status = Arc::new(Mutex::new(Status { state: "idle".into(), message: "Starting".into(), ..Default::default() }));
@@ -657,6 +689,8 @@ fn main() {
             open_link,
             save_debug_log,
             league_division,
+            league_scout,
+            scout_demos,
             silent_audio_device,
             rerender_silent_clips,
             save_callouts,

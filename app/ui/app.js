@@ -311,6 +311,10 @@ async function route() {
     document.querySelector('[data-nav="league"]').classList.add("active");
     return renderLeague(view);
   }
+  if (parts[0] === "scout" && parts[1]) {
+    document.querySelector('[data-nav="league"]')?.classList.add("active");
+    return renderScout(view, decodeURIComponent(parts[1]));
+  }
   if (parts[0] === "ratings") {
     document.querySelector('[data-nav="profile"]').classList.add("active");
     return renderRatingBuilder(view, parts[1] ? decodeURIComponent(parts[1]) : null);
@@ -988,8 +992,35 @@ function ratingFrom(keys, stats) {
   return zs.length >= Math.ceil(keys.length / 2) ? Math.round(phi(zs.reduce((a, b) => a + b, 0) / zs.length) * 100) : null;
 }
 const AIM_RATING_KEYS = ["spotted_accuracy", "ttd_ms", "ttk_ms", "crosshair_deg", "head_accuracy", "hs_kill_pct", "first_bullet", "spray_accuracy", "counter_strafe"];
+// Leetify's Aim rating, as reproduced from their published averages and your matches: the six aim
+// stats against Leetify's average player, equally weighted (Accuracy, all shots, isn't counted),
+// as 0-100 where 50 is average. One match is judged against how much single matches vary; a
+// period's matches together (their round-weighted averages) against how much players' averages vary.
+// [stat, average, spread per match, spread of many-match averages, lower is better]
+const LEETIFY_AIM = [
+  ["spotted_accuracy", 33, 7.12, 7.3, false], ["ttd_ms", 641, 106.1, 51, true], ["crosshair_deg", 10.19, 3.17, 1.47, true],
+  ["head_accuracy", 19, 8.96, 5.8, false], ["spray_accuracy", 34, 14.04, 4.9, false], ["counter_strafe", 76, 8.57, 7.5, false],
+];
+function leetifyAim(stats, many = false) {
+  if (!stats) return null;
+  const zs = LEETIFY_AIM.filter(([k]) => stats[k] != null && Number.isFinite(stats[k])).map(([k, mu, sd1, sdN, lower]) => ((stats[k] - mu) / (many ? sdN : sd1)) * (lower ? -1 : 1));
+  return zs.length >= 4 ? Math.round(phi(zs.reduce((a, b) => a + b, 0) / zs.length) * 100) : null;
+}
+// Round-weighted averages of several matches' stats (my_stats.json rows: { rounds, stats }).
+function meanStats(rows) {
+  const sums = {}, ws = {};
+  for (const r of rows) {
+    const w = r.rounds || 1;
+    for (const [k, v] of Object.entries(r.stats || {})) {
+      if (typeof v !== "number" || !Number.isFinite(v)) continue;
+      sums[k] = (sums[k] || 0) + v * w;
+      ws[k] = (ws[k] || 0) + w;
+    }
+  }
+  return Object.fromEntries(Object.keys(sums).map((k) => [k, sums[k] / ws[k]]));
+}
 const QUALITY_KEYS = ["flash_assist_pct", "enemies_per_flash", "friends_per_flash", "blind_time", "he_damage_avg", "he_team_damage_avg"];
-const aimRating = (s) => ratingFrom(AIM_RATING_KEYS, s);
+const aimRating = (s) => leetifyAim(s);
 // Leetify's published Quantity formula; Quality is the flash/HE stats against your library.
 const quantityRating = (s) => (s.nades_per_round == null ? null : Math.round(Math.min(100, (s.nades_per_round / 3) ** (2 / 3) * 100)));
 const qualityRating = (s) => ratingFrom(QUALITY_KEYS, s);
@@ -1073,10 +1104,10 @@ const ms0 = (v) => `${Math.round(v)}ms`;
 const deg2 = (v) => `${v.toFixed(2)}°`;
 
 const AIM_COLS = [
-  { key: "aim_rating", label: "Aim Rating", tip: "Your aim stats against every player in your library (50 = average). Accuracy (All) isn't counted.",
+  { key: "aim_rating", label: "Aim Rating", tip: "Leetify's Aim rating, reproduced: spotted accuracy, time to damage, crosshair placement, head accuracy, spray accuracy and counter-strafing, equally weighted against Leetify's average player (50 = average). Accuracy (All) isn't counted.",
     value: (r) => aimRating(r.s), cell: (r) => `<td>${ratingChip(aimRating(r.s))}</td>` },
   { key: "spotted_accuracy", label: "Spotted Accuracy", tip: "When you were firing at a spotted enemy, how many of those shots hit. All hits divided by all shots at the spotted enemy.", value: (r) => r.s.spotted_accuracy, cell: statCell("spotted_accuracy", pct0) },
-  { key: "ttd_ms", label: "Time to Damage", lower: true, tip: "Average time from seeing an enemy to first damaging them. Waits over 1 s (holding an angle) are excluded. Not reaction time: it includes accuracy, crosshair placement and fire rate.", value: (r) => r.s.ttd_ms, cell: statCell("ttd_ms", ms0) },
+  { key: "ttd_ms", label: "Time to Damage", lower: true, tip: "Median time from first seeing an enemy to first damaging them. Waits over 1 s (holding an angle) are excluded. Not reaction time: it includes accuracy, crosshair placement and fire rate.", value: (r) => r.s.ttd_ms, cell: statCell("ttd_ms", ms0) },
   { key: "ttk_ms", label: "Time to Kill", lower: true, tip: "Median time from seeing an enemy to killing them. Kills that took over 5 s from the first hit are ignored.", value: (r) => r.s.ttk_ms, cell: statCell("ttk_ms", ms0) },
   { key: "crosshair_deg", label: "Cross. Placement", lower: true, tip: "Median angle your crosshair moved from first seeing an enemy until the first hit on them. Lower is better.", value: (r) => r.s.crosshair_deg, cell: statCell("crosshair_deg", deg2) },
   { key: "head_accuracy", label: "Head Accuracy", tip: "Hits on enemies that were in the head, divided by all hits on enemies. AWP shots excluded.", value: (r) => r.s.head_accuracy, cell: statCell("head_accuracy", pct0) },
@@ -1853,7 +1884,7 @@ const STAT_GROUPS = ["Overall", "Aim", "Movement", "Utility", "Activity"];
 
 // Ratings you build yourself: weighted stats, each against every player in your library.
 const DEFAULT_RATINGS = [
-  { id: "aim", name: "Aim", parts: { spotted_accuracy: 15, ttd_ms: 15, crosshair_deg: 15, head_accuracy: 10, first_bullet: 10, spray_accuracy: 10, ttk_ms: 10, counter_strafe: 10, hs_kill_pct: 5 } },
+  { id: "aim", name: "Aim", leetify: true, parts: { spotted_accuracy: 1, ttd_ms: 1, crosshair_deg: 1, head_accuracy: 1, spray_accuracy: 1, counter_strafe: 1 } },
   { id: "movement", name: "Movement", parts: { first_stop: 35, counter_strafe: 30, stop_ms: 20, air_shot_pct: 15 } },
   { id: "utility", name: "Utility", parts: { nades_per_round: 20, flash_assist_pct: 15, enemies_per_flash: 15, he_damage_avg: 15, blind_time: 10, friends_per_flash: 10, unused_utility: 10, he_team_damage_avg: 5 } },
   { id: "impact", name: "Impact", parts: { swing: 30, adr: 20, entry_success: 15, multikill_pr: 15, kast: 10, clutch_wins: 10 } },
@@ -1863,11 +1894,14 @@ try { customRatings = JSON.parse(localStorage.getItem("veloxify.ratings") || "nu
 // Movement used to count every gun's shots (SMGs and pistols are run-and-gun): an unedited one
 // moves to the stop stats.
 customRatings = customRatings.map((r) => (r.id === "movement" && JSON.stringify(r.parts) === JSON.stringify({ counter_strafe: 40, accurate_movement: 30, air_shot_pct: 20, air_accuracy: 10 }) ? DEFAULT_RATINGS[1] : r));
+// The old Aim rating (unedited) becomes Leetify's.
+customRatings = customRatings.map((r) => (r.id === "aim" && JSON.stringify(r.parts) === JSON.stringify({ spotted_accuracy: 15, ttd_ms: 15, crosshair_deg: 15, head_accuracy: 10, first_bullet: 10, spray_accuracy: 10, ttk_ms: 10, counter_strafe: 10, hs_kill_pct: 5 }) ? DEFAULT_RATINGS[0] : r));
 const saveRatings = () => { try { localStorage.setItem("veloxify.ratings", JSON.stringify(customRatings)); } catch (e) { /* not saved */ } };
 
 // A custom rating for one set of stats: the weighted average standard score, as 0-100 (50 = the
 // average player in your library). Needs at least half the weight to have data.
 function customRating(r, stats) {
+  if (r.leetify) return leetifyAim(stats);
   let sum = 0, w = 0, total = 0;
   for (const [k, weight] of Object.entries(r.parts)) {
     if (!(weight > 0)) continue;
@@ -2079,6 +2113,8 @@ async function renderMyRatings(el) {
   const list = my.filter((m) => prof.source === "all" || m.source === prof.source);
   const sel = prof.last ? list.slice(-prof.last) : list;
   const avg = (r) => {
+    // Leetify's Aim over a period: the period's average stats, judged as a whole.
+    if (r.leetify) return leetifyAim(meanStats(sel), sel.length > 1);
     const v = sel.map((m) => customRating(r, m.stats)).filter((x) => x != null);
     return v.length ? v.reduce((a, b) => a + b, 0) / v.length : null;
   };
@@ -2142,7 +2178,8 @@ async function renderRatingBuilder(view, id) {
         <div class="rb-add"><select id="rb-add"><option value="">+ Add a stat…</option>${STAT_GROUPS.map((g) => `<optgroup label="${g}">${STAT_CATALOG.filter((s) => s[2] === g && !used.has(s[0])).map(([k, label]) => `<option value="${k}">${esc(label)}</option>`).join("")}</optgroup>`).join("")}</select></div>
       </section>` : `<section class="panel rb-edit"><div class="empty">No ratings. Make one with + New rating.</div></section>`}
     </div>`;
-  const rerender = () => { saveRatings(); renderRatingBuilder(view, editingRating); };
+  // Edited: no longer Leetify's formula (it takes your weights and the library's averages).
+  const rerender = () => { if (r?.leetify) delete r.leetify; saveRatings(); renderRatingBuilder(view, editingRating); };
   view.querySelectorAll("[data-pick]").forEach((b) => (b.onclick = () => { editingRating = b.dataset.pick; location.hash = `#/ratings/${encodeURIComponent(editingRating)}`; }));
   view.querySelector("#rb-new").onclick = () => {
     const nid = `r${Date.now().toString(36)}`;
@@ -3065,6 +3102,8 @@ function closePlayer() {
 const PROFILE_DEFAULTS = { last: 30, source: "all" };
 let prof = { ...PROFILE_DEFAULTS };
 try { prof = { ...PROFILE_DEFAULTS, ...JSON.parse(localStorage.getItem("veloxify.profile") || "{}") }; } catch (e) { /* defaults */ }
+// FACEIT and Premier have their own sections now: everything else covers all your matches.
+prof.source = "all";
 const WIN = "#3aa58f", LOSS = "#e2445f"; // validated pair on the #161616 card (CVD-safe)
 
 // Rating bands (HLTV-style scale, 1.00 = average).
@@ -6241,8 +6280,10 @@ async function renderLeague(view) {
   const st = L.standing || {};
   const me = state.index.me;
   const pl = st.placement || {};
-  const place = pl.left ? (pl.left === pl.right ? `#${pl.left}` : `#${pl.left}–${pl.right}`) : "";
   const mine = L.standings.find((t) => t.premade_team_id === L.team_id);
+  const place = mine ? (mine.rank_start === mine.rank_end || !mine.rank_end ? `#${mine.rank_start}` : `#${mine.rank_start}–${mine.rank_end}`)
+    : pl.left ? (pl.right && pl.right !== pl.left ? `#${pl.left}–${pl.right}` : `#${pl.left}`) : "";
+  const standingOf = (premade) => L.standings.find((t) => t.premade_team_id === premade);
   const rosterIds = new Set((L.roster || []).map((r) => r.user_id));
   const when = (iso) => { if (!iso) return ""; const d = new Date(iso); return `${d.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })} ${d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })}`; };
   const roleOf = (r) => ({ player: "Player", substitute: "Sub", coach: "Coach" }[r.game_role] || r.game_role || "");
@@ -6250,19 +6291,37 @@ async function renderLeague(view) {
 
   // Your league matches: played (linked to the match page when the demo is in your library) and coming up.
   const libIds = new Set(state.all.map((m) => m.id));
+  const opponent = (them) => {
+    const t = standingOf(them.premade_team_id);
+    return `<span class="lg-opp">${t?.avatar_url ? `<img class="lg-tav" src="${esc(t.avatar_url)}" alt="">` : `<span class="lg-tav none"></span>`}<span><b>${esc(them.name || "TBD")}</b>${t ? `<small>${t.won || 0}-${t.lost || 0} · #${t.rank_start}</small>` : ""}</span></span>`;
+  };
+  const scoutBtn = (them, big) => (them.premade_team_id ? `<a class="btn ${big ? "primary" : "ghost small"} lg-scout" href="#/scout/${esc(them.premade_team_id)}" title="Their record, maps, map bans, players and demos">${ICONS.star} Analyze team</a>` : "");
   const matchRow = (g, done) => {
     const us = g.factions.find((f) => f.premade_team_id === L.team_id) || {};
     const them = g.factions.find((f) => f.premade_team_id !== L.team_id) || {};
     const id = `faceit-${g.id.replace(/^1-/, "")}-m1`;
+    const forfeit = (g.started_time || "").startsWith("1970");
     const won = done && g.winning_team_premade_id === L.team_id;
     const map = g.maps_picked?.[0]?.name || "";
+    const mapId = map ? `de_${map.toLowerCase().replace(/\s+/g, "")}` : "";
     const href = libIds.has(id) ? matchHref(id) : null;
-    return `<${href ? `a href="${href}"` : "div"} class="lg-match ${done ? (won ? "win" : "loss") : "next"}">
-      <span class="lg-when">${when(done ? g.started_time || g.scheduled_time : g.scheduled_time)}</span>
-      <span class="lg-vs">vs <b>${esc(them.name || "TBD")}</b></span>
-      ${done ? `<span class="lg-score"><b class="${won ? "up" : "down"}">${us.match_score ?? ""}</b>:${them.match_score ?? ""}</span><span class="lg-map">${esc(map)}</span>` : `<span class="lg-score sub">Upcoming</span><span></span>`}
+    if (!done) {
+      const at = new Date(g.scheduled_time);
+      return `<div class="lg-match next">
+        <span class="lg-when"><span class="lg-next">Upcoming</span><b class="lg-count" data-at="${at.getTime()}">${countdown(at.getTime())}</b><small>${when(g.scheduled_time)}</small></span>
+        ${opponent(them)}
+        ${scoutBtn(them, true)}
+      </div>`;
+    }
+    return `<${href ? `a href="${href}"` : "div"} class="lg-match ${won ? "win" : "loss"}">
+      <span class="lg-when">${fcDate(new Date(forfeit ? g.scheduled_time : g.started_time || g.scheduled_time))}</span>
+      <span class="ml-score"><span class="wl ${won ? "win" : "loss"}">${won ? "W" : "L"}</span><span><b class="${won ? "win" : "loss"}">${us.match_score ?? ""}</b> : <span class="theirs">${them.match_score ?? ""}</span></span>${forfeit ? `<small class="sub">forfeit</small>` : ""}</span>
+      ${opponent(them)}
+      <span class="lg-map">${map ? `${mapIcon(mapId)}<span>${esc(map)}</span>` : ""}</span>
+      ${scoutBtn(them, false)}
     </${href ? "a" : "div"}>`;
   };
+  const finished = [...(L.finished || [])].sort((a, b) => new Date(b.started_time || b.scheduled_time) - new Date(a.started_time || a.scheduled_time));
 
   // Your team's stats from the league demos in your library (the session scoreboard's numbers).
   const leagueMatches = state.all.filter((m) => leagueOf(m.faceit?.competition)?.season === leagueOf(L.competition)?.season && leagueOf(m.faceit?.competition));
@@ -6316,7 +6375,7 @@ async function renderLeague(view) {
         <div class="lg-roster">${(L.roster || []).map((r) => `<div class="lg-member">${r.avatar_img ? `<img src="${esc(r.avatar_img)}" alt="">` : `<span class="lg-noav"></span>`}
           <div><b>${esc(r.user_name)}</b><span>${roleOf(r)}${rankOf(r) ? ` · ${rankOf(r)}` : ""}</span></div></div>`).join("")}</div></section>
       <section class="panel"><div class="panel-head"><div class="h3">League matches</div></div>
-        <div class="lg-matches">${(L.scheduled || []).map((g) => matchRow(g, false)).join("")}${(L.finished || []).map((g) => matchRow(g, true)).join("") || `<div class="empty small">No league matches played yet.</div>`}</div></section>
+        <div class="lg-matches">${(L.scheduled || []).map((g) => matchRow(g, false)).join("")}${finished.map((g) => matchRow(g, true)).join("") || `<div class="empty small">No league matches played yet.</div>`}</div></section>
     </div>
     <section class="panel lg-section"><div class="panel-head"><div class="h3">Team stats</div><span class="grow"></span><span class="sub">From ${withDemo.length} of ${leagueMatches.length} league match${leagueMatches.length === 1 ? "" : "es"} with a demo in your library</span></div>
       ${team.length ? `<div class="table-wrap"><table class="lg-table"><thead><tr>${TCOLS.map(([k, t]) => `<th data-tsort="${k}" class="${leagueView.teamSort === k ? "on" : ""} ${k === "name" ? "left" : ""}">${t}${leagueView.teamSort === k ? (leagueView.teamDesc ? " ↓" : " ↑") : ""}</th>`).join("")}</tr></thead>
@@ -6330,10 +6389,265 @@ async function renderLeague(view) {
     <div class="note">Standings and match stats from FACEIT's public league pages, refreshed every 20 minutes (or with Refresh). Team stats come from your own demos: HLTV Rating 3.0, RWS and Swing the same way as the rest of Veloxify.</div>`;
 
   view.querySelector("#lg-refresh").onclick = async (e) => { e.target.disabled = true; e.target.textContent = "Refreshing…"; await loadLeague(true); renderLeague(view); };
+  tickCountdowns(view);
+  view.querySelectorAll(".lg-scout").forEach((b) => b.addEventListener("click", (e) => e.stopPropagation()));
   view.querySelector("#lg-stand-all")?.addEventListener("click", () => { leagueView.allStandings = !leagueView.allStandings; renderLeague(view); });
   const divEl = view.querySelector("#lg-division");
   loadDivision().then((D) => { if (document.body.contains(divEl)) renderDivision(divEl, D, L, rosterIds, st); });
   view.querySelectorAll("[data-tsort]").forEach((th) => (th.onclick = () => { const k = th.dataset.tsort; leagueView.teamDesc = leagueView.teamSort === k ? !leagueView.teamDesc : k !== "name"; leagueView.teamSort = k; renderLeague(view); }));
+}
+
+// "in 4d 6h 12m" until a time (then "Starting", and "Live" for the next couple of hours).
+function countdown(at) {
+  const ms = at - Date.now();
+  if (ms <= 0) return ms > -3 * 3600e3 ? "Live" : "Started";
+  const m = Math.floor(ms / 60e3), d = Math.floor(m / 1440), h = Math.floor((m % 1440) / 60), mm = m % 60;
+  return d ? `in ${d}d ${h}h ${mm}m` : h ? `in ${h}h ${pad2(mm)}m` : mm ? `in ${mm}m` : "Starting";
+}
+// Keeps the countdowns on the page current (every 20 s while it's shown).
+function tickCountdowns(root) {
+  const tick = () => {
+    const els = [...root.querySelectorAll(".lg-count[data-at]")];
+    if (!els.length || !document.body.contains(root)) return;
+    els.forEach((el) => (el.textContent = countdown(Number(el.dataset.at))));
+    setTimeout(tick, 20e3);
+  };
+  setTimeout(tick, 20e3);
+}
+
+// ---- scouting a league team -----------------------------------------------------------------------
+
+async function loadScout(team) {
+  if (tauri) return tauri.core.invoke("league_scout", { teamId: team });
+  const r = await fetch(assetUrl(`scout/${team}.json`), { cache: "no-store" });
+  if (!r.ok) throw new Error("no scout file");
+  return r.json();
+}
+
+// Rating 1.0 from FACEIT's per-player totals (as the division tables), and the rest of a player's line.
+function scoutLine(t) {
+  const r = Math.max(1, t.rounds), k = t.kills || 0, d = t.deaths || 0;
+  const k1 = Math.max(0, k - 2 * (t.k2 || 0) - 3 * (t.k3 || 0) - 4 * (t.k4 || 0) - 5 * (t.k5 || 0));
+  const rating = (k / r / 0.679 + 0.7 * (Math.max(0, r - d) / r) / 0.317 + (k1 + 4 * (t.k2 || 0) + 9 * (t.k3 || 0) + 16 * (t.k4 || 0) + 25 * (t.k5 || 0)) / r / 1.277) / 2.7;
+  return { ...t, rating, kd: k / Math.max(1, d), adr: (t.damage || 0) / r, kr: k / r, hs: k ? ((t.headshots || 0) / k) * 100 : 0,
+    entry: t.entry_tries ? (t.entry_wins || 0) / t.entry_tries : null, entryRate: (t.entry_tries || 0) / r, awp: k ? (t.sniper_kills || 0) / k : 0 };
+}
+
+// The scout: everything about a team before you play them, as a scout would put it.
+async function renderScout(view, team) {
+  view.innerHTML = `<a class="day-back" href="#/league">◀ ESEA</a><div class="empty">Scouting the team on FACEIT… The first time takes a minute or two (FACEIT allows a request a second); after that it's quick.</div>`;
+  let S, L;
+  try { [S, L] = await Promise.all([loadScout(team), loadLeague().catch(() => null)]); } catch (e) {
+    view.innerHTML = `<a class="day-back" href="#/league">◀ ESEA</a><div class="empty">Couldn't scout this team: ${esc(String(e))}</div>`;
+    return;
+  }
+  const P = S.profile || {};
+  const name = P.name || "Team";
+  const st = L?.standings?.find((t) => t.premade_team_id === team);
+  // Played league matches from their side.
+  const games = (S.matches || []).map((m) => {
+    const fs = Object.entries(m.teams || {});
+    const [usF, us] = fs.find(([, t]) => t.id === team) || fs[0] || [];
+    const [themF, them] = fs.find(([f]) => f !== usF) || [];
+    const a = m.score?.[usF]?.score ?? 0, b = m.score?.[themF]?.score ?? 0;
+    const vetoes = (m.vetoes || []).map((v) => ({ ...v, ours: v.by === usF }));
+    return { m, usF, us: us || {}, them: them || {}, won: a > b, a, b, map: m.map, when: new Date(m.started || m.finished), vetoes };
+  }).sort((x, y) => y.when - x.when);
+  const W = games.filter((g) => g.won).length;
+  // Maps: record, rounds, who left it in.
+  const maps = {};
+  for (const g of games) {
+    const r = (maps[g.map] ||= { map: g.map, w: 0, l: 0, rf: 0, ra: 0, n: 0 });
+    r.n++; g.won ? r.w++ : r.l++; r.rf += g.a; r.ra += g.b;
+  }
+  const mapRows = Object.values(maps).sort((x, y) => y.n - x.n || y.w - x.w);
+  // Bans: how often they remove each map, and their first ban.
+  const bans = {}, firsts = {}, theyFaced = {};
+  for (const g of games) {
+    const ours = g.vetoes.filter((v) => v.ours && v.status === "drop").sort((x, y) => x.round - y.round);
+    ours.forEach((v, i) => { bans[v.map] = (bans[v.map] || 0) + 1; if (i === 0) firsts[v.map] = (firsts[v.map] || 0) + 1; });
+    g.vetoes.filter((v) => !v.ours && v.status === "drop").forEach((v) => (theyFaced[v.map] = (theyFaced[v.map] || 0) + 1));
+  }
+  const vetoGames = games.filter((g) => g.vetoes.length).length;
+  const pool = [...new Set([...Object.keys(bans), ...Object.keys(theyFaced), ...Object.keys(maps)])].filter(Boolean);
+  const neverBanned = vetoGames >= 2 ? pool.filter((m) => !bans[m]) : [];
+  // Players: their league totals.
+  const tot = {};
+  for (const g of games) {
+    for (const mp of g.m.stats || []) {
+      const side = (mp.teams || []).find((t) => t.name === g.us.name) || (mp.teams || []).find((t) => (t.players || []).some((p) => (g.us.roster || []).some((r) => r.id === p.playerId)));
+      for (const p of side?.players || []) {
+        const t = (tot[p.playerId] ||= { id: p.playerId, nickname: p.nickname, rounds: 0, maps: 0 });
+        t.maps++; t.rounds += Number(mp.rounds) || 0;
+        for (const [key, field] of [["i6", "kills"], ["i7", "assists"], ["i8", "deaths"], ["i13", "headshots"], ["i40", "k2"], ["i14", "k3"], ["i15", "k4"], ["i16", "k5"], ["i20", "damage"], ["i21", "entry_tries"], ["i22", "entry_wins"], ["i23", "v1_tries"], ["i24", "v1_wins"], ["i30", "utility_damage"], ["i35", "first_kills"], ["i39", "sniper_kills"]]) {
+          t[field] = (t[field] || 0) + (Number(p[key]) || 0);
+        }
+      }
+    }
+  }
+  const avatarOf = new Map();
+  for (const g of games) for (const r of g.us.roster || []) { avatarOf.set(r.id, r.avatar); }
+  for (const mbr of P.members || []) if (mbr.avatar) avatarOf.set(mbr.id, mbr.avatar);
+  const players = Object.values(tot).map(scoutLine).sort((a, b) => b.rating - a.rating);
+  const regulars = players.filter((p) => p.maps >= Math.max(1, Math.ceil(games.length * 0.5)));
+  // Each member's recent FACEIT form.
+  const form = (uid) => {
+    const list = (S.form?.[uid] || []).filter((x) => x.map);
+    if (!list.length) return null;
+    const won = list.filter((x) => String(x.won) === "1").length;
+    const kd = list.reduce((a, x) => a + (Number(x.kd) || 0), 0) / list.length;
+    const adr = list.reduce((a, x) => a + (Number(x.adr) || 0), 0) / list.length;
+    const elo = Number(list.find((x) => x.elo)?.elo) || null;
+    const byMap = {};
+    for (const x of list) byMap[x.map] = (byMap[x.map] || 0) + 1;
+    const fav = Object.entries(byMap).sort((a, b) => b[1] - a[1]).slice(0, 3);
+    return { n: list.length, won, kd, adr, elo, fav };
+  };
+  // Seasons.
+  const seasons = (S.seasons || []).flatMap((l) => (l.league_seasons_info || []).map((x) => ({ ...x, league: l.league_name })))
+    .sort((a, b) => Number(b.season_number) - Number(a.season_number));
+  const stageText = (s) => (s.season_standings || []).map((x) => `${x.stage_name}: <b>${x.wins}-${x.losses}</b>${x.placement?.left ? ` (#${x.placement.left}${x.placement.right && x.placement.right !== x.placement.left ? `–${x.placement.right}` : ""})` : ""}`).join(" · ");
+  // The report: what to look out for.
+  const tips = [];
+  const last = seasons.find((x) => (x.season_standings || []).some((y) => Number(y.wins) + Number(y.losses) > 0) && x !== seasons[0]);
+  if (last) tips.push(`Last season (S${last.season_number}) they played ${esc((last.season_standings[0] || {}).division_name || "")} ${esc((last.season_standings[0] || {}).conference_name || "")}: ${stageText(last)}.`);
+  const topFirst = Object.entries(firsts).sort((a, b) => b[1] - a[1])[0];
+  if (topFirst && vetoGames >= 2) tips.push(`First ban: <b>${esc(mapName(topFirst[0]))}</b> in ${topFirst[1]} of ${vetoGames} map votes.`);
+  const always = Object.entries(bans).filter(([, n]) => n >= Math.max(2, vetoGames * 0.75)).map(([m]) => mapName(m));
+  if (always.length) tips.push(`They almost always ban <b>${esc(always.join(", "))}</b>.`);
+  if (neverBanned.length) tips.push(`They never banned <b>${esc(neverBanned.map(mapName).join(", "))}</b>: expect to play one of these.`);
+  const best = mapRows.filter((r) => r.n >= 2).sort((a, b) => b.w / b.n - a.w / a.n || b.n - a.n)[0];
+  if (best) tips.push(`Best map: <b>${esc(mapName(best.map))}</b> (${best.w}-${best.l}, rounds ${best.rf}-${best.ra}).`);
+  const worst = mapRows.filter((r) => r.n >= 2 && r.l > r.w).sort((a, b) => a.w / a.n - b.w / b.n)[0];
+  if (worst) tips.push(`They struggle on <b>${esc(mapName(worst.map))}</b> (${worst.w}-${worst.l}).`);
+  if (regulars[0]) tips.push(`Their star: <b>${esc(regulars[0].nickname)}</b>, rating ${f2(regulars[0].rating)} with ${f1(regulars[0].adr)} ADR${regulars[0].awp > 0.3 ? `, their AWPer (${Math.round(regulars[0].awp * 100)}% of kills with a sniper)` : ""}.`);
+  const awper = regulars.find((p) => p.awp > 0.3 && p !== regulars[0]);
+  if (awper) tips.push(`AWPer: <b>${esc(awper.nickname)}</b> (${Math.round(awper.awp * 100)}% of kills with a sniper).`);
+  const entry = [...regulars].sort((a, b) => b.entryRate - a.entryRate)[0];
+  if (entry && entry.entry_tries >= 5) tips.push(`<b>${esc(entry.nickname)}</b> takes most opening duels (${Math.round(entry.entryRate * 100)}% of rounds, wins ${Math.round((entry.entry || 0) * 100)}%).`);
+  const weak = regulars.length >= 4 ? regulars[regulars.length - 1] : null;
+  if (weak && weak.rating < 0.95) tips.push(`Weakest link: <b>${esc(weak.nickname)}</b> (rating ${f2(weak.rating)}).`);
+
+  const pct = (a, b) => (b ? `${Math.round((a / b) * 100)}%` : "–");
+  const recent = games.filter((g) => Date.now() - g.when < 28 * 86400e3 && (g.m.demo_urls || []).length);
+  view.innerHTML = `
+    <a class="day-back" href="#/league">◀ ESEA</a>
+    <section class="lg-hero sc-hero">
+      ${P.avatar ? `<img class="sc-av" src="${esc(P.avatar)}" alt="">` : `<span class="sc-av none"></span>`}
+      <div class="lg-title">
+        <div class="sub">Scouting report${P.country ? ` · ${esc(P.country.toUpperCase())}` : ""}${P.created_at ? ` · team since ${esc(new Date(P.created_at).toLocaleDateString("en-US", { month: "short", year: "numeric" }))}` : ""}</div>
+        <div class="h1">${esc(name)}${P.nickname && P.nickname !== name ? ` <span class="sub">${esc(P.nickname)}</span>` : ""}</div>
+        ${seasons[0] ? `<div class="lg-div">S${esc(seasons[0].season_number)} · ${stageText(seasons[0])}</div>` : ""}
+      </div>
+      <div class="lg-nums">
+        <div><b><span class="up">${W}</span>-<span class="down">${games.length - W}</span></b><span>League maps</span></div>
+        ${st ? `<div><b>#${st.rank_start}</b><span>in your conference</span></div><div><b>${st.points || 0}</b><span>Points</span></div>` : ""}
+      </div>
+      ${tauri ? `<button class="btn primary" id="sc-demos" ${recent.length ? "" : "disabled"} title="FACEIT keeps demos about a month">${ICONS.download} Get their demos${recent.length ? ` (${recent.length})` : ""}</button>` : ""}
+    </section>
+    ${S.busy ? `<div class="ml-note">FACEIT asked Veloxify to slow down; the rest is read next time you open this.</div>` : ""}
+    <section class="panel sc-report"><div class="panel-head"><div class="h3">What to look out for</div><span class="grow"></span><span class="sub">From ${games.length} league map${games.length === 1 ? "" : "s"} and their players' recent FACEIT games</span></div>
+      ${tips.length ? `<ul>${tips.map((t) => `<li>${t}</li>`).join("")}</ul>` : `<div class="empty small">Not enough league matches yet to say much.</div>`}</section>
+    <div class="lg-grid">
+      <section class="panel"><div class="panel-head"><div class="h3">Maps</div><span class="grow"></span><span class="sub">League maps, and how they vote</span></div>
+        <table class="lg-table"><thead><tr><th class="left">Map</th><th>Played</th><th>W-L</th><th>Rounds</th><th>They banned</th><th>First ban</th><th>Others banned</th></tr></thead>
+        <tbody>${pool.sort((a, b) => (maps[b]?.n || 0) - (maps[a]?.n || 0) || (bans[a] || 0) - (bans[b] || 0)).map((m) => { const r = maps[m]; return `<tr>
+          <td class="left">${mapIcon(m)}<span>${esc(mapName(m))}</span></td><td>${r?.n || 0}</td>
+          <td>${r ? `<span class="up">${r.w}</span>-<span class="down">${r.l}</span>` : "–"}</td><td>${r ? `${r.rf}-${r.ra}` : "–"}</td>
+          <td>${bans[m] ? `${bans[m]} of ${vetoGames}` : "never"}</td><td>${firsts[m] || ""}</td><td>${theyFaced[m] || 0}</td></tr>`; }).join("")}</tbody></table></section>
+      <section class="panel"><div class="panel-head"><div class="h3">Seasons</div></div>
+        <div class="sc-seasons">${seasons.map((x) => `<div class="sc-season"><b>S${esc(x.season_number)}</b><span>${esc((x.season_standings[0] || {}).division_name || "")} ${esc((x.season_standings[0] || {}).conference_name || "")}</span><span>${stageText(x)}</span></div>`).join("") || `<div class="empty small">No seasons found.</div>`}</div></section>
+    </div>
+    <section class="panel lg-section" id="sc-strats"><div class="panel-head"><div class="h3">Setups and strategies</div><span class="grow"></span><span class="sub">From their demos</span></div>
+      <div class="sc-strat-body"><div class="empty small">${tauri ? `Get their demos (button at the top), then <button class="btn small" id="sc-read">Read their demos</button> to see how they set up on CT and where they go on T.` : "Read in the app from their demos."}</div></div></section>
+    <section class="panel lg-section"><div class="panel-head"><div class="h3">Players</div><span class="grow"></span><span class="sub">League totals (FACEIT's stats), then each player's last FACEIT games</span></div>
+      <div class="table-wrap"><table class="lg-table"><thead><tr><th class="left">Player</th><th>Maps</th><th>Rating 1.0</th><th>K/D</th><th>ADR</th><th>HS%</th><th>Opening duels</th><th>1v1s</th><th>Sniper kills</th><th>Utility dmg</th><th>Recent FACEIT</th><th class="left">Plays most</th></tr></thead>
+      <tbody>${players.map((p) => { const fm = form(p.id); return `<tr>
+        <td class="left">${avatarOf.get(p.id) ? `<img class="lg-tav" src="${esc(avatarOf.get(p.id))}" alt="">` : `<span class="lg-tav none"></span>`}<span>${esc(p.nickname)}</span>${p.awp > 0.3 ? ` <span class="tag">AWP</span>` : ""}${p === entry && entry.entry_tries >= 5 ? ` <span class="tag">Entry</span>` : ""}</td>
+        <td>${p.maps}</td><td><span class="mp-rating ${ratingClass(p.rating)}">${f2(p.rating)}</span></td><td>${f2(p.kd)}</td><td>${f1(p.adr)}</td><td>${Math.round(p.hs)}%</td>
+        <td>${p.entry_tries ? `${p.entry_wins}/${p.entry_tries}` : "–"}</td><td>${p.v1_tries ? `${p.v1_wins}/${p.v1_tries}` : "–"}</td><td>${p.sniper_kills || 0}</td><td>${p.utility_damage || 0}</td>
+        <td>${fm ? `${fm.elo ? `${levelBadge(levelFor(fm.elo), 16)} ${fm.elo.toLocaleString("en-US")} · ` : ""}${pct(fm.won, fm.n)} wins · K/D ${f2(fm.kd)}` : "–"}</td>
+        <td class="left">${fm ? fm.fav.map(([m, n]) => `${esc(mapName(m))} <span class="sub">${n}</span>`).join(", ") : "–"}</td></tr>`; }).join("") || `<tr><td colspan="12" class="sub">No league stats yet.</td></tr>`}</tbody></table></div></section>
+    <section class="panel lg-section"><div class="panel-head"><div class="h3">League matches</div><span class="grow"></span><span class="sub">Bans in order; FACEIT keeps demos about a month</span></div>
+      <div class="lg-matches">${games.map((g) => `<div class="lg-match ${g.won ? "win" : "loss"}">
+        <span class="lg-when">${fcDate(g.when)}</span>
+        <span class="ml-score"><span class="wl ${g.won ? "win" : "loss"}">${g.won ? "W" : "L"}</span><span><b class="${g.won ? "win" : "loss"}">${g.a}</b> : <span class="theirs">${g.b}</span></span></span>
+        <span class="lg-opp">${g.them.avatar ? `<img class="lg-tav" src="${esc(g.them.avatar)}" alt="">` : `<span class="lg-tav none"></span>`}<span>vs <b>${esc(g.them.name || "")}</b></span></span>
+        <span class="lg-map">${mapIcon(g.map)}<span>${esc(mapName(g.map))}</span></span>
+        <span class="sc-vetoes">${g.vetoes.filter((v) => v.status === "drop").sort((x, y) => x.round - y.round).map((v) => `<span class="sc-veto ${v.ours ? "ours" : ""}" title="${v.ours ? esc(name) : "Opponent"} banned ${esc(mapName(v.map))}">${esc(mapName(v.map))}</span>`).join("")}</span>
+      </div>`).join("") || `<div class="empty small">No league matches found.</div>`}</div></section>
+    <div class="note">From FACEIT's public league, match and stats pages; cached, and read again after 6 hours. Rating 1.0 is HLTV's original formula on FACEIT's numbers. Get their demos to have Veloxify read their setups and strategies.</div>`;
+  view.querySelector("#sc-demos")?.addEventListener("click", (e) => {
+    e.target.disabled = true;
+    e.target.textContent = "Downloading through FACEIT…";
+    getDemos(recent.map((g) => g.m.id));
+  });
+  const stratBody = view.querySelector("#sc-strats .sc-strat-body");
+  const readDemos = async (btn) => {
+    if (btn) { btn.disabled = true; btn.textContent = "Reading their demos… (a few seconds each)"; }
+    try {
+      const list = await tauri.core.invoke("scout_demos", { teamId: team });
+      if (document.body.contains(stratBody)) stratBody.innerHTML = strategiesHtml(list, name);
+    } catch (e) {
+      if (document.body.contains(stratBody)) stratBody.innerHTML = `<div class="empty small">${esc(String(e))}</div>`;
+    }
+  };
+  view.querySelector("#sc-read")?.addEventListener("click", (e) => readDemos(e.target));
+}
+
+// A team's setups and strategies from their demos (scout_demos' rounds), map by map: CT setups by
+// kind of round (A · mid · B), pushes, T sites, plant timing, and each side's record.
+function strategiesHtml(list, name) {
+  const ok = list.filter((x) => x.rounds?.length);
+  if (!ok.length) return `<div class="empty small">${list.length ? "Couldn't read their demos." : "None of their demos are downloaded yet: Get their demos first."}</div>`;
+  const byMap = {};
+  for (const x of ok) (byMap[x.map] ||= []).push(x);
+  const pct = (a, b) => (b ? `${Math.round((a / b) * 100)}%` : "–");
+  const setupName = (s) => `${s.A} A · ${s.Mid} mid · ${s.B} B`;
+  const top = (rounds, key, n = 3) => {
+    const c = {};
+    for (const r of rounds) { const k = key(r); if (k) c[k] = (c[k] || 0) + 1; }
+    return Object.entries(c).sort((a, b) => b[1] - a[1]).slice(0, n);
+  };
+  const mmss = (t) => `${Math.floor(t / 60)}:${pad2(Math.round(t % 60))}`;
+  return Object.entries(byMap).sort((a, b) => b[1].length - a[1].length).map(([map, games]) => {
+    const rounds = games.flatMap((g) => g.rounds);
+    const ct = rounds.filter((r) => r.side === "CT"), t = rounds.filter((r) => r.side === "T");
+    const gun = (r) => r.buy === "full" || r.buy === "force";
+    const ctLine = (list, label) => {
+      if (!list.length) return "";
+      const ts = top(list, (r) => setupName(r.setup));
+      return `<div class="sc-strat-row"><span>${label}</span><b>${ts.map(([k, n]) => `${esc(k)} <span class="sub">${n}/${list.length}</span>`).join(" · ")}</b></div>`;
+    };
+    const tLine = (list, label) => {
+      if (!list.length) return "";
+      const a = list.filter((r) => r.plant?.site === "A").length, b = list.filter((r) => r.plant?.site === "B").length;
+      return `<div class="sc-strat-row"><span>${label}</span><b>A ${pct(a, list.length)} · B ${pct(b, list.length)} · no plant ${pct(list.length - a - b, list.length)}</b></div>`;
+    };
+    const gunCt = ct.filter(gun), gunT = t.filter(gun);
+    const pushes = gunCt.filter((r) => r.pushed > 0).length;
+    const plants = t.filter((r) => r.plant?.t != null);
+    const avgPlant = plants.length ? plants.reduce((s, r) => s + r.plant.t, 0) / plants.length : null;
+    const fast = t.filter((r) => r.fast).length;
+    // Where the pushes go (the places of the pushed players).
+    const pushPlaces = top(gunCt.flatMap((r) => (r.spots || []).filter((sp) => sp.zone === "Mid")), (sp) => sp.place, 2);
+    return `<div class="sc-strat">
+      <div class="sc-strat-head">${mapIcon(map)}<b>${esc(mapName(map))}</b><span class="sub">${games.length} demo${games.length === 1 ? "" : "s"} · CT ${ct.filter((r) => r.won).length}-${ct.filter((r) => !r.won).length} · T ${t.filter((r) => r.won).length}-${t.filter((r) => !r.won).length}</span></div>
+      <div class="sc-strat-cols">
+        <div><div class="h4">CT side</div>
+          ${ctLine(ct.filter((r) => r.buy === "pistol"), "Pistol rounds")}
+          ${ctLine(gunCt, "Gun rounds")}
+          ${ctLine(ct.filter((r) => r.buy === "eco"), "Ecos")}
+          ${gunCt.length ? `<div class="sc-strat-row"><span>Pushes</span><b>someone pushes forward in ${pct(pushes, gunCt.length)} of gun rounds${pushPlaces.length ? ` <span class="sub">(mid players often at ${esc(pushPlaces.map(([p]) => p).join(", "))})</span>` : ""}</b></div>` : ""}
+        </div>
+        <div><div class="h4">T side</div>
+          ${tLine(t.filter((r) => r.buy === "pistol"), "Pistol rounds")}
+          ${tLine(gunT, "Gun rounds")}
+          ${avgPlant != null ? `<div class="sc-strat-row"><span>Plants</span><b>average ${mmss(avgPlant)} into the round · fast hits (under 0:35) ${pct(fast, t.length)}</b></div>` : ""}
+        </div>
+      </div>
+    </div>`;
+  }).join("") + `<div class="note">Setups: where their CTs stand 20 seconds into the round (on A, on B, or in between: mid). Gun rounds include force buys. ${ok.length} of their demos read.</div>`;
 }
 
 // ---- match history --------------------------------------------------------------------------
