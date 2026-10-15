@@ -279,7 +279,7 @@ table.sb { width: 100%; border-collapse: separate; border-spacing: 0; font-varia
 .ml-date span { display: block; color: var(--muted); font-size: 12px; }
 .ml-score { display: flex; align-items: center; gap: 8px; font-size: 14px; }
 .wl { width: 19px; height: 19px; border-radius: 3px; display: inline-flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 800; }
-.wl.win { background: var(--win); color: #0b0b0b; }
+.wl.win { background: var(--win); color: #fff; }
 .wl.loss { background: var(--loss); color: #fff; }
 .ml-score b { font-weight: 700; }
 .ml-score b.win { color: var(--win); }
