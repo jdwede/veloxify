@@ -824,22 +824,32 @@ input[type=color] { width: 44px; height: 30px; padding: 2px; background: var(--r
 .hs-leader-x { font-size: 11px; line-height: 1.3; color: var(--muted); text-align: right; white-space: nowrap; }
 .hs-leader .hs-leader-x b { display: inline; font-size: inherit; color: var(--text); }
 /* The MVP (FACEIT's card): who, the rating and its word, then four stats */
-.hs-mvp { position: relative; display: flex; flex-direction: column; justify-content: space-between; gap: 14px; padding: 16px 16px 14px 18px; min-width: 0; background: var(--card);
+.hs-left { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.hs-mvp { display: flex; flex-direction: column; gap: 10px; padding: 11px 14px 11px 16px; min-width: 0; background: var(--card);
   border: 1px solid var(--line); border-radius: var(--radius-sm); box-shadow: inset 4px 0 0 var(--accent); }
 .hs-mvp.enemy { box-shadow: inset 4px 0 0 #f0a030; }
-.hs-mvp-tag { position: absolute; top: 12px; right: 14px; font-size: 20px; font-weight: 900; letter-spacing: 0.02em; }
-.hs-mvp-tag .star { margin-right: 3px; font-size: 17px; }
-.hs-mvp-who { display: flex; align-items: center; gap: 12px; min-width: 0; padding-right: 70px; }
-.hs-mvp-who b { display: block; font-size: 17px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.hs-mvp-rank { margin-top: 4px; display: flex; align-items: center; gap: 6px; font-size: 12.5px; }
-.hs-mvp-rating { display: flex; align-items: center; gap: 10px; }
-.hs-mvp-rating .rchip { font-size: 20px; padding: 3px 9px 5px; }
-.hs-mvp-rating > span:last-child { display: flex; flex-direction: column; line-height: 1.25; }
-.hs-mvp-rating > span:last-child b { font-size: 13px; }
-.hs-mvp-rating .sub { font-size: 11.5px; }
-.hs-mvp-stats { display: grid; grid-template-columns: 1fr 1fr; gap: 12px 10px; }
-.hs-mvp-stats b { display: block; font-size: 17px; font-weight: 800; }
-.hs-mvp-stats span { font-size: 12px; color: var(--muted); }
+.hs-mvp-top { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.hs-mvp-who { flex: 1; min-width: 0; }
+.hs-mvp-who b { display: block; font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.hs-mvp-rank { margin-top: 2px; display: flex; align-items: center; gap: 6px; font-size: 12px; }
+.hs-mvp-rating { display: flex; flex-direction: column; align-items: center; gap: 1px; }
+.hs-mvp-rating .rchip { font-size: 16px; padding: 2px 7px 4px; }
+.hs-mvp-rating > b { font-size: 10.5px; }
+.hs-mvp-tag { font-size: 16px; font-weight: 900; letter-spacing: 0.02em; white-space: nowrap; }
+.hs-mvp-tag .star { margin-right: 2px; font-size: 14px; }
+.hs-mvp-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+.hs-mvp-stats b { display: block; font-size: 14px; font-weight: 800; white-space: nowrap; }
+.hs-mvp-stats span { font-size: 11px; color: var(--muted); }
+/* Play of the match, under the MVP: who made it on the picture */
+.hs-potm { display: flex; flex-direction: column; gap: 6px; padding: 10px 12px 12px; background: var(--card); border: 1px solid var(--line); border-radius: var(--radius-sm); min-width: 0; }
+.hs-potm-head { display: flex; align-items: center; gap: 6px; font-size: 14px; }
+.hs-potm-card { background: var(--row); }
+.hs-potm-card .hl-thumb { position: relative; aspect-ratio: 16 / 9; background-size: cover; }
+.potm-who { position: absolute; top: 8px; left: 8px; display: inline-flex; align-items: center; gap: 7px; padding: 3px 10px 3px 3px; border-radius: 999px; background: rgba(0, 0, 0, 0.75); color: #fff; font-size: 13.5px; }
+.potm-who .hs-you { margin: 0 0 0 2px; }
+.potm-title { position: absolute; left: 0; right: 0; bottom: 0; padding: 18px 10px 7px; background: linear-gradient(transparent, rgba(0, 0, 0, 0.85)); color: #fff; font-size: 13px; font-weight: 700; pointer-events: none; }
+.hs-potm-card .dur { top: 8px; right: 8px; bottom: auto; }
+.hs-potm-card .state .btn { pointer-events: auto; }
 .hs-leader { display: flex; align-items: center; gap: 11px; padding: 10px 14px 10px 16px; background: var(--card);
   border: 1px solid var(--line); border-radius: var(--radius-sm); box-shadow: inset 4px 0 0 var(--accent); }
 .hs-leader.enemy { box-shadow: inset 4px 0 0 #f0a030; }
@@ -871,9 +881,7 @@ input[type=color] { width: 44px; height: 30px; padding: 2px; background: var(--r
 .hs-hl-main .hl-info { position: absolute; left: 0; right: 0; bottom: 0; padding: 28px 14px 12px; background: linear-gradient(transparent, rgba(0, 0, 0, 0.85)); pointer-events: none; }
 .hs-hl-main .hl-meta { color: rgba(255, 255, 255, 0.75); }
 /* Play of the match: its badge on the picture, who made it under the title */
-.potm-badge { position: absolute; top: 10px; left: 10px; padding: 4px 9px; border-radius: 999px; background: rgba(0, 0, 0, 0.72); color: #fff; font-size: 12px; font-weight: 800; letter-spacing: 0.02em; }
-.potm-who { display: inline-flex; align-items: center; gap: 6px; }
-.hs-hl-main .state .btn { pointer-events: auto; }
+
 .hs-hl-more { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
 .hs-hl-more .play { width: 34px; height: 34px; font-size: 14px; }
 .hs-hl-more .dur { right: 5px; bottom: 5px; font-size: 11px; }

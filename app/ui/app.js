@@ -1704,9 +1704,12 @@ async function renderMatchSummary(el, m, id) {
   const mvpHtml = (p) => {
     const r = r3(p.derived), c = p.counts, sw = p.derived.swing || 0;
     return `<section class="hs-mvp ${p.side} ${p.steamid === me ? "me" : ""}">
-      <div class="hs-mvp-tag"><span class="star">★</span>MVP</div>
-      <div class="hs-mvp-who">${avatarHtml(p.steamid, 58)}<div><b>${esc(p.name)}</b><div class="hs-mvp-rank">${rankHtml(p, m._roster)}</div></div></div>
-      <div class="hs-mvp-rating"><span class="rchip ${ratingClass(r)}">${f2(r)}<i style="width:${Math.min(100, (r / 2) * 100)}%"></i></span><span><b class="${ratingClass(r)}">${esc(ratingWord(r))}</b><span class="sub">HLTV Rating 3.0</span></span></div>
+      <div class="hs-mvp-top">
+        ${avatarHtml(p.steamid, 44)}
+        <div class="hs-mvp-who"><b>${esc(p.name)}</b><div class="hs-mvp-rank">${rankHtml(p, m._roster)}</div></div>
+        <div class="hs-mvp-rating" title="HLTV Rating 3.0"><span class="rchip ${ratingClass(r)}">${f2(r)}<i style="width:${Math.min(100, (r / 2) * 100)}%"></i></span><b class="${ratingClass(r)}">${esc(ratingWord(r))}</b></div>
+        <div class="hs-mvp-tag"><span class="star">★</span>MVP</div>
+      </div>
       <div class="hs-mvp-stats">
         <div><b class="${sw > 0 ? "up" : sw < 0 ? "down" : ""}">${fmtSwing(sw)}</b><span>Swing</span></div>
         <div><b>${f1(p.derived.adr)}</b><span>ADR</span></div>
@@ -1723,24 +1726,34 @@ async function renderMatchSummary(el, m, id) {
   const top = Math.max(1.5, ...players.map((p) => r3(p.derived) + 0.1));
   // The match's best highlight (rendered ones first) next to the rating chart, the rest below it.
   const names = new Map(m.players.map((p) => [p.steamid, p.name]));
-  // The play of the match (anyone's) leads; when it's one of yours, it's that highlight.
-  const potmSrc = m.potm ? (m.highlights || []).find((h) => h.id === m.potm.id) || m.potm : null;
-  const potm = potmSrc ? { ...potmSrc, potm: true } : null;
-  const hls = [...(m.highlights || [])].filter((h) => h.id !== potm?.id).sort((a, b) => !!b.clip - !!a.clip || (b.tier || 0) - (a.tier || 0) || (b.hand || 0) - (a.hand || 0));
-  if (potm) hls.unshift(potm);
+  // The play of the match (anyone's): when it's one of yours, it's that highlight (one clip).
+  const potm = m.potm ? (m.highlights || []).find((h) => h.id === m.potm.id) || m.potm : null;
+  const hls = [...(m.highlights || [])].sort((a, b) => !!b.clip - !!a.clip || (b.tier || 0) - (a.tier || 0) || (b.hand || 0) - (a.hand || 0));
   const best = hls[0];
   const thumb = (h) => (h.thumb ? `background-image:url('${assetUrl(h.thumb)}')` : "");
+  // Under the MVP: the play of the match, with who made it on the picture; hover previews, click plays.
+  const potmHtml = (h) => `
+      <section class="hs-potm">
+        <div class="hs-potm-head"><span class="star">★</span><b>Play of the match</b><span class="grow"></span><span class="sub">round ${h.round}</span></div>
+        <div class="hl-card hs-potm-card ${h.clip ? "" : "pending"}" data-hl="${esc(h.id)}" ${clipAttr(h)}>
+          <div class="hl-thumb" style="--map-bg:${mapColor(m.map)};${thumb(h)}">
+            ${h.clip ? `<span class="play">▶</span>` : `<span class="state">${h.render_error ? esc(h.render_error) : tauri ? `<button class="btn small" data-film-potm>Film it</button>` : "Not filmed yet"}</span>`}
+            <span class="potm-who ${h.player === me ? "me" : ""}">${avatarHtml(h.player, 30)}<b>${esc(names.get(h.player) || "")}</b>${h.player === me ? `<em class="hs-you">You</em>` : ""}</span>
+            <span class="dur">${fmtClip(h.duration_s)}</span>
+            <span class="potm-title">${esc(h.title)}</span>
+          </div>
+        </div>
+      </section>`;
   const hlPanel = best ? `
       <section class="hs-hl">
-        <div class="hs-perf-head"><div class="h3">${potm ? "Play of the match" : "Highlights"}</div>${(m.highlights || []).length ? `<a class="link" href="${matchHref(id, "highlights")}">Your highlights (${m.highlights.length})</a>` : ""}</div>
+        <div class="hs-perf-head"><div class="h3">Highlights</div>${hls.length > 1 ? `<a class="link" href="${matchHref(id, "highlights")}">All ${hls.length}</a>` : ""}</div>
         <div class="hs-hl-body ${hls.length > 1 ? "" : "solo"}">
           <div class="hl-card hs-hl-main ${best.clip ? "" : "pending"}" data-hl="${esc(best.id)}" ${clipAttr(best)}>
             <div class="hl-thumb" style="--map-bg:${mapColor(m.map)};${thumb(best)}">
-              ${best.clip ? `<span class="play">▶</span>` : `<span class="state">${best.render_error ? esc(best.render_error) : best.potm && tauri ? `<button class="btn small" data-film-potm>Film it</button>` : "Rendering…"}</span>`}
-              ${best.potm ? `<span class="potm-badge"><span class="star">★</span> Play of the match</span>` : ""}
+              ${best.clip ? `<span class="play">▶</span>` : `<span class="state">${best.render_error ? esc(best.render_error) : "Rendering…"}</span>`}
               <span class="dur">${fmtClip(best.duration_s)}</span></div>
             <div class="hl-info"><div class="hl-title">${esc(best.title)}</div>
-              <div class="hl-meta"><span class="potm-who">${best.potm ? avatarHtml(best.player, 20) : ""}${esc(names.get(best.player) || "")}${best.player === state.index.me ? " (you)" : ""}</span><span>round ${best.round}</span></div>
+              <div class="hl-meta"><span>${esc(names.get(best.player) || "")}</span><span>round ${best.round}</span></div>
               <div class="tags">${best.tags.map((t) => tagHtml(t)).join("")}</div></div>
           </div>
           ${hls.length > 1 ? `<div class="hs-hl-side">${hls.slice(1, 4).map((h) => `
@@ -1755,7 +1768,7 @@ async function renderMatchSummary(el, m, id) {
   el.innerHTML = `
     <div class="hs-wrap">
       <section class="hs-leaders">
-        ${mvp ? mvpHtml(mvp) : ""}
+        <div class="hs-left">${mvp ? mvpHtml(mvp) : ""}${potm ? potmHtml(potm) : ""}</div>
         <div class="hs-leader-list">
           ${leader("Most kills", (p) => p.counts.kills)}
           ${leader("Most ADR", (p) => p.derived.adr, f1)}
@@ -1790,7 +1803,7 @@ async function renderMatchSummary(el, m, id) {
     ${hlPanel}
     </div>`;
   // Play from the match's rendered clips.
-  state.playlist = hls.filter((h) => h.clip).map((h) => ({ ...h, name: names.get(h.player), match: m }));
+  state.playlist = [...(potm?.clip ? [potm] : []), ...hls.filter((h) => h.clip)].map((h) => ({ ...h, name: names.get(h.player), match: m }));
   el.querySelector("[data-film-potm]")?.addEventListener("click", async (e) => {
     e.stopPropagation();
     e.target.disabled = true;
