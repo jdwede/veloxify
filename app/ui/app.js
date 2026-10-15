@@ -6300,6 +6300,9 @@ async function renderLeague(view) {
 // ---- match history --------------------------------------------------------------------------
 
 let mh = { source: "all", result: "all", map: "all", shown: 50 };
+// Match history's sort (newest first unless a column was clicked), kept between visits.
+let mhSort = { key: "date", desc: true };
+try { mhSort = { ...mhSort, ...JSON.parse(localStorage.getItem("veloxify.historySort") || "{}") }; } catch (e) { /* newest first */ }
 
 // Every match: library matches and FACEIT's stats-only ones (see mergeFaceit).
 function historyRows() {
@@ -6368,10 +6371,62 @@ const histTemplate = (cols) => `${cols.map((k) => HIST_COLS.find((c) => c[0] ===
 const histMinWidth = (cols) => sum(cols.map((k) => parseInt(/(\d+)px/.exec(HIST_COLS.find((c) => c[0] === k)[2])[1], 10))) + 96 + 12 * cols.length + 28;
 const histGridStyle = (cols) => `grid-template-columns:${histTemplate(cols)};min-width:${histMinWidth(cols)}px`;
 
-// The match list with your columns (Match history, and each session's matches).
-function historyTable(rows, cols) {
+// A match's value in a column, for sorting the list by it (null: no data, always last).
+function histSortValue(r, k) {
+  const l = r.line, demo = l && !l.faceit_only;
+  const counted = (f) => (demo && l.rounds ? l[f] ?? null : null);
+  switch (k) {
+    case "date": return +r.when;
+    case "score": return r.mine - r.theirs;
+    case "elo": return r.elo ?? r.premier ?? null;
+    case "rating": return demo ? r3(l) : null;
+    case "rws": case "kast": case "swing": case "rating2": case "rating1": return demo ? l[k] ?? null : null;
+    case "kda": case "kills": return l?.kills ?? null;
+    case "deaths": return l?.deaths ?? null;
+    case "assists": return l?.assists ?? null;
+    case "adr": return l?.adr ?? null;
+    case "kd": return l ? l.kd ?? (l.deaths ? l.kills / l.deaths : l.kills) : null;
+    case "kr": return l?.kpr ?? null;
+    case "hs": return l?.hs_pct ?? null;
+    case "mvps": return l?.mvps ?? null;
+    case "aim": case "util": {
+      const st = state.myStatsById?.get(r.id);
+      return st ? customRating(ratingDef(k === "aim" ? "aim" : "utility"), st) : null;
+    }
+    // Bigger multi-kills count for more: a 5K above any number of 2Ks.
+    case "multi": return demo && l.multi ? (l.multi[2] || 0) + 10 * (l.multi[3] || 0) + 100 * (l.multi[4] || 0) + 1000 * (l.multi[5] || 0) : null;
+    case "fk": return counted("opening_kills");
+    case "fd": return counted("opening_deaths");
+    case "trades": return counted("trade_kills");
+    case "clutch": return counted("clutches_won");
+    case "ud": return counted("utility_damage");
+    case "ef": return counted("enemies_flashed");
+    case "fa": return counted("flash_assists");
+    case "acc": return counted("accuracy");
+    case "dmg": return counted("damage");
+    case "rounds": return r.mine + r.theirs;
+    case "length": return r.duration || null;
+    case "map": return mapName(r.map);
+    case "source": return r.source;
+    default: return null;
+  }
+}
+// Sorted by `sort` ({ key, desc }), matches without a value last either way; ties stay newest first.
+function sortHistory(rows, sort) {
+  if (!sort?.key) return rows;
+  const dir = sort.desc ? -1 : 1;
+  return rows.map((r) => ({ r, v: histSortValue(r, sort.key) })).sort((a, b) => {
+    if (a.v == null || b.v == null) return (a.v == null) - (b.v == null);
+    const c = typeof a.v === "string" ? a.v.localeCompare(b.v) : a.v - b.v;
+    return c * dir;
+  }).map((x) => x.r);
+}
+
+// The match list with your columns (Match history, and each session's matches). With `sort`, the
+// headers show which column it's sorted by.
+function historyTable(rows, cols, sort = null) {
   return `<div class="ml-table"><div class="ml-grid ml-head" style="${histGridStyle(cols)}">
-      ${cols.map((k) => `<div data-col="${k}" title="Drag to move">${k === "rating" ? `<span class="ic">${ICONS.rating}</span>` : ""}${esc(HIST_COLS.find((c) => c[0] === k)[1])}</div>`).join("")}<div class="ml-addcol-cell"><button class="ml-addcol" data-addcol title="Add, remove or move columns">+ Columns</button></div>
+      ${cols.map((k) => `<div data-col="${k}" class="${sort?.key === k ? "on" : ""}" title="${sort ? "Click to sort, drag to move" : "Drag to move"}">${k === "rating" ? `<span class="ic">${ICONS.rating}</span>` : ""}${esc(HIST_COLS.find((c) => c[0] === k)[1])}${sort?.key === k ? `<span class="ml-sort">${sort.desc ? "↓" : "↑"}</span>` : ""}</div>`).join("")}<div class="ml-addcol-cell"><button class="ml-addcol" data-addcol title="Add, remove or move columns">+ Columns</button></div>
     </div>
     ${rows.map((r) => historyRow(r, cols)).join("")}</div>`;
 }
@@ -6444,7 +6499,7 @@ function renderMatchHistory(view) {
       if (document.body.contains(view)) renderMatchHistory(view);
     });
   }
-  const rows = all.filter((r) => (mh.source === "all" || r.source === mh.source) && (mh.result === "all" || r.result === mh.result) && (mh.map === "all" || r.map === mh.map));
+  const rows = sortHistory(all.filter((r) => (mh.source === "all" || r.source === mh.source) && (mh.result === "all" || r.result === mh.result) && (mh.map === "all" || r.map === mh.map)), mhSort);
   const maps = [...new Set(all.map((r) => r.map))].sort();
   const missing = all.filter((r) => !r.demo).length;
   const seg = (key, opts) => `<div class="seg" data-mkey="${key}">${opts.map(([v, label]) =>
@@ -6463,7 +6518,7 @@ function renderMatchHistory(view) {
           <select id="mhmap"><option value="all">All maps</option>${maps.map((m) => `<option value="${m}" ${mh.map === m ? "selected" : ""}>${esc(mapName(m))}</option>`).join("")}</select>
         </div>
       </div>
-      ${historyTable(rows.slice(0, mh.shown), cols)}
+      ${historyTable(rows.slice(0, mh.shown), cols, mhSort)}
       ${rows.length > mh.shown ? `<div style="text-align:center;margin-top:12px"><button class="btn" id="mhmore">Show more</button></div>` : ""}
       ${missing ? `<div class="ml-note">${missing} FACEIT match${missing === 1 ? "" : "es"} without a demo show FACEIT's stats only. Get the demo (download button) and Veloxify adds the rating, RWS, highlights and lowlights. FACEIT keeps demos for a few weeks.</div>` : ""}
     </section>`;
@@ -6471,6 +6526,13 @@ function renderMatchHistory(view) {
   view.querySelector("#mhmap").onchange = (e) => { mh.map = e.target.value; mh.shown = 50; renderMatchHistory(view); };
   const setCols = (list) => { savePickedCols("veloxify.historyCols", HIST_COLS, list); renderMatchHistory(view); };
   wireColDrag([...view.querySelectorAll(".ml-head [data-col]")], () => cols, setCols);
+  // Click a header to sort by it (highest first; again for lowest; names A to Z first).
+  view.querySelectorAll(".ml-head [data-col]").forEach((th) => (th.onclick = () => {
+    const k = th.dataset.col;
+    mhSort = mhSort.key === k ? { key: k, desc: !mhSort.desc } : { key: k, desc: !["map", "source"].includes(k) };
+    try { localStorage.setItem("veloxify.historySort", JSON.stringify(mhSort)); } catch (e) { /* not kept */ }
+    renderMatchHistory(view);
+  }));
   view.querySelectorAll("#mh-cols, [data-addcol]").forEach((b) => (b.onclick = (e) => { e.stopPropagation(); editHistCols(e.currentTarget, () => renderMatchHistory(view)); }));
   const more = view.querySelector("#mhmore");
   if (more) more.onclick = () => { mh.shown += 50; renderMatchHistory(view); };
