@@ -39,6 +39,10 @@ pub struct Settings {
     /// Film grenade lineup videos (the most thrown first) after the highlights.
     #[serde(default = "d_true")]
     pub auto_lineups: bool,
+    /// Download new Premier and Competitive demos from Valve after you close CS2 (no need to
+    /// download them in CS2's Watch tab).
+    #[serde(default = "d_true")]
+    pub premier_auto: bool,
     pub profile: PathBuf,
     /// Look up the FACEIT account linked to the Steam account (level, ELO, match list).
     #[serde(default = "d_true")]
@@ -91,6 +95,7 @@ impl Settings {
                     auto_render: true,
                     auto_lowlights: true,
                     auto_lineups: true,
+                    premier_auto: true,
                     profile: profile.clone(),
                     faceit_enabled: true,
                     faceit_nickname: String::new(),

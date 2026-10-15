@@ -731,8 +731,14 @@ input[type=color] { width: 44px; height: 30px; padding: 2px; background: var(--r
 .mp-board tr.me td { background: var(--row-hi); }
 .mp-board tr.me td.mp-name { color: var(--accent-text); }
 .mp-board td.zero { color: var(--faint); }
-.mp-party { color: var(--t); }
-.mp-party svg { width: 14px; height: 14px; }
+/* Party tabs (Leetify's): a colored tab on the left of each party member's row, with how many
+   queued together; every row keeps the room, so avatars and names line up. */
+.mp-board td.mp-name { position: relative; padding-left: 30px; }
+.mp-board td.mp-name > .pt-tab + * { margin-left: 0; }
+.pt-tab { position: absolute; left: 0; top: 2px; bottom: 2px; width: 19px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1px;
+  background: var(--pc); color: rgba(0, 0, 0, 0.78); border-radius: 6px 0 0 6px; }
+.pt-tab svg { width: 12px; height: 12px; }
+.pt-tab b { font-size: 10px; line-height: 1; font-weight: 900; }
 .mp-badge { margin-left: 8px; padding: 2px 7px; border-radius: 4px; font-size: 11px; font-weight: 800; }
 .mp-badge.win { background: color-mix(in srgb, var(--win) 22%, transparent); color: var(--win); }
 .mp-badge.loss { background: color-mix(in srgb, var(--loss) 22%, transparent); color: var(--loss); }
@@ -807,7 +813,27 @@ input[type=color] { width: 44px; height: 30px; padding: 2px; background: var(--r
 .hs-split-bar { grid-column: 1 / -1; display: flex; gap: 2px; height: 4px; }
 .hs-split-bar i { border-radius: 2px; background: #f0a030; flex: 1; }
 .hs-split-bar i:first-child { flex: none; background: var(--accent); }
-.hs-leaders { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.hs-leaders { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px; }
+.hs-leader-list { display: grid; grid-template-rows: repeat(4, 1fr); gap: 8px; min-width: 0; }
+.hs-leader-x { font-size: 11px; line-height: 1.3; color: var(--muted); text-align: right; white-space: nowrap; }
+.hs-leader .hs-leader-x b { display: inline; font-size: inherit; color: var(--text); }
+/* The MVP (FACEIT's card): who, the rating and its word, then four stats */
+.hs-mvp { position: relative; display: flex; flex-direction: column; justify-content: space-between; gap: 14px; padding: 16px 16px 14px 18px; min-width: 0; background: var(--card);
+  border: 1px solid var(--line); border-radius: var(--radius-sm); box-shadow: inset 4px 0 0 var(--accent); }
+.hs-mvp.enemy { box-shadow: inset 4px 0 0 #f0a030; }
+.hs-mvp-tag { position: absolute; top: 12px; right: 14px; font-size: 20px; font-weight: 900; letter-spacing: 0.02em; }
+.hs-mvp-tag .star { margin-right: 3px; font-size: 17px; }
+.hs-mvp-who { display: flex; align-items: center; gap: 12px; min-width: 0; padding-right: 70px; }
+.hs-mvp-who b { display: block; font-size: 17px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.hs-mvp-rank { margin-top: 4px; display: flex; align-items: center; gap: 6px; font-size: 12.5px; }
+.hs-mvp-rating { display: flex; align-items: center; gap: 10px; }
+.hs-mvp-rating .rchip { font-size: 20px; padding: 3px 9px 5px; }
+.hs-mvp-rating > span:last-child { display: flex; flex-direction: column; line-height: 1.25; }
+.hs-mvp-rating > span:last-child b { font-size: 13px; }
+.hs-mvp-rating .sub { font-size: 11.5px; }
+.hs-mvp-stats { display: grid; grid-template-columns: 1fr 1fr; gap: 12px 10px; }
+.hs-mvp-stats b { display: block; font-size: 17px; font-weight: 800; }
+.hs-mvp-stats span { font-size: 12px; color: var(--muted); }
 .hs-leader { display: flex; align-items: center; gap: 11px; padding: 10px 14px 10px 16px; background: var(--card);
   border: 1px solid var(--line); border-radius: var(--radius-sm); box-shadow: inset 4px 0 0 var(--accent); }
 .hs-leader.enemy { box-shadow: inset 4px 0 0 #f0a030; }

@@ -589,8 +589,40 @@ async function loadRoster(m) {
   }
   return state.rosters.get(m.id);
 }
-const nameCell = (p, roster, withRank = true) =>
-  `${p.party ? `<span class="mp-party" title="In your party">${ICONS.party}</span>` : ""}${avatarHtml(p.steamid)}${withRank ? rankHtml(p, roster) : ""}<span class="mp-pname">${esc(p.name)}</span>`;
+// Who queued together in a match, like Leetify shows it: FACEIT's party of every player, Valve's
+// for Premier matches Veloxify downloaded (premier.json), else just your own party. Each party gets
+// a tab of its own color (your team's greens and blues, the enemy's oranges and pinks), biggest first.
+const PARTY_COLORS = { mine: ["#2fc9a0", "#5aa9ff", "#b98cff", "#e3c25a"], enemy: ["#f2806b", "#ffb03a", "#ff6fae", "#9d8cff"] };
+let premierParties = null;
+async function loadPremierParties() {
+  if (premierParties) return premierParties;
+  try {
+    const r = await fetch(assetUrl("premier.json"), { cache: "no-store" });
+    premierParties = r.ok ? (await r.json()).parties || {} : {};
+  } catch (e) { premierParties = {}; }
+  return premierParties;
+}
+function partyTabs(m) {
+  const key = new Map();
+  const valve = premierParties?.[m.id];
+  for (const p of m.players) {
+    const k = m._roster ? m._roster[p.steamid]?.party : valve ? valve[p.steamid] : p.party || p.steamid === state.index.me ? "you" : null;
+    if (k) key.set(p.steamid, String(k));
+  }
+  const out = new Map();
+  for (const side of ["mine", "enemy"]) {
+    const groups = new Map();
+    for (const p of m.players.filter((x) => x.side === side)) {
+      const k = key.get(p.steamid);
+      if (k) groups.set(k, [...(groups.get(k) || []), p.steamid]);
+    }
+    [...groups.values()].filter((g) => g.length > 1).sort((a, b) => b.length - a.length)
+      .forEach((g, i) => g.forEach((sid) => out.set(sid, { size: g.length, color: PARTY_COLORS[side][i % PARTY_COLORS[side].length] })));
+  }
+  return out;
+}
+const nameCell = (p, roster, withRank = true, party = null) =>
+  `${party ? `<span class="pt-tab" style="--pc:${party.color}" title="Queued together: a party of ${party.size}">${ICONS.party}<b>${party.size}</b></span>` : ""}${avatarHtml(p.steamid)}${withRank ? rankHtml(p, roster) : ""}<span class="mp-pname">${esc(p.name)}</span>`;
 // A player's rank as a number to sort by: FACEIT ELO in a FACEIT match, else the Premier rating.
 const rankValue = (p, roster) => (roster ? roster[p.steamid]?.elo ?? -1 : p.rank_type === 11 && p.rank ? p.rank : -1);
 
@@ -687,7 +719,7 @@ async function renderMatchPage(view, id, tab) {
   const s = summaryOf(id);
   if (!s) { view.innerHTML = `<a class="day-back" href="#/matches">◀ Match history</a><div class="empty">Match not found.</div>`; return; }
   const m = s.stats_only ? null : await loadMatch(id);
-  if (m) m._roster = await loadRoster(m);
+  if (m) [m._roster] = await Promise.all([loadRoster(m), loadPremierParties()]);
   const tabs = [["overview", "Overview"]];
   if (m) tabs.push(["timeline", "Timeline"], ["replay", "2D Replay"], ["lineups", "Lineups"], ["aim", "Aim"], ["utility", "Utility"], ["activity", "Activity"], ["trades", "Trades"], ["opening", "Opening Duels"], ["clutches", "Clutches"], ["h2h", "Head to Head"], ["breakdown", "Rating Breakdown"], ["zones", "Map Zones"], ["ratings", "Ratings"],
     ["highlights", `Highlights${m.highlights.length ? ` (${m.highlights.length})` : ""}`], ["lowlights", `Lowlights${(m.lowlights || []).length ? ` (${m.lowlights.length})` : ""}`]);
@@ -802,9 +834,24 @@ function renderMatchScoreboard(body, m) {
   };
   const head = (title, won) => `<tr class="mp-team"><th class="mp-name">${title} <span class="mp-badge ${won ? "win" : "loss"}">${won ? "WIN" : m.result === "tie" ? "TIE" : "LOSS"}</span></th>
     ${COLS.map(([k, t]) => `<th data-sort="${k}" draggable="true" title="Click to sort, drag to move" class="${matchSort.key === k ? "on" : ""}">${t}${matchSort.key === k ? (matchSort.desc ? " ↓" : " ↑") : ""}</th>`).join("")}</tr>`;
+  const parties = partyTabs(m);
+  const LOWER_BETTER = new Set(["deaths", "dpr", "fd"]);
+  const best = {};
+  for (const [k] of COLS) {
+    const f = MATCH_SORTS[k];
+    if (!f || k === "name") continue;
+    const vals = m.players.map(f).filter((v) => typeof v === "number" && !Number.isNaN(v));
+    const b = LOWER_BETTER.has(k) ? Math.min(...vals) : Math.max(...vals);
+    // A column where nobody did it (no 5Ks) has no leader.
+    if (vals.length && (LOWER_BETTER.has(k) || b > 0)) best[k] = b;
+  }
+  const starred = (p, k) => {
+    const html = cell(p, k);
+    return best[k] != null && MATCH_SORTS[k](p) === best[k] ? html.replace(/<\/td>$/, ` <span class="star" title="Best in the match">★</span></td>`) : html;
+  };
   const row = (p, won) => `<tr class="${won ? "won" : "lost"} ${p.steamid === me ? "me" : ""}">
-    <td class="mp-name">${nameCell(p, m._roster, false)}</td>
-    ${COLS.map(([k]) => cell(p, k)).join("")}</tr>`;
+    <td class="mp-name">${nameCell(p, m._roster, false, parties.get(p.steamid))}</td>
+    ${COLS.map(([k]) => starred(p, k)).join("")}</tr>`;
   const mineWon = m.result === "win", theirsWon = m.result === "loss";
   body.innerHTML = `
     <div class="mp-board-tools"><button class="btn ghost small" id="mp-cols" title="Pick the stats this table shows">${COLS_ICON} Columns</button></div>
@@ -971,8 +1018,9 @@ function teamTables(body, m, rows, cols, sortState, rerender) {
   }
   const head = (title, won, tie) => `<tr class="mp-team"><th class="mp-name">${title} <span class="mp-badge ${won ? "win" : "loss"}">${won ? "WIN" : tie ? "TIE" : "LOSS"}</span></th>
     ${cols.map((c) => `<th data-sort="${c.key}" class="${sortState.key === c.key ? "on" : ""}" ${c.tip ? `title="${esc(c.tip)}"` : ""}>${c.label}${sortState.key === c.key ? (sortState.desc ? " ↓" : " ↑") : ""}</th>`).join("")}</tr>`;
+  const parties = partyTabs(m);
   const row = (r, won) => `<tr class="${won ? "won" : "lost"} ${r.p.steamid === me ? "me" : ""}">
-    <td class="mp-name">${nameCell(r.p, m._roster)}</td>
+    <td class="mp-name">${nameCell(r.p, m._roster, true, parties.get(r.p.steamid))}</td>
     ${cols.map((c) => c.cell(r, ctx[c.key])).join("")}</tr>`;
   const mineWon = m.result === "win", theirsWon = m.result === "loss", tie = m.result === "tie";
   body.innerHTML = `<div class="mp-board-wrap"><table class="mp-board">
@@ -1623,10 +1671,30 @@ async function renderMatchSummary(el, m, id) {
   const hsPct = (ps) => { const k = total(ps, (p) => p.counts.kills); return k ? (total(ps, (p) => p.counts.headshot_kills) / k) * 100 : 0; };
   const awp = new Map();
   for (const k of d?.kills || []) if (k.weapon === "awp" && !k.team_kill) awp.set(k.attacker, (awp.get(k.attacker) || 0) + 1);
-  const leader = (label, f, fmt = (x) => x) => {
+  const leader = (label, f, fmt = (x) => x, extra = null) => {
     const p = [...m.players].sort((a, b) => f(b) - f(a))[0];
     if (!p || !(f(p) > 0)) return "";
-    return `<div class="hs-leader ${p.side} ${p.steamid === me ? "me" : ""}">${avatarHtml(p.steamid, 34)}<div class="hs-leader-who"><b>${label}</b><span>${esc(p.name)}</span></div><em>${fmt(f(p))}</em></div>`;
+    return `<div class="hs-leader ${p.side} ${p.steamid === me ? "me" : ""}">${avatarHtml(p.steamid, 34)}<div class="hs-leader-who"><b>${label}</b><span>${esc(p.name)}</span></div>${extra ? `<span class="hs-leader-x">${extra(p)}</span>` : ""}<em>${fmt(f(p))}</em></div>`;
+  };
+  // The match's MVP (best Rating 3.0), FACEIT's way: who, the rating, then swing, ADR, K/D/A, HS%.
+  const mvp = [...m.players].sort((a, b) => r3(b.derived) - r3(a.derived))[0];
+  const mvpHtml = (p) => {
+    const r = r3(p.derived), c = p.counts, sw = p.derived.swing || 0;
+    return `<section class="hs-mvp ${p.side} ${p.steamid === me ? "me" : ""}">
+      <div class="hs-mvp-tag"><span class="star">★</span>MVP</div>
+      <div class="hs-mvp-who">${avatarHtml(p.steamid, 58)}<div><b>${esc(p.name)}</b><div class="hs-mvp-rank">${rankHtml(p, m._roster)}</div></div></div>
+      <div class="hs-mvp-rating"><span class="rchip ${ratingClass(r)}">${f2(r)}<i style="width:${Math.min(100, (r / 2) * 100)}%"></i></span><span><b class="${ratingClass(r)}">${esc(ratingWord(r))}</b><span class="sub">HLTV Rating 3.0</span></span></div>
+      <div class="hs-mvp-stats">
+        <div><b class="${sw > 0 ? "up" : sw < 0 ? "down" : ""}">${fmtSwing(sw)}</b><span>Swing</span></div>
+        <div><b>${f1(p.derived.adr)}</b><span>ADR</span></div>
+        <div><b>${c.kills}/${c.deaths}/${c.assists}</b><span>K/D/A</span></div>
+        <div><b>${Math.round(p.derived.hs_pct)}%</b><span>Headshot %</span></div>
+      </div>
+    </section>`;
+  };
+  const openings = (p) => {
+    const won = p.counts.opening_kills, tries = won + p.counts.opening_deaths;
+    return `<b>${tries ? Math.round((won / tries) * 100) : 0}%</b> won<br>${tries} attempt${tries === 1 ? "" : "s"}`;
   };
   const players = [...m.players].sort((a, b) => r3(b.derived) - r3(a.derived));
   const top = Math.max(1.5, ...players.map((p) => r3(p.derived) + 0.1));
@@ -1670,12 +1738,13 @@ async function renderMatchSummary(el, m, id) {
         ${cmp("Headshot kills", hsPct(teams.mine), hsPct(teams.enemy), pct0)}
       </section>
       <section class="hs-leaders">
-        ${leader("Most kills", (p) => p.counts.kills)}
-        ${leader("Most damage", (p) => p.derived.adr, f1)}
-        ${leader("Most assists", (p) => p.counts.assists)}
-        ${d ? leader("Most AWP kills", (p) => awp.get(p.steamid) || 0) : ""}
-        ${leader("Most first kills", (p) => p.counts.opening_kills)}
-        ${leader("Best rating 3.0", (p) => r3(p.derived), f2)}
+        ${mvp ? mvpHtml(mvp) : ""}
+        <div class="hs-leader-list">
+          ${leader("Most kills", (p) => p.counts.kills)}
+          ${leader("Most ADR", (p) => p.derived.adr, f1)}
+          ${leader("Most opening kills", (p) => p.counts.opening_kills, (x) => x, openings)}
+          ${leader("Best KAST", (p) => p.derived.kast, (v) => `${Math.round(v)}%`)}
+        </div>
       </section>
     </div>
     <div class="hs-split">
@@ -7748,6 +7817,7 @@ async function renderSettings(view) {
         <div id="faceit-account">${faceitAccountRow()}</div>
         ${row("Use FACEIT data", "Level, ELO and your full FACEIT match list, found from your Steam account. No login or API key.", sw("faceit_enabled", s.faceit_enabled))}
         ${row("FACEIT demos", "Get demos downloads every missing demo in one click through Veloxify's own FACEIT window. If FACEIT ever asks you to sign in, do it once there: it's a separate browser profile, so your Chrome and FACEIT client stay signed in, and Veloxify never sees your password. FACEIT's human check runs normally; once in a while it may ask you to tick a box.", tauri ? `<button class="btn" id="faceit-sign-in">Sign in to FACEIT</button>` : "")}
+        ${row("Premier matches", "After you close CS2, Veloxify asks Valve for your recent matches through your Steam and downloads the new Premier and Competitive demos, so you don't have to download them in CS2's Watch tab. While it asks (a few seconds), Steam shows you in CS2.", sw("premier_auto", s.premier_auto ?? true))}
         ${row("FACEIT nickname", "Only needed if your account isn't found automatically.", `<input type="text" data-key="faceit_nickname" value="${esc(s.faceit_nickname)}" placeholder="Found automatically" ${tauri ? "" : "disabled"}>`)}
       </section>
       ${appearancePanel()}
@@ -7875,7 +7945,7 @@ function wireFaceitRefresh() {
 async function saveSettings() {
   const s = settingsData.settings;
   const update = {
-    watch_dirs: s.watch_dirs, auto_render: s.auto_render, auto_lowlights: s.auto_lowlights ?? true, auto_lineups: s.auto_lineups ?? true, faceit_enabled: s.faceit_enabled, faceit_nickname: s.faceit_nickname,
+    watch_dirs: s.watch_dirs, auto_render: s.auto_render, auto_lowlights: s.auto_lowlights ?? true, auto_lineups: s.auto_lineups ?? true, premier_auto: s.premier_auto ?? true, faceit_enabled: s.faceit_enabled, faceit_nickname: s.faceit_nickname,
     selectivity: s.selectivity, max_per_match: Number(s.max_per_match) || 6, start_with_windows: s.start_with_windows,
     max_clips_gb: Number(s.max_clips_gb) || 0, max_demos_gb: Number(s.max_demos_gb) || 0, render: settingsData.render,
   };

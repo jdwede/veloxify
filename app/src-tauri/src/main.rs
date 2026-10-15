@@ -15,6 +15,7 @@ mod log;
 mod mapicons;
 mod players;
 mod practice;
+mod premier;
 mod settings;
 mod share;
 mod system;
@@ -159,6 +160,8 @@ struct SettingsUpdate {
     auto_lowlights: bool,
     #[serde(default = "yes")]
     auto_lineups: bool,
+    #[serde(default = "yes")]
+    premier_auto: bool,
     faceit_enabled: bool,
     faceit_nickname: String,
     selectivity: String,
@@ -182,6 +185,8 @@ fn save_settings(state: State<AppState>, update: SettingsUpdate) -> Result<(), S
     s.auto_render = update.auto_render;
     s.auto_lowlights = update.auto_lowlights;
     s.auto_lineups = update.auto_lineups;
+    let premier_on = !s.premier_auto && update.premier_auto;
+    s.premier_auto = update.premier_auto;
     s.faceit_enabled = update.faceit_enabled;
     s.faceit_nickname = update.faceit_nickname.trim().to_string();
     s.selectivity = update.selectivity;
@@ -193,6 +198,9 @@ fn save_settings(state: State<AppState>, update: SettingsUpdate) -> Result<(), S
     update.render.save(&s.profile).map_err(|e| e.to_string())?;
     if faceit_changed && s.faceit_enabled {
         let _ = state.jobs.lock().unwrap().send(Job::Faceit);
+    }
+    if premier_on {
+        let _ = state.jobs.lock().unwrap().send(Job::Premier);
     }
     Ok(())
 }
@@ -581,6 +589,12 @@ fn main() {
     // `veloxify --extract-radars de_mirage de_dust2 ...`: write the radars into the library and
     // report what happened (for troubleshooting), without starting the app.
     let args: Vec<String> = std::env::args().collect();
+    // `veloxify --premier-matches <out.json>`: the short-lived helper that asks Valve for your
+    // recent matchmaking matches (see premier.rs).
+    if let Some(i) = args.iter().position(|a| a == "--premier-matches") {
+        let out = args.get(i + 1).map(PathBuf::from).unwrap_or_else(|| std::env::temp_dir().join("veloxify-premier.json"));
+        std::process::exit(premier::helper_main(&out));
+    }
     if let Some(i) = args.iter().position(|a| a == "--extract-radars") {
         let lib = Settings::load().library_dir;
         let maps: Vec<String> = args[i + 1..].to_vec();

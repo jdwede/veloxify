@@ -47,6 +47,8 @@ pub enum Job {
     RenderLineups(Vec<String>),
     /// Filming was stopped for a moment (to share a clip): automatic filming carries on.
     Resume,
+    /// Look for new Premier matches now (the setting was turned on).
+    Premier,
 }
 
 /// What a render run makes.
@@ -67,6 +69,12 @@ static ASKED: AtomicU64 = AtomicU64::new(0);
 pub fn asked() {
     ASKED.fetch_add(1, Ordering::SeqCst);
 }
+
+/// After CS2 closes, Steam needs a moment to end its game coordinator session before Veloxify
+/// can ask for the match list.
+const PREMIER_AFTER_CS2: Duration = Duration::from_secs(25);
+/// A match's demo isn't on Valve's servers until a few minutes after it ends: asked again this often.
+const PREMIER_RETRY: Duration = Duration::from_secs(5 * 60);
 
 /// An import that fails with an error (not a skip) is tried again on later passes, up to this
 /// many times, before the demo is left alone.
@@ -215,6 +223,10 @@ impl Worker {
         // after the stop): lineup videos wait for the next game.
         let mut held = false;
         let mut lineups_held = false;
+        // When to ask Valve for new Premier matches: at start, after each time you play, and
+        // again while a match's demo isn't uploaded yet.
+        let mut premier_next: Option<Instant> = Some(Instant::now());
+        let mut premier_fails = 0u32;
         // Right tray color from the start (the first import can take a while).
         self.set(if system::cs2_running() { "waiting" } else { "idle" }, "Starting", 0, 0);
         loop {
@@ -222,6 +234,7 @@ impl Worker {
                 // Nothing heavy while the user may be playing: no demo parsing, rendering or
                 // re-indexing. Only FACEIT's newest matches, so finished games show between games.
                 was_playing = true;
+                premier_next = Some(Instant::now() + PREMIER_AFTER_CS2);
                 self.set("waiting", "CS2 is running. Finished matches show up as you play; demos and clips are processed after you close CS2.", 0, 0);
                 let settings = self.settings.lock().unwrap().clone();
                 if settings.faceit_enabled && last_faceit.map_or(true, |t| t.elapsed() > FACEIT_WHILE_PLAYING) {
@@ -240,6 +253,7 @@ impl Worker {
                     Ok(Job::Import(files)) => self.forget(&files),
                     Ok(Job::RenderLineups(ids)) => pending_lineups.extend(ids),
                     Ok(Job::Resume) => (held, lineups_held) = (false, false),
+                    Ok(Job::Premier) => premier_next = Some(Instant::now()),
                     Err(RecvTimeoutError::Disconnected) => return,
                     _ => {}
                 }
@@ -254,6 +268,7 @@ impl Worker {
                     Ok(Job::Import(files)) => self.forget(&files),
                     Ok(Job::RenderLineups(ids)) => pending_lineups.extend(ids),
                     Ok(Job::Resume) => (held, lineups_held) = (false, false),
+                    Ok(Job::Premier) => premier_next = Some(Instant::now()),
                     Err(RecvTimeoutError::Disconnected) => return,
                     _ => {}
                 }
@@ -283,6 +298,40 @@ impl Worker {
             }
             if cs2hl_render::session::repair_cut_short_render(me) {
                 vlog!("put back your CS2 video settings after a render was cut short");
+            }
+            // New Premier matches first: their demos are downloaded, then imported with the rest.
+            if settings.premier_auto && premier_next.is_some() {
+                let due = premier_next.unwrap();
+                // Just after CS2 closed: wait out the few seconds rather than film first.
+                if due > Instant::now() && due - Instant::now() <= PREMIER_AFTER_CS2 {
+                    std::thread::sleep(due - Instant::now());
+                }
+                if Instant::now() >= due && !system::cs2_running() {
+                    premier_next = None;
+                    self.set("importing", "Looking for new Premier matches", 0, 0);
+                    let dest = crate::demos::demos_dir();
+                    let _ = std::fs::create_dir_all(&dest);
+                    let progress = |i: usize, n: usize| self.set("importing", format!("Downloading Premier match {} of {n}", i + 1), i, n);
+                    match crate::premier::fetch_new(&settings.library_dir, me, &dest, &system::cs2_running, &progress) {
+                        Ok(f) => {
+                            premier_fails = 0;
+                            if f.downloaded > 0 {
+                                vlog!("premier: {} new match demo{} downloaded", f.downloaded, if f.downloaded == 1 { "" } else { "s" });
+                            }
+                            if f.waiting {
+                                premier_next = Some(Instant::now() + PREMIER_RETRY);
+                            }
+                        }
+                        Err(e) => {
+                            vlog!("premier: {e:#}");
+                            premier_fails += 1;
+                            if premier_fails < 3 {
+                                premier_next = Some(Instant::now() + Duration::from_secs(120));
+                            }
+                        }
+                    }
+                    self.set("idle", "Up to date", 0, 0);
+                }
             }
             let imported = self.import(&settings, me);
             if imported || !settings.library_dir.join("my_stats.json").exists() || !settings.library_dir.join("lobby_clutches.json").exists() {
@@ -378,6 +427,7 @@ impl Worker {
                         Job::Import(files) => self.forget(&files),
                         Job::RenderLineups(ids) => pending_lineups.extend(ids),
                         Job::Resume => (held, lineups_held) = (false, false),
+                        Job::Premier => premier_next = Some(Instant::now()),
                         _ => {}
                     }
                 }
@@ -407,6 +457,7 @@ impl Worker {
                             Job::Faceit => last_faceit = None,
                             Job::Import(files) => self.forget(&files),
                             Job::Resume => (held, lineups_held) = (false, false),
+                            Job::Premier => premier_next = Some(Instant::now()),
                             Job::Now => {}
                         }
                         first = true;
@@ -436,6 +487,7 @@ impl Worker {
                 Ok(Job::Import(files)) => self.forget(&files),
                 Ok(Job::RenderLineups(ids)) => pending_lineups.extend(ids),
                 Ok(Job::Resume) => (held, lineups_held) = (false, false),
+                    Ok(Job::Premier) => premier_next = Some(Instant::now()),
                 Err(RecvTimeoutError::Disconnected) => return,
                 _ => {}
             }

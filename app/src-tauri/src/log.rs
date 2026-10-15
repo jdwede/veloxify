@@ -82,10 +82,11 @@ pub fn report(version: &str, settings: &Settings, status: &Status) -> String {
     let _ = writeln!(r, "Library: {}", settings.library_dir.display());
     let _ = writeln!(
         r,
-        "Make highlights automatically: {} · lowlights too: {} · lineup videos: {} · FACEIT data: {} · FACEIT nickname set: {}",
+        "Make highlights automatically: {} · lowlights too: {} · lineup videos: {} · Premier downloads: {} · FACEIT data: {} · FACEIT nickname set: {}",
         yes(settings.auto_render),
         yes(settings.auto_lowlights),
         yes(settings.auto_lineups),
+        yes(settings.premier_auto),
         yes(settings.faceit_enabled),
         yes(!settings.faceit_nickname.trim().is_empty())
     );
