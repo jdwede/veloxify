@@ -6516,6 +6516,8 @@ async function renderScout(view, team) {
   const always = Object.entries(bans).filter(([, n]) => n >= Math.max(2, vetoGames * 0.75)).map(([m]) => mapName(m));
   if (always.length) tips.push(`They almost always ban <b>${esc(always.join(", "))}</b>.`);
   if (neverBanned.length) tips.push(`They never banned <b>${esc(neverBanned.map(mapName).join(", "))}</b>: expect to play one of these.`);
+  const most = mapRows[0];
+  if (most && most.n >= 3) tips.push(`They play <b>${esc(mapName(most.map))}</b> the most: ${most.n} of ${games.length} maps (${most.w}-${most.l}).`);
   const best = mapRows.filter((r) => r.n >= 2).sort((a, b) => b.w / b.n - a.w / a.n || b.n - a.n)[0];
   if (best) tips.push(`Best map: <b>${esc(mapName(best.map))}</b> (${best.w}-${best.l}, rounds ${best.rf}-${best.ra}).`);
   const worst = mapRows.filter((r) => r.n >= 2 && r.l > r.w).sort((a, b) => a.w / a.n - b.w / b.n)[0];
