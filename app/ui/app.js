@@ -1610,16 +1610,23 @@ async function renderClutchTab(body, m, id) {
 // player's Rating 3.0 against HLTV's Bad / Average / Good bands.
 async function renderMatchSummary(el, m, id) {
   const d = await loadDetails(id);
+  const me = state.index.me;
   const teams = { mine: m.players.filter((p) => p.side === "mine"), enemy: m.players.filter((p) => p.side === "enemy") };
   const avg = (ps, f) => (ps.length ? ps.reduce((a, p) => a + f(p), 0) / ps.length : 0);
   const total = (ps, f) => ps.reduce((a, p) => a + f(p), 0);
-  const cmp = (label, a, b, fmt = (x) => x) => `<div class="hs-row"><span>${label}</span><b class="${a > b ? "up" : a < b ? "down" : ""}">${fmt(a)}</b><i>:</i><b class="${b > a ? "up" : b < a ? "down" : ""}">${fmt(b)}</b></div>`;
+  const cmp = (label, a, b, fmt = (x) => x) => {
+    const share = a + b > 0 ? (a / (a + b)) * 100 : 50;
+    return `<div class="hs-row"><b class="${a > b ? "up" : a < b ? "down" : ""}">${fmt(a)}</b><span>${label}</span><b class="${b > a ? "up" : b < a ? "down" : ""}">${fmt(b)}</b>
+      <div class="hs-split-bar"><i style="width:${share.toFixed(1)}%"></i><i></i></div></div>`;
+  };
+  const multi = (p) => (p.counts.multikill_rounds || []).slice(2).reduce((a, n) => a + n, 0);
+  const hsPct = (ps) => { const k = total(ps, (p) => p.counts.kills); return k ? (total(ps, (p) => p.counts.headshot_kills) / k) * 100 : 0; };
   const awp = new Map();
   for (const k of d?.kills || []) if (k.weapon === "awp" && !k.team_kill) awp.set(k.attacker, (awp.get(k.attacker) || 0) + 1);
   const leader = (label, f, fmt = (x) => x) => {
     const p = [...m.players].sort((a, b) => f(b) - f(a))[0];
     if (!p || !(f(p) > 0)) return "";
-    return `<div class="hs-leader ${p.side}"><div><b>${esc(p.name)}</b><span>${label}</span></div><em>${fmt(f(p))}</em></div>`;
+    return `<div class="hs-leader ${p.side} ${p.steamid === me ? "me" : ""}">${avatarHtml(p.steamid, 34)}<div class="hs-leader-who"><b>${label}</b><span>${esc(p.name)}</span></div><em>${fmt(f(p))}</em></div>`;
   };
   const players = [...m.players].sort((a, b) => r3(b.derived) - r3(a.derived));
   const top = Math.max(1.5, ...players.map((p) => r3(p.derived) + 0.1));
@@ -1652,12 +1659,15 @@ async function renderMatchSummary(el, m, id) {
   el.innerHTML = `
     <div class="hs-wrap">
       <section class="hs-card">
-        <div class="hs-teams"><div><b>My Team</b><em class="${m.result === "win" ? "up" : "down"}">${m.score_mine}</em></div>
-          <div class="hs-map">${mapIcon(m.map)}<span>${esc(mapName(m.map))}</span></div>
-          <div><b>Enemy Team</b><em class="${m.result === "loss" ? "up" : "down"}">${m.score_theirs}</em></div></div>
-        ${cmp("Team rating 3.0", avg(teams.mine, (p) => r3(p.derived)), avg(teams.enemy, (p) => r3(p.derived)), f2)}
+        <div class="hs-teams"><b class="mine">My Team</b><span class="sub">Team stats</span><b class="enemy">Enemy Team</b></div>
+        ${cmp("Rating 3.0", avg(teams.mine, (p) => r3(p.derived)), avg(teams.enemy, (p) => r3(p.derived)), f2)}
+        ${cmp("ADR", avg(teams.mine, (p) => p.derived.adr), avg(teams.enemy, (p) => p.derived.adr), f1)}
         ${cmp("First kills", total(teams.mine, (p) => p.counts.opening_kills), total(teams.enemy, (p) => p.counts.opening_kills))}
+        ${cmp("Trade kills", total(teams.mine, (p) => p.counts.trade_kills), total(teams.enemy, (p) => p.counts.trade_kills))}
+        ${cmp("Multi-kill rounds", total(teams.mine, multi), total(teams.enemy, multi))}
         ${cmp("Clutches won", total(teams.mine, (p) => sum(p.counts.clutches_won)), total(teams.enemy, (p) => sum(p.counts.clutches_won)))}
+        ${cmp("Utility damage", total(teams.mine, (p) => p.counts.utility_damage), total(teams.enemy, (p) => p.counts.utility_damage))}
+        ${cmp("Headshot kills", hsPct(teams.mine), hsPct(teams.enemy), pct0)}
       </section>
       <section class="hs-leaders">
         ${leader("Most kills", (p) => p.counts.kills)}
@@ -1674,7 +1684,7 @@ async function renderMatchSummary(el, m, id) {
         <span class="legend"><i class="mine"></i>My Team <i class="enemy"></i>Enemy Team</span></div>
       <div class="hs-chart">
         <div class="hs-bands"><i class="bad" style="width:${x(0.85)}"></i><i class="avg" style="left:${x(0.85)};width:${(0.3 / top) * 100}%"></i><i class="good" style="left:${x(1.15)};right:0"></i></div>
-        ${players.map((p) => `<div class="hs-bar-row ${p.side}" title="${esc(p.name)}: ${f2(r3(p.derived))}"><span>${esc(p.name)}</span>
+        ${players.map((p) => `<div class="hs-bar-row ${p.side} ${p.steamid === me ? "me" : ""}" title="${esc(p.name)}: ${f2(r3(p.derived))}"><span>${p.steamid === me ? `<em class="hs-you">You</em>` : ""}${esc(p.name)}</span>
           <div class="hs-track"><i style="width:${x(r3(p.derived))}"></i><b style="left:${x(r3(p.derived))}">${f2(r3(p.derived))}</b></div></div>`).join("")}
         <div class="hs-axis"><span></span><div>${[0, 0.4, 0.85, 1.15, top].map((v) => `<em style="left:${x(v)}">${f2(v)}</em>`).join("")}</div></div>
         <div class="hs-axis words"><span></span><div><em style="left:${x(0.42)}">Bad</em><em style="left:${x(1.0)}">Average</em><em style="left:${x((1.15 + top) / 2)}">Good</em></div></div>
