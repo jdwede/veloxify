@@ -776,7 +776,7 @@ async function renderMatchPage(view, id, tab) {
   if (tab === "timeline") return renderTimelineTab(body, m, id);
   if (tab === "lineups") return renderLineupsTab(body, m, id);
   if (tab === "replay") return renderReplayTab(body, m, id);
-  body.innerHTML = `<div id="mp-summary"></div><div id="mp-board"></div>`;
+  body.innerHTML = `<div class="ov-grid"><div id="mp-summary"></div><div id="mp-board"></div></div>`;
   renderMatchScoreboard(body.querySelector("#mp-board"), m);
   await renderMatchSummary(body.querySelector("#mp-summary"), m, id);
 }
@@ -787,6 +787,9 @@ const BOARD_COLS = [["rank", "Rank"], ["rating", "HLTV 3.0"], ["rws", "RWS"], ["
   ["rating2", "Rating 2.0"], ["rating1", "Rating 1.0"], ["hs", "HS%"], ["dpr", "D/R"], ["mvps", "MVPs"], ["dmg", "Damage"], ["fk", "First kills"], ["fd", "First deaths"],
   ["trades", "Trade kills"], ["clutch", "Clutches"], ["ud", "Utility dmg"], ["ef", "Flashed"], ["fa", "Flash assists"], ["acc", "Accuracy"], ["hacc", "Head accuracy"],
   ["plants", "Plants"], ["defuses", "Defuses"], ["aim", "Aim"], ["util", "Utility"]];
+// Shorter column names, used when the scoreboard has to tighten up to fit.
+const BOARD_SHORT = { kills: "K", assists: "A", deaths: "D", xhair: "Xhair", rating2: "R 2.0", rating1: "R 1.0", dmg: "Dmg", fk: "FK", fd: "FD", trades: "Trades",
+  clutch: "Clutch", ud: "UD", ef: "Flashed", fa: "FA", acc: "Acc", hacc: "Head acc", util: "Util", defuses: "Defs", mvps: "MVPs" };
 const BOARD_DEFAULT = ["rank", "rating", "rws", "swing", "kills", "assists", "deaths", "kd", "adr", "kr", "kast", "aim", "util", "k2", "k3", "k4", "k5", "xhair"];
 const BOARD_GROUPS = [["Ratings", ["rating", "rating2", "rating1", "rws", "swing", "aim", "util", "rank"]], ["Kills and damage", ["kills", "assists", "deaths", "kd", "kr", "dpr", "hs", "adr", "dmg", "kast", "mvps"]],
   ["Multi-kills", ["k2", "k3", "k4", "k5"]], ["Openings, trades, clutches", ["fk", "fd", "trades", "clutch"]], ["Utility", ["ud", "ef", "fa"]], ["Aim", ["acc", "hacc"]],
@@ -859,8 +862,10 @@ function renderMatchScoreboard(body, m) {
       default: return `<td class="${c.multikill_rounds[Number(k[1])] ? "" : "zero"}">${c.multikill_rounds[Number(k[1])]}</td>`;
     }
   };
-  const head = (title, won) => `<tr class="mp-team"><th class="mp-name">${title} <span class="mp-badge ${won ? "win" : "loss"}">${won ? "WIN" : m.result === "tie" ? "TIE" : "LOSS"}</span></th>
-    ${COLS.map(([k, t]) => `<th data-sort="${k}" draggable="true" title="Click to sort, drag to move" class="${matchSort.key === k ? "on" : ""}">${t}${matchSort.key === k ? (matchSort.desc ? " ↓" : " ↑") : ""}</th>`).join("")}</tr>`;
+  const label = (k, t) => (BOARD_SHORT[k] ? `<span class="lf">${t}</span><span class="ls">${BOARD_SHORT[k]}</span>` : t);
+  const head = (title, won, tools) => `<tr class="mp-team"><th class="mp-name">${title} <span class="mp-badge ${won ? "win" : "loss"}">${won ? "WIN" : m.result === "tie" ? "TIE" : "LOSS"}</span>
+    ${tools ? `<button class="btn ghost small mp-cols-btn" id="mp-cols" title="Pick the stats this table shows">${COLS_ICON}<span>Columns</span></button>` : ""}</th>
+    ${COLS.map(([k, t]) => `<th data-sort="${k}" draggable="true" title="${esc(t)}: click to sort, drag to move" class="${matchSort.key === k ? "on" : ""}">${label(k, t)}${matchSort.key === k ? (matchSort.desc ? " ↓" : " ↑") : ""}</th>`).join("")}</tr>`;
   const parties = partyTabs(m);
   const LOWER_BETTER = new Set(["deaths", "dpr", "fd"]);
   const best = {};
@@ -874,21 +879,22 @@ function renderMatchScoreboard(body, m) {
   }
   const starred = (p, k) => {
     const html = cell(p, k);
-    return best[k] != null && MATCH_SORTS[k](p) === best[k] ? html.replace(/<\/td>$/, ` <span class="star" title="Best in the match">★</span></td>`) : html;
+    return best[k] != null && MATCH_SORTS[k](p) === best[k]
+      ? html.replace(/^(<td[^>]*>)([\s\S]*)<\/td>$/, `$1<span class="cv">$2<span class="star" title="Best in the match">★</span></span></td>`) : html;
   };
   const row = (p, won) => `<tr class="${won ? "won" : "lost"} ${p.steamid === me ? "me" : ""}">
     <td class="mp-name">${nameCell(p, m._roster, false, parties.get(p.steamid))}</td>
     ${COLS.map(([k]) => starred(p, k)).join("")}</tr>`;
   const mineWon = m.result === "win", theirsWon = m.result === "loss";
   body.innerHTML = `
-    <div class="mp-board-tools"><button class="btn ghost small" id="mp-cols" title="Pick the stats this table shows">${COLS_ICON} Columns</button></div>
     <div class="mp-board-wrap"><table class="mp-board">
-      <thead>${head("My Team", mineWon)}</thead>
+      <thead>${head("My Team", mineWon, true)}</thead>
       <tbody>${sorted("mine").map((p) => row(p, mineWon)).join("")}</tbody>
       <thead>${head("Enemy Team", theirsWon)}</thead>
       <tbody>${sorted("enemy").map((p) => row(p, theirsWon)).join("")}</tbody>
     </table></div>
     <div class="note">Kills, assists and deaths come from CS2's end-of-match scoreboard. HLTV 3.0 is estimated from the demo. Click a column to sort, drag it to move it, and pick stats with Columns (saved; <a class="link" href="#" id="mp-cols-reset">reset</a>).</div>`;
+  fitBoard(body);
   body.querySelectorAll("th[data-sort]").forEach((th) => {
     th.onclick = () => {
       const k = th.dataset.sort;
@@ -911,11 +917,34 @@ function renderMatchScoreboard(body, m) {
     };
   });
   body.querySelector("#mp-cols-reset").onclick = (e) => { e.preventDefault(); try { localStorage.removeItem("veloxify.boardCols"); } catch (err) { /* nothing saved */ } renderMatchScoreboard(body, m); };
-  body.querySelector("#mp-cols").onclick = (e) => openColPicker(e.currentTarget, {
+  body.querySelector("#mp-cols").onclick = (e) => { e.stopPropagation(); openColPicker(e.currentTarget, {
     catalog: BOARD_COLS, groups: BOARD_GROUPS, cols: COLS.map(([k]) => k),
     onChange: (cols) => { savePickedCols("veloxify.boardCols", BOARD_COLS, cols); renderMatchScoreboard(body, m); },
     onReset: () => { try { localStorage.removeItem("veloxify.boardCols"); } catch (err) { /* nothing saved */ } renderMatchScoreboard(body, m); },
-  });
+  }); };
+}
+
+// A scoreboard never scrolls sideways: it tightens its spacing, then uses short column names and
+// smaller text, and only then scales down to the page's width. Again whenever the page resizes.
+function fitBoard(holder) {
+  const fit = () => {
+    const wrap = holder.querySelector(".mp-board-wrap"), table = wrap?.querySelector("table");
+    if (!table) return;
+    table.classList.remove("dense", "denser");
+    table.style.zoom = "";
+    for (const cls of ["dense", "denser"]) {
+      if (table.scrollWidth <= wrap.clientWidth + 1) return;
+      table.classList.add(cls);
+    }
+    if (table.scrollWidth > wrap.clientWidth + 1) table.style.zoom = String(Math.max(0.55, (wrap.clientWidth - 2) / table.scrollWidth));
+  };
+  fit();
+  if (!holder._fit) {
+    let width = holder.clientWidth;
+    holder._fit = new ResizeObserver(() => { if (holder.clientWidth !== width) { width = holder.clientWidth; holder._fitNow(); } });
+    holder._fit.observe(holder);
+  }
+  holder._fitNow = fit;
 }
 
 // ---- match details: HLTV-style summary, Aim, Utility, Activity, Opening duels, Clutches ----------
@@ -1081,6 +1110,7 @@ function teamTables(body, m, rows, cols, sortState, rerender) {
       <thead>${head("My Team", mineWon, tie)}</thead><tbody>${sorted("mine").map((r) => row(r, mineWon)).join("")}</tbody>
       <thead>${head("Enemy Team", theirsWon, tie)}</thead><tbody>${sorted("enemy").map((r) => row(r, theirsWon)).join("")}</tbody>
     </table></div>`;
+  fitBoard(body);
   body.querySelectorAll("th[data-sort]").forEach((th) => (th.onclick = () => {
     const k = th.dataset.sort;
     const c = cols.find((x) => x.key === k);
@@ -1741,7 +1771,7 @@ async function renderMatchSummary(el, m, id) {
     const r = r3(p.derived), c = p.counts, sw = p.derived.swing || 0;
     return `<section class="hs-mvp ${p.side} ${p.steamid === me ? "me" : ""}">
       <div class="hs-mvp-top">
-        ${avatarHtml(p.steamid, 44)}
+        ${avatarHtml(p.steamid, 40)}
         <div class="hs-mvp-who"><b>${esc(p.name)}</b><div class="hs-mvp-rank">${rankHtml(p, m._roster)}</div></div>
         <div class="hs-mvp-rating" title="HLTV Rating 3.0"><span class="rchip ${ratingClass(r)}">${f2(r)}<i style="width:${Math.min(100, (r / 2) * 100)}%"></i></span><b class="${ratingClass(r)}">${esc(ratingWord(r))}</b></div>
         <div class="hs-mvp-tag"><span class="star">★</span>MVP</div>
@@ -1780,30 +1810,23 @@ async function renderMatchSummary(el, m, id) {
           </div>
         </div>
       </section>`;
+  const hlCard = (h) => `
+          <div class="hl-card hs-hl-card ${h.clip ? "" : "pending"}" data-hl="${esc(h.id)}" ${clipAttr(h)}>
+            <div class="hl-thumb" style="--map-bg:${mapColor(m.map)};${thumb(h)}">
+              ${h.clip ? `<span class="play">▶</span>` : `<span class="state">${h.render_error ? esc(h.render_error) : "Rendering…"}</span>`}
+              <span class="dur">${fmtClip(h.duration_s)}</span></div>
+            <div class="hs-hl-info"><div class="hl-title">${esc(h.title)}</div>
+              <div class="hl-meta"><span>${esc(names.get(h.player) || "")}</span><span>round ${h.round}</span></div>
+              <div class="tags">${h.tags.map((t) => tagHtml(t)).join("")}</div></div>
+          </div>`;
   const hlPanel = best ? `
       <section class="hs-hl">
         <div class="hs-perf-head"><div class="h3">Highlights</div>${hls.length > 1 ? `<a class="link" href="${matchHref(id, "highlights")}">All ${hls.length}</a>` : ""}</div>
-        <div class="hs-hl-body ${hls.length > 1 ? "" : "solo"}">
-          <div class="hl-card hs-hl-main ${best.clip ? "" : "pending"}" data-hl="${esc(best.id)}" ${clipAttr(best)}>
-            <div class="hl-thumb" style="--map-bg:${mapColor(m.map)};${thumb(best)}">
-              ${best.clip ? `<span class="play">▶</span>` : `<span class="state">${best.render_error ? esc(best.render_error) : "Rendering…"}</span>`}
-              <span class="dur">${fmtClip(best.duration_s)}</span></div>
-            <div class="hl-info"><div class="hl-title">${esc(best.title)}</div>
-              <div class="hl-meta"><span>${esc(names.get(best.player) || "")}</span><span>round ${best.round}</span></div>
-              <div class="tags">${best.tags.map((t) => tagHtml(t)).join("")}</div></div>
-          </div>
-          ${hls.length > 1 ? `<div class="hs-hl-side">${hls.slice(1, 4).map((h) => `
-            <div class="hl-card hs-hl-mini ${h.clip ? "" : "pending"}" data-hl="${esc(h.id)}" ${clipAttr(h)} title="${esc(h.title)}">
-              <div class="hl-thumb" style="--map-bg:${mapColor(m.map)};${thumb(h)}">${h.clip ? `<span class="play">▶</span>` : `<span class="state">Rendering…</span>`}<span class="dur">${fmtClip(h.duration_s)}</span></div>
-              <div class="hs-hl-t">${esc(h.title)}</div>
-            </div>`).join("")}</div>` : ""}
-        </div>
+        <div class="hs-hl-row">${hls.slice(0, 4).map(hlCard).join("")}</div>
       </section>` : `
       <section class="hs-hl empty-hl"><div class="h3">Highlights</div><div class="empty small">No highlights this match.</div></section>`;
   const x = (v) => `${(v / top) * 100}%`;
   el.innerHTML = `
-    <div class="hs-wrap">
-      <section class="hs-leaders">
         <div class="hs-left">${mvp ? mvpHtml(mvp) : ""}${potm ? potmHtml(potm) : ""}</div>
         <div class="hs-leader-list">
           ${leader("Most kills", (p) => p.counts.kills)}
@@ -1811,7 +1834,6 @@ async function renderMatchSummary(el, m, id) {
           ${leader("Most opening kills", (p) => p.counts.opening_kills, (x) => x, openings)}
           ${leader("Best KAST", (p) => p.derived.kast, (v) => `${Math.round(v)}%`)}
         </div>
-      </section>
       <section class="hs-card">
         <div class="hs-teams"><b class="mine">My Team</b><span class="sub">Team stats</span><b class="enemy">Enemy Team</b></div>
         ${cmp("Rating 3.0", avg(teams.mine, (p) => r3(p.derived)), avg(teams.enemy, (p) => r3(p.derived)), f2, mine ? r3(mine.derived) : null)}
@@ -1823,8 +1845,6 @@ async function renderMatchSummary(el, m, id) {
         ${cmp("Utility damage", total(teams.mine, (p) => p.counts.utility_damage), total(teams.enemy, (p) => p.counts.utility_damage))}
         ${cmp("Headshot kills", hsPct(teams.mine), hsPct(teams.enemy), pct0, myHs)}
       </section>
-    </div>
-    <div class="hs-split">
     <section class="hs-perf">
       <div class="hs-perf-head"><div class="h3">Performance · Rating 3.0</div>
         <span class="legend"><i class="mine"></i>My Team <i class="enemy"></i>Enemy Team</span></div>
@@ -1836,8 +1856,7 @@ async function renderMatchSummary(el, m, id) {
         <div class="hs-axis words"><span></span><div><em style="left:${x(0.42)}">Bad</em><em style="left:${x(1.0)}">Average</em><em style="left:${x((1.15 + top) / 2)}">Good</em></div></div>
       </div>
     </section>
-    ${hlPanel}
-    </div>`;
+    ${hlPanel}`;
   // Play from the match's rendered clips.
   state.playlist = [...(potm?.clip ? [potm] : []), ...hls.filter((h) => h.clip)].map((h) => ({ ...h, name: names.get(h.player), match: m }));
   el.querySelector("[data-film-potm]")?.addEventListener("click", async (e) => {
