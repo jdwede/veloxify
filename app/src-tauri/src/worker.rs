@@ -250,6 +250,11 @@ impl Worker {
         // Right tray color from the start (the first import can take a while).
         self.set(if system::cs2_running() { "waiting" } else { "idle" }, "Starting", 0, 0);
         loop {
+            // An update is downloading: nothing new starts (Veloxify closes for the installer).
+            if crate::updater::updating() {
+                std::thread::sleep(Duration::from_secs(2));
+                continue;
+            }
             if system::cs2_running() {
                 // Nothing heavy while the user may be playing: no demo parsing, rendering or
                 // re-indexing. Only FACEIT's newest matches, so finished games show between games.
@@ -272,7 +277,7 @@ impl Worker {
                 match jobs.recv_timeout(Duration::from_secs(20)) {
                     Ok(Job::Render(ids)) => pending_render.extend(ids),
                     Ok(Job::RenderClips(items)) => pending_clips.extend(items),
-                    Ok(Job::Faceit) => last_faceit = None,
+                    Ok(Job::Faceit) => (last_faceit, faceit_dirty) = (None, true),
                     Ok(Job::Import(files)) => self.forget(&files),
                     Ok(Job::RenderLineups(ids)) => pending_lineups.extend(ids),
                     Ok(Job::Resume) => (held, lineups_held) = (false, false),
@@ -288,7 +293,7 @@ impl Worker {
                 match jobs.recv_timeout(Duration::from_secs(5)) {
                     Ok(Job::Render(ids)) => pending_render.extend(ids),
                     Ok(Job::RenderClips(items)) => pending_clips.extend(items),
-                    Ok(Job::Faceit) => last_faceit = None,
+                    Ok(Job::Faceit) => (last_faceit, faceit_dirty) = (None, true),
                     Ok(Job::Import(files)) => self.forget(&files),
                     Ok(Job::RenderLineups(ids)) => pending_lineups.extend(ids),
                     Ok(Job::Resume) => (held, lineups_held) = (false, false),
@@ -450,7 +455,7 @@ impl Worker {
                     match job {
                         Job::Render(ids) => pending_render.extend(ids),
                         Job::RenderClips(items) => pending_clips.extend(items),
-                        Job::Faceit => last_faceit = None,
+                        Job::Faceit => (last_faceit, faceit_dirty) = (None, true),
                         Job::Import(files) => self.forget(&files),
                         Job::RenderLineups(ids) => pending_lineups.extend(ids),
                         Job::Resume => (held, lineups_held) = (false, false),
@@ -482,7 +487,7 @@ impl Worker {
                             Job::Render(ids) => pending_render.extend(ids),
                             Job::RenderClips(items) => pending_clips.extend(items),
                             Job::RenderLineups(ids) => pending_lineups.extend(ids),
-                            Job::Faceit => last_faceit = None,
+                            Job::Faceit => (last_faceit, faceit_dirty) = (None, true),
                             Job::Import(files) => self.forget(&files),
                             Job::Resume => (held, lineups_held) = (false, false),
                             Job::Premier => premier_next = Some(Instant::now()),
@@ -512,7 +517,7 @@ impl Worker {
             match jobs.recv_timeout(POLL) {
                 Ok(Job::Render(ids)) => pending_render.extend(ids),
                 Ok(Job::RenderClips(items)) => pending_clips.extend(items),
-                Ok(Job::Faceit) => last_faceit = None,
+                Ok(Job::Faceit) => (last_faceit, faceit_dirty) = (None, true),
                 Ok(Job::Import(files)) => self.forget(&files),
                 Ok(Job::RenderLineups(ids)) => pending_lineups.extend(ids),
                 Ok(Job::Resume) => (held, lineups_held) = (false, false),
@@ -650,47 +655,10 @@ impl Worker {
 
     /// Names the user may go by on FACEIT: the one set in Settings, the names they played under
     /// in FACEIT demos (FACEIT servers use the FACEIT nickname), and their Steam name.
-    fn faceit_names(&self, settings: &Settings, me: u64) -> Vec<String> {
-        let lib = &settings.library_dir;
-        let mut names = vec![settings.faceit_nickname.trim().to_string()];
-        let index: Option<Index> = std::fs::read_to_string(lib.join("index.json")).ok().and_then(|t| serde_json::from_str(&t).ok());
-        if let Some(index) = index {
-            let me_s = me.to_string();
-            for m in index.matches.iter().rev().filter(|m| m.source == "faceit").take(10) {
-                let entry: Option<MatchEntry> =
-                    std::fs::read_to_string(lib.join("matches").join(format!("{}.json", m.id))).ok().and_then(|t| serde_json::from_str(&t).ok());
-                if let Some(p) = entry.as_ref().and_then(|e| e.players.iter().find(|p| p.steamid == me_s)) {
-                    names.push(p.name.clone());
-                }
-            }
-            names.push(index.me_name);
-        }
-        names.extend(system::steam_persona_name());
-        let mut seen = std::collections::HashSet::new();
-        names.retain(|n| !n.trim().is_empty() && seen.insert(n.to_lowercase()));
-        names
-    }
-
     /// Refreshes `faceit.json`; returns whether it changed. Light refreshes (while CS2 is open)
     /// skip reading the library for nickname hints once the account is known.
     fn refresh_faceit(&self, settings: &Settings, me: u64, light: bool) -> bool {
-        let lib = &settings.library_dir;
-        let known = Faceit::load(lib).is_some_and(|f| f.steamid == me.to_string() && !f.player_id.is_empty());
-        let names = if light && known { vec![settings.faceit_nickname.clone()] } else { self.faceit_names(settings, me) };
-        match faceit::refresh(lib, me, &names, light) {
-            Ok((_, changed)) => changed,
-            Err(e) => {
-                vlog!("faceit: {e:#}");
-                // Keep what we had through network hiccups; otherwise tell the app why it's empty.
-                let same = Faceit::load(lib).is_some_and(|f| f.steamid == me.to_string() && f.error.as_deref() == Some(e.to_string().as_str()));
-                if known || same {
-                    return false;
-                }
-                let f = Faceit { steamid: me.to_string(), fetched_at: chrono::Utc::now().timestamp(), error: Some(e.to_string()), ..Default::default() };
-                let _ = f.save(lib);
-                true
-            }
-        }
+        refresh_faceit(settings, me, light, false).0
     }
 
     fn map_icons(&self, settings: &Settings) {
@@ -1025,5 +993,50 @@ fn log_import(path: &Path, what: &str) {
     let line = format!("{} {}: {what}\n", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"), path.display());
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(data_dir().join("import.log")) {
         let _ = f.write_all(line.as_bytes());
+    }
+}
+
+/// Nicknames the user's FACEIT account may have: the one in Settings, the names they played
+/// under in their FACEIT demos, their Steam name.
+pub fn faceit_names(settings: &Settings, me: u64) -> Vec<String> {
+    let lib = &settings.library_dir;
+    let mut names = vec![settings.faceit_nickname.trim().to_string()];
+    let index: Option<Index> = std::fs::read_to_string(lib.join("index.json")).ok().and_then(|t| serde_json::from_str(&t).ok());
+    if let Some(index) = index {
+        let me_s = me.to_string();
+        for m in index.matches.iter().rev().filter(|m| m.source == "faceit").take(10) {
+            let entry: Option<MatchEntry> =
+                std::fs::read_to_string(lib.join("matches").join(format!("{}.json", m.id))).ok().and_then(|t| serde_json::from_str(&t).ok());
+            if let Some(p) = entry.as_ref().and_then(|e| e.players.iter().find(|p| p.steamid == me_s)) {
+                names.push(p.name.clone());
+            }
+        }
+        names.push(index.me_name);
+    }
+    names.extend(system::steam_persona_name());
+    let mut seen = std::collections::HashSet::new();
+    names.retain(|n| !n.trim().is_empty() && seen.insert(n.to_lowercase()));
+    names
+}
+
+/// Refreshes `faceit.json`: whether it changed, and why there's no account (if there isn't).
+/// `asked` (Refresh in Settings): the answer is always saved, so the app hears back.
+pub fn refresh_faceit(settings: &Settings, me: u64, light: bool, asked: bool) -> (bool, Option<String>) {
+    let lib = &settings.library_dir;
+    let known = Faceit::load(lib).is_some_and(|f| f.steamid == me.to_string() && !f.player_id.is_empty());
+    let names = if light && known { vec![settings.faceit_nickname.clone()] } else { faceit_names(settings, me) };
+    match faceit::refresh(lib, me, &names, light) {
+        Ok((_, changed)) => (changed || asked, None),
+        Err(e) => {
+            vlog!("faceit: {e:#}");
+            // Keep what we had through network hiccups; otherwise tell the app why it's empty.
+            let same = Faceit::load(lib).is_some_and(|f| f.steamid == me.to_string() && f.error.as_deref() == Some(e.to_string().as_str()));
+            if known || (same && !asked) {
+                return (asked, Some(e.to_string()));
+            }
+            let f = Faceit { steamid: me.to_string(), fetched_at: chrono::Utc::now().timestamp(), error: Some(e.to_string()), ..Default::default() };
+            let _ = f.save(lib);
+            (true, Some(e.to_string()))
+        }
     }
 }

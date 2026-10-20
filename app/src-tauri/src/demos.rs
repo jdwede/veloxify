@@ -163,6 +163,10 @@ fn window(app: &AppHandle, url: Url) -> tauri::Result<tauri::WebviewWindow> {
                 if payload.url().path().contains(&format!("/room/{id}")) {
                     let _ = w.eval(&GRAB_JS.replace("__ID__", &id));
                 }
+            } else if payload.url().host_str().is_some_and(|h| h == "www.faceit.com" || h == "faceit.com") {
+                // Who's signed in here: that's the user's FACEIT account (when it's linked to
+                // their Steam account), even if its nickname matches nothing Veloxify knows.
+                let _ = w.eval(WHOAMI_JS);
             }
         })
         .on_navigation(move |url| {
@@ -176,6 +180,20 @@ fn window(app: &AppHandle, url: Url) -> tauri::Result<tauri::WebviewWindow> {
                 "/msg" => {
                     if let (Some(tx), Ok(m)) = (tx, serde_json::from_str::<Msg>(&d)) {
                         let _ = tx.send(m);
+                    }
+                }
+                "/me" => {
+                    let v: serde_json::Value = serde_json::from_str(&d).unwrap_or_default();
+                    let (id, nick) = (v["id"].as_str().unwrap_or(""), v["nickname"].as_str().unwrap_or(""));
+                    if crate::faceit::set_signed_in(id, nick) {
+                        vlog!("faceit: signed in to the FACEIT window as {nick}");
+                        let app = nav_app.clone();
+                        std::thread::spawn(move || {
+                            let state = app.state::<crate::AppState>();
+                            let settings = state.settings.lock().unwrap().clone();
+                            let jobs = state.jobs.lock().unwrap().clone();
+                            crate::refresh_faceit_now(&app, &settings, &jobs);
+                        });
                     }
                 }
                 "/retry" | "/cancel" => {
@@ -545,6 +563,31 @@ const BANNER_JS: &str = r#"((s) => {
 /// Runs in the match room (like the FACEIT-to-Leetify extension): match details, FACEIT's own
 /// Turnstile check for "download demos", then the signed download link for each map. Reports
 /// back by navigating to veloxify.invalid (cancelled by the app).
+/// Reports the account signed in to this window (checked again for a few minutes, so signing in
+/// right here is noticed too). Only when no demo is being fetched (its messages use the same way out).
+const WHOAMI_JS: &str = r#"(async () => {
+  if (window._cf_chl_opt || /just a moment/i.test(document.title)) return;
+  if (window.__veloxifyMe) return;
+  window.__veloxifyMe = true;
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  for (let i = 0; i < 75; i++) {
+    for (const u of ["https://www.faceit.com/api/users/v1/sessions/me", "https://www.faceit.com/api/auth/v1/sessions/me"]) {
+      try {
+        const r = await fetch(u, { credentials: "include" });
+        if (!r.ok) continue;
+        const j = await r.json();
+        const p = (j && (j.payload || j.user || j)) || {};
+        const id = p.id || p.guid || p.user_id;
+        if (typeof id === "string" && id) {
+          location.href = "https://veloxify.invalid/me?d=" + encodeURIComponent(JSON.stringify({ id, nickname: p.nickname || "" }));
+          return;
+        }
+      } catch (e) { /* not signed in yet */ }
+    }
+    await sleep(4000);
+  }
+})()"#;
+
 const GRAB_JS: &str = r#"(async () => {
   const id = "__ID__";
   // Cloudflare's "Just a moment" page comes first; the app runs this again on the real room.

@@ -20,6 +20,7 @@ mod settings;
 mod share;
 mod system;
 mod tracking;
+mod updater;
 mod worker;
 
 use serde::{Deserialize, Serialize};
@@ -224,9 +225,85 @@ async fn pick_folder(app: tauri::AppHandle) -> Option<String> {
     app.dialog().file().blocking_pick_folder().and_then(|p| p.into_path().ok()).map(|p| p.display().to_string())
 }
 
+/// The newest release when it's newer than this Veloxify (checked at start, then every 6 hours).
+static UPDATE: Mutex<Option<updater::Update>> = Mutex::new(None);
+
 #[tauri::command]
-fn refresh_faceit(state: State<AppState>) {
-    let _ = state.jobs.lock().unwrap().send(Job::Faceit);
+fn get_update() -> Option<updater::Update> {
+    UPDATE.lock().unwrap().clone()
+}
+
+/// Settings' "Check for updates".
+#[tauri::command]
+async fn check_update() -> Result<Option<updater::Update>, String> {
+    let u = tauri::async_runtime::spawn_blocking(updater::check).await.map_err(|e| e.to_string())?.map_err(|e| e.to_string())?;
+    *UPDATE.lock().unwrap() = u.clone();
+    Ok(u)
+}
+
+/// One click: download the new installer, let whatever's running finish, then install quietly
+/// (Veloxify closes and the installer reopens it). Never while filming or getting demos.
+#[tauri::command]
+async fn install_update(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    use tauri::Emitter;
+    let u = UPDATE.lock().unwrap().clone().ok_or("No update to install")?;
+    if state.status.lock().unwrap().state == "rendering" {
+        return Err("Veloxify is filming: stop it first (click the status at the top right), then update".into());
+    }
+    if demos::downloading(&app) {
+        return Err("Veloxify is getting FACEIT demos: update when that's done".into());
+    }
+    updater::set_updating(true);
+    let status = state.status.clone();
+    let abort = state.abort.clone();
+    let res = tauri::async_runtime::spawn_blocking(move || -> anyhow::Result<()> {
+        let path = updater::download(&u, |done, total| {
+            let _ = app.emit("veloxify://update-progress", (done, total));
+        })?;
+        // Something already under way (reading a match) finishes first; filming never gets cut off.
+        let t = std::time::Instant::now();
+        while matches!(status.lock().unwrap().state.as_str(), "importing" | "rendering") {
+            if t.elapsed() > std::time::Duration::from_secs(600) {
+                anyhow::bail!("Veloxify is still busy: try again when it's done");
+            }
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        }
+        if status.lock().unwrap().state == "rendering" || demos::downloading(&app) {
+            anyhow::bail!("Veloxify got busy: try again when it's done");
+        }
+        vlog!("updating to {}", u.version);
+        updater::run_installer(&path)?;
+        abort.store(true, Ordering::SeqCst);
+        app.exit(0);
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())
+    .and_then(|r| r.map_err(|e| format!("{e:#}")));
+    if res.is_err() {
+        updater::set_updating(false);
+    }
+    res
+}
+
+/// Looks the FACEIT account up again right away (not after whatever the background work is
+/// doing) and tells the app how it went; the match list follows on the next background pass.
+#[tauri::command]
+fn refresh_faceit(app: tauri::AppHandle, state: State<AppState>) {
+    let settings = state.settings.lock().unwrap().clone();
+    let jobs = state.jobs.lock().unwrap().clone();
+    std::thread::spawn(move || refresh_faceit_now(&app, &settings, &jobs));
+}
+
+pub fn refresh_faceit_now(app: &tauri::AppHandle, settings: &Settings, jobs: &Sender<Job>) {
+    use tauri::Emitter;
+    let error = match settings.steamid64.or_else(system::active_steam_user) {
+        Some(me) => worker::refresh_faceit(settings, me, false, true).1,
+        None => Some("Log in to Steam first: Veloxify finds your FACEIT account from your Steam account".into()),
+    };
+    let _ = jobs.send(Job::Faceit);
+    let _ = app.emit("veloxify://library", ());
+    let _ = app.emit("veloxify://faceit", serde_json::json!({ "error": error }));
 }
 
 /// Opens a faceit.com page (match room, profile) in the default browser. Only FACEIT paths.
@@ -679,6 +756,9 @@ fn main() {
             save_settings,
             pick_folder,
             refresh_faceit,
+            get_update,
+            check_update,
+            install_update,
             open_faceit,
             open_library,
             get_demos,
@@ -762,6 +842,22 @@ fn main() {
                     }
                 })
                 .build(app)?;
+
+            // New releases: shortly after start, then every 6 hours (one small request).
+            let app_updates = app.handle().clone();
+            std::thread::Builder::new().name("veloxify-updates".into()).spawn(move || {
+                use tauri::Emitter;
+                std::thread::sleep(std::time::Duration::from_secs(20));
+                loop {
+                    if let Ok(u) = updater::check() {
+                        *UPDATE.lock().unwrap() = u.clone();
+                        if let Some(u) = u {
+                            let _ = app_updates.emit("veloxify://update", u);
+                        }
+                    }
+                    std::thread::sleep(std::time::Duration::from_secs(6 * 3600));
+                }
+            })?;
 
             let worker = Worker::new(app.handle().clone(), s2.clone(), st2.clone(), abort_worker.clone(), Some(stop.clone()));
             std::thread::Builder::new().name("veloxify-worker".into()).spawn(move || worker.run(rx))?;

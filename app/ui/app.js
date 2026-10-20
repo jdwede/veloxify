@@ -8298,7 +8298,10 @@ function faceitAccountRow() {
   const f = state.faceit;
   const right = tauri ? `<button class="btn" id="faceit-refresh">Refresh</button>` : "";
   if (!f) return `<div class="set-row"><div class="lbl"><b>FACEIT</b><span>Looking up the account linked to your Steam account…</span></div>${right}</div>`;
-  if (!f.player_id) return `<div class="set-row"><div class="lbl"><b>FACEIT</b><span>No FACEIT account is linked to this Steam account. Enter your FACEIT nickname below if you use a different one.</span></div>${right}</div>`;
+  if (!f.player_id) {
+    const why = f.error && !/^No FACEIT account is linked/.test(f.error) ? `${esc(f.error)}.` : "No FACEIT account found for this Steam account yet.";
+    return `<div class="set-row"><div class="lbl"><b>FACEIT</b><span>${why} Sign in to FACEIT below and Veloxify uses that account, or enter your FACEIT nickname.</span></div>${right}</div>`;
+  }
   const when = f.fetched_at ? new Date(f.fetched_at * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "";
   return `<div class="set-row">${f.avatar ? `<img class="fc-avatar" src="${esc(f.avatar)}" alt="">` : ""}${levelBadge(f.level, 32)}
     <div class="lbl"><b>${esc(f.nickname)} · ${f.elo.toLocaleString("en-US")} ELO</b><span>Found from your Steam account${when ? ` · updated ${when}` : ""}</span></div>${right}</div>`;
@@ -8320,7 +8323,7 @@ async function renderSettings(view) {
   const folders = s.watch_dirs.map((d, i) => `<div class="folder"><code title="${esc(d)}">${esc(d)}</code>${tauri ? `<button class="btn ghost" data-remove="${i}">Remove</button>` : ""}</div>`).join("")
     || `<div class="folder sub">No extra folders. Demos from Get demos are found automatically; add a folder here only if you keep other demos somewhere (e.g. Downloads).</div>`;
   view.innerHTML = `
-    <div class="profile-head"><div><div class="h2">Veloxify ${esc(settingsData.version)}</div><div class="h1">Settings</div></div><span class="saved" id="saved">Saved</span>
+    <div class="profile-head"><div><div class="h2">Veloxify ${esc(settingsData.version)}${tauri ? ` · <a class="link" href="#" id="check-update">${live.update ? `Update to ${esc(live.update.version)}` : "Check for updates"}</a>` : ""}</div><div class="h1">Settings</div></div><span class="saved" id="saved">Saved</span>
       ${KOFI_URL ? `<button class="kofi" id="kofi" title="Veloxify is free. If it helps you, you can buy me a coffee.">${KOFI_CUP}Support Veloxify on Ko-fi</button>` : ""}</div>
     ${tauri ? "" : `<div class="preview-note">Preview: settings can be changed in the desktop app.</div>`}
     <div class="settings">
@@ -8329,7 +8332,7 @@ async function renderSettings(view) {
         ${row("Steam", steamid ? `${esc(settingsData.steam_name || "Logged-in account")} · ${steamid}` : "Log in to Steam so Veloxify knows whose highlights to make.", "")}
         <div id="faceit-account">${faceitAccountRow()}</div>
         ${row("Use FACEIT data", "Level, ELO and your full FACEIT match list, found from your Steam account. No login or API key.", sw("faceit_enabled", s.faceit_enabled))}
-        ${row("FACEIT demos", "Get demos downloads every missing demo in one click through Veloxify's own FACEIT window. If FACEIT ever asks you to sign in, do it once there: it's a separate browser profile, so your Chrome and FACEIT client stay signed in, and Veloxify never sees your password. FACEIT's human check runs normally; once in a while it may ask you to tick a box.", tauri ? `<button class="btn" id="faceit-sign-in">Sign in to FACEIT</button>` : "")}
+        ${row("FACEIT demos", "Get demos downloads every missing demo in one click through Veloxify's own FACEIT window. Sign in to FACEIT there once (this also tells Veloxify which FACEIT account is yours): it's a separate browser profile, so your Chrome and FACEIT client stay signed in, and Veloxify never sees your password. FACEIT's human check runs normally; once in a while it may ask you to tick a box.", tauri ? `<button class="btn" id="faceit-sign-in">Sign in to FACEIT</button>` : "")}
         ${row("Premier matches", "After you close CS2, Veloxify asks Valve for your recent matches through your Steam and downloads the new Premier and Competitive demos, so you don't have to download them in CS2's Watch tab. While it asks (a few seconds), Steam shows you in CS2.", sw("premier_auto", s.premier_auto ?? true))}
         ${row("FACEIT nickname", "Only needed if your account isn't found automatically.", `<input type="text" data-key="faceit_nickname" value="${esc(s.faceit_nickname)}" placeholder="Found automatically" ${tauri ? "" : "disabled"}>`)}
       </section>
@@ -8404,6 +8407,17 @@ async function renderSettings(view) {
   };
   view.querySelector("#open-lib").onclick = () => tauri.core.invoke("open_library");
   view.querySelector("#faceit-sign-in").onclick = () => tauri.core.invoke("faceit_sign_in");
+  const checkUpdate = view.querySelector("#check-update");
+  if (checkUpdate) checkUpdate.onclick = async (e) => {
+    e.preventDefault();
+    if (live.update) return installUpdate();
+    checkUpdate.textContent = "Checking…";
+    try {
+      const u = await tauri.core.invoke("check_update");
+      showUpdate(u);
+      checkUpdate.textContent = u ? `Update to ${u.version}` : "You're up to date";
+    } catch (err) { checkUpdate.textContent = "Couldn't check (offline?)"; }
+  };
   view.querySelector("#debug-log").onclick = async (e) => {
     const b = e.currentTarget;
     b.disabled = true;
@@ -8455,6 +8469,46 @@ async function renderStorage(el) {
 function wireFaceitRefresh() {
   const b = document.getElementById("faceit-refresh");
   if (b) b.onclick = () => { b.disabled = true; b.textContent = "Refreshing…"; tauri.core.invoke("refresh_faceit"); };
+}
+
+// A newer Veloxify on GitHub: one click downloads it, installs it quietly and reopens Veloxify.
+function showUpdate(u) {
+  live.update = u || null;
+  const b = document.getElementById("update-btn");
+  if (!b) return;
+  b.hidden = !u;
+  if (!u) return;
+  b.disabled = false;
+  b.textContent = `Update to ${u.version}`;
+  const notes = (u.notes || "").replace(/\*\*/g, "").replace(/\r/g, "").trim();
+  b.title = `Veloxify ${u.version} is out. Click to install it: Veloxify closes for a moment and opens again.${notes ? `\n\nWhat's new:\n${notes.slice(0, 900)}` : ""}`;
+  b.onclick = installUpdate;
+}
+
+async function installUpdate() {
+  const b = document.getElementById("update-btn");
+  b.hidden = false;
+  b.disabled = true;
+  b.textContent = "Downloading…";
+  try {
+    await tauri.core.invoke("install_update");
+  } catch (err) {
+    b.disabled = false;
+    b.textContent = "Update failed";
+    b.title = String(err);
+    setTimeout(() => showUpdate(live.update), 6000);
+    alert(`Couldn't update: ${err}`);
+  }
+}
+
+// A FACEIT lookup finished (Refresh, or signing in to the FACEIT window): show the outcome.
+async function faceitRefreshed() {
+  try {
+    const r = await fetch(assetUrl("faceit.json"), { cache: "no-store" });
+    state.faceit = r.ok ? await r.json() : null;
+  } catch (e) { /* keep what's shown */ }
+  const box = document.getElementById("faceit-account");
+  if (box) { box.innerHTML = faceitAccountRow(); wireFaceitRefresh(); }
 }
 
 async function saveSettings() {
@@ -8812,6 +8866,14 @@ if (tauri) {
     route();
   };
   tauri.event.listen("veloxify://library", reload);
+  tauri.event.listen("veloxify://faceit", faceitRefreshed);
+  tauri.core.invoke("get_update").then(showUpdate);
+  tauri.event.listen("veloxify://update", (e) => showUpdate(e.payload));
+  tauri.event.listen("veloxify://update-progress", (e) => {
+    const [done, total] = e.payload;
+    const b = document.getElementById("update-btn");
+    b.textContent = total && done >= total ? "Installing…" : `Downloading ${total ? Math.floor((done / total) * 100) : 0}%`;
+  });
   document.addEventListener("visibilitychange", () => {
     if (!document.hidden && pendingReload && document.getElementById("player").hidden) { pendingReload = false; reload(); }
   });

@@ -8,7 +8,8 @@
 use anyhow::{bail, Context, Result};
 use cs2hl_core::faceit::{Faceit, FaceitMatch, Lifetime};
 use serde_json::Value;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::Duration;
 
 const API: &str = "https://api.faceit.com";
@@ -16,6 +17,31 @@ const API: &str = "https://api.faceit.com";
 const ROOMS_PER_REFRESH: usize = 40;
 /// Matches kept in `faceit.json`, newest first; each refresh adds to what's there.
 const KEEP: usize = 300;
+/// One refresh at a time (the background one and a Refresh click write the same file).
+static REFRESHING: Mutex<()> = Mutex::new(());
+
+/// The FACEIT account signed in to Veloxify's FACEIT window, as that window reported it.
+fn session_path() -> PathBuf {
+    crate::settings::data_dir().join("faceit_session.json")
+}
+
+/// The signed-in FACEIT account (id, nickname), if the FACEIT window has reported one.
+pub fn signed_in() -> Option<(String, String)> {
+    let v: Value = serde_json::from_str(&std::fs::read_to_string(session_path()).ok()?).ok()?;
+    let id = v["id"].as_str().filter(|s| !s.is_empty())?.to_string();
+    Some((id, v["nickname"].as_str().unwrap_or("").to_string()))
+}
+
+/// Remembers who is signed in to the FACEIT window; returns whether that's news.
+pub fn set_signed_in(id: &str, nickname: &str) -> bool {
+    if id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        return false;
+    }
+    if signed_in().is_some_and(|(i, _)| i == id) {
+        return false;
+    }
+    std::fs::write(session_path(), serde_json::json!({ "id": id, "nickname": nickname }).to_string()).is_ok()
+}
 
 fn agent() -> ureq::Agent {
     ureq::AgentBuilder::new()
@@ -59,22 +85,36 @@ fn linked_to(user: &Value, steamid: u64) -> bool {
     user["platforms"]["steam"]["id64"].as_str() == Some(s.as_str()) || user["games"]["cs2"]["game_id"].as_str() == Some(s.as_str())
 }
 
-/// The FACEIT account linked to `steamid`: the account found last time, else each candidate
-/// nickname (names the user played under on FACEIT servers, their Steam name, ...).
+/// The FACEIT account linked to `steamid`: the account found last time, the one signed in to
+/// Veloxify's FACEIT window, else each candidate nickname (names the user played under on FACEIT
+/// servers, their Steam name, ...). An account linked to another Steam account is never taken,
+/// but the error says so.
 fn find_user(agent: &ureq::Agent, steamid: u64, known_id: Option<&str>, candidates: &[String]) -> Result<Value> {
-    if let Some(id) = known_id.filter(|s| !s.is_empty()) {
-        if let Ok(v) = get(agent, &format!("{API}/users/v1/users/{id}")) {
+    let session = signed_in();
+    let ids = [known_id.map(str::to_string), session.as_ref().map(|(id, _)| id.clone())];
+    for id in ids.iter().flatten().filter(|s| !s.is_empty()) {
+        if let Ok(v) = get(agent, &format!("{API}/users/v1/users/{}", encode(id))) {
             if linked_to(&v["payload"], steamid) {
                 return Ok(v["payload"].clone());
             }
         }
     }
+    let mut elsewhere = None;
     for name in candidates.iter().filter(|n| !n.trim().is_empty()) {
         if let Ok(v) = get(agent, &format!("{API}/users/v1/nicknames/{}", encode(name.trim()))) {
             if linked_to(&v["payload"], steamid) {
                 return Ok(v["payload"].clone());
             }
+            if elsewhere.is_none() && v["payload"]["id"].is_string() {
+                elsewhere = v["payload"]["nickname"].as_str().map(str::to_string);
+            }
         }
+    }
+    if let Some((_, nick)) = session.filter(|(_, n)| !n.is_empty()) {
+        bail!("You're signed in to FACEIT as {nick}, but that FACEIT account is linked to a different Steam account than the one logged in to Steam on this PC")
+    }
+    if let Some(nick) = elsewhere {
+        bail!("The FACEIT account {nick} is linked to a different Steam account than the one logged in to Steam on this PC")
     }
     bail!("No FACEIT account is linked to this Steam account")
 }
@@ -153,6 +193,7 @@ fn read_room(fm: &mut FaceitMatch, room: &Value, player_id: &str) {
 /// between games: only the newest few matches and their rooms (two or three small requests);
 /// lifetime stats and older rooms wait for the next full refresh.
 pub fn refresh(root: &Path, steamid: u64, candidates: &[String], light: bool) -> Result<(Faceit, bool)> {
+    let _one = REFRESHING.lock().unwrap_or_else(|e| e.into_inner());
     let agent = agent();
     let old = Faceit::load(root).filter(|f| f.steamid == steamid.to_string());
     let user = find_user(&agent, steamid, old.as_ref().map(|f| f.player_id.as_str()), candidates)?;

@@ -95,6 +95,9 @@ a { color: inherit; text-decoration: none; }
 .tabs a:hover { color: var(--text); }
 .tabs a.active { color: var(--accent); border-bottom-color: var(--accent); }
 .status { font-size: 13px; color: var(--faint); min-width: 120px; text-align: right; }
+.update-btn { margin-left: 12px; padding: 6px 12px; border: 0; border-radius: var(--radius-sm); background: var(--accent); color: var(--on-accent); font-weight: 700; font-size: 12.5px; white-space: nowrap; cursor: pointer; }
+.update-btn:hover:not(:disabled) { filter: brightness(1.1); }
+.update-btn:disabled { cursor: default; opacity: 0.85; }
 .status.busy { color: var(--gold); }
 .status.stoppable { cursor: pointer; }
 .status.stoppable::after { content: "  ■ Stop"; color: var(--muted); }
