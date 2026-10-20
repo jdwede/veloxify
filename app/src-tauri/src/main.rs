@@ -55,6 +55,16 @@ fn process_now(state: State<AppState>) {
     let _ = state.jobs.lock().unwrap().send(Job::Now);
 }
 
+fn sixty() -> u32 {
+    60
+}
+
+/// Film now instead of waiting out the time after playing.
+#[tauri::command]
+fn film_now(state: State<AppState>) {
+    let _ = state.jobs.lock().unwrap().send(Job::FilmNow);
+}
+
 #[tauri::command]
 fn stop_rendering(state: State<AppState>) {
     state.abort.store(true, Ordering::SeqCst);
@@ -162,6 +172,8 @@ struct SettingsUpdate {
     auto_lineups: bool,
     #[serde(default = "yes")]
     premier_auto: bool,
+    #[serde(default = "sixty")]
+    film_wait_min: u32,
     faceit_enabled: bool,
     faceit_nickname: String,
     selectivity: String,
@@ -187,6 +199,7 @@ fn save_settings(state: State<AppState>, update: SettingsUpdate) -> Result<(), S
     s.auto_lineups = update.auto_lineups;
     let premier_on = !s.premier_auto && update.premier_auto;
     s.premier_auto = update.premier_auto;
+    s.film_wait_min = update.film_wait_min.min(24 * 60);
     s.faceit_enabled = update.faceit_enabled;
     s.faceit_nickname = update.faceit_nickname.trim().to_string();
     s.selectivity = update.selectivity;
@@ -690,6 +703,7 @@ fn main() {
             save_debug_log,
             league_division,
             league_scout,
+            film_now,
             scout_demos,
             silent_audio_device,
             rerender_silent_clips,

@@ -49,6 +49,8 @@ pub enum Job {
     Resume,
     /// Look for new Premier matches now (the setting was turned on).
     Premier,
+    /// Don't wait out the time after playing: film now (until the next game).
+    FilmNow,
 }
 
 /// What a render run makes.
@@ -70,9 +72,6 @@ pub fn asked() {
     ASKED.fetch_add(1, Ordering::SeqCst);
 }
 
-/// After CS2 closes, Steam needs a moment to end its game coordinator session before Veloxify
-/// can ask for the match list.
-const PREMIER_AFTER_CS2: Duration = Duration::from_secs(25);
 /// A match's demo isn't on Valve's servers until a few minutes after it ends: asked again this often.
 const PREMIER_RETRY: Duration = Duration::from_secs(5 * 60);
 
@@ -94,6 +93,18 @@ pub struct Status {
     /// When this batch of filming started (Unix seconds; 0 when not filming), for the elapsed time
     /// and the time left.
     pub since: u64,
+    /// Automatic filming waits until then (Unix seconds; 0 when it isn't waiting): a while after
+    /// you last played, so CS2 isn't started while you might be queueing for the next game.
+    pub wait_until: u64,
+}
+
+/// When CS2 was last seen running (Unix seconds), kept in the app's data folder so a restart of
+/// Veloxify still waits.
+fn last_played_path() -> PathBuf {
+    data_dir().join("last_played")
+}
+fn now_s() -> i64 {
+    chrono::Utc::now().timestamp()
 }
 
 /// What a batch films, in words: "highlights", "lowlights", "clips", "lineup videos".
@@ -125,6 +136,8 @@ pub struct Worker {
     reread_done: Cell<usize>,
     /// The same for matches analyzed again after a change to the highlight rules.
     rules_done: Cell<usize>,
+    /// When automatic work waits until (Unix seconds; 0: not waiting), shown in the status.
+    wait_until: Cell<u64>,
 }
 
 /// The tray icon tells at a glance what CS2 is up to: green = CS2 closed (Veloxify is free to
@@ -137,7 +150,7 @@ const TRAY_ICONS: [&[u8]; 3] = [
 
 impl Worker {
     pub fn new(app: AppHandle, settings: Arc<Mutex<Settings>>, status: Arc<Mutex<Status>>, abort: Arc<AtomicBool>, stop_item: Option<MenuItem<Wry>>) -> Self {
-        Self { app, settings, status, seen: Seen::load(), failed: HashMap::new(), abort, stop_item, tray_icon: Cell::new(None), not_drawing: Cell::new(None), reread_done: Cell::new(0), rules_done: Cell::new(0) }
+        Self { app, settings, status, seen: Seen::load(), failed: HashMap::new(), abort, stop_item, tray_icon: Cell::new(None), not_drawing: Cell::new(None), reread_done: Cell::new(0), rules_done: Cell::new(0), wait_until: Cell::new(0) }
     }
 
     fn set(&self, state: &str, message: impl Into<String>, done: usize, total: usize) {
@@ -156,7 +169,7 @@ impl Worker {
                 (String::new(), 0, 0)
             }
         };
-        let s = Status { state: state.into(), message: message.into(), done, total, kind, more, since };
+        let s = Status { state: state.into(), message: message.into(), done, total, kind, more, since, wait_until: self.wait_until.get() };
         let changed_state = self.status.lock().unwrap().state != s.state;
         if changed_state || self.status.lock().unwrap().message != s.message {
             vlog!("[{}] {}", s.state, s.message);
@@ -171,6 +184,10 @@ impl Worker {
                 "importing" => format!("Veloxify: {}", s.message),
                 "waiting" => "Veloxify: waiting for CS2 to close".to_string(),
                 "error" => format!("Veloxify: {}", s.message),
+                _ if s.wait_until > 0 => match chrono::DateTime::from_timestamp(s.wait_until as i64, 0) {
+                    Some(t) => format!("Veloxify: up to date, films at {}", t.with_timezone(&chrono::Local).format("%-I:%M %p")),
+                    None => "Veloxify: up to date".to_string(),
+                },
                 _ => "Veloxify: up to date".to_string(),
             };
             let _ = tray.set_tooltip(Some(tip));
@@ -227,6 +244,9 @@ impl Worker {
         // again while a match's demo isn't uploaded yet.
         let mut premier_next: Option<Instant> = Some(Instant::now());
         let mut premier_fails = 0u32;
+        // When CS2 last ran (saved, so a restart still waits), and "Film now" pressed since.
+        let mut last_played: i64 = std::fs::read_to_string(last_played_path()).ok().and_then(|t| t.trim().parse().ok()).unwrap_or(0);
+        let mut film_now = false;
         // Right tray color from the start (the first import can take a while).
         self.set(if system::cs2_running() { "waiting" } else { "idle" }, "Starting", 0, 0);
         loop {
@@ -234,7 +254,10 @@ impl Worker {
                 // Nothing heavy while the user may be playing: no demo parsing, rendering or
                 // re-indexing. Only FACEIT's newest matches, so finished games show between games.
                 was_playing = true;
-                premier_next = Some(Instant::now() + PREMIER_AFTER_CS2);
+                film_now = false;
+                premier_next = Some(Instant::now());
+                last_played = now_s();
+                let _ = std::fs::write(last_played_path(), last_played.to_string());
                 self.set("waiting", "CS2 is running. Finished matches show up as you play; demos and clips are processed after you close CS2.", 0, 0);
                 let settings = self.settings.lock().unwrap().clone();
                 if settings.faceit_enabled && last_faceit.map_or(true, |t| t.elapsed() > FACEIT_WHILE_PLAYING) {
@@ -254,6 +277,7 @@ impl Worker {
                     Ok(Job::RenderLineups(ids)) => pending_lineups.extend(ids),
                     Ok(Job::Resume) => (held, lineups_held) = (false, false),
                     Ok(Job::Premier) => premier_next = Some(Instant::now()),
+                    Ok(Job::FilmNow) => film_now = true,
                     Err(RecvTimeoutError::Disconnected) => return,
                     _ => {}
                 }
@@ -269,6 +293,7 @@ impl Worker {
                     Ok(Job::RenderLineups(ids)) => pending_lineups.extend(ids),
                     Ok(Job::Resume) => (held, lineups_held) = (false, false),
                     Ok(Job::Premier) => premier_next = Some(Instant::now()),
+                    Ok(Job::FilmNow) => film_now = true,
                     Err(RecvTimeoutError::Disconnected) => return,
                     _ => {}
                 }
@@ -299,13 +324,15 @@ impl Worker {
             if cs2hl_render::session::repair_cut_short_render(me) {
                 vlog!("put back your CS2 video settings after a render was cut short");
             }
+            // After playing, nothing that starts CS2 (filming, the Premier check) and no long
+            // background re-reading until a while has passed: they may only be between games.
+            // What they ask for still films right away, and "Film now" ends the wait.
+            let wait_until = if film_now || settings.film_wait_min == 0 { 0 } else { last_played + settings.film_wait_min as i64 * 60 };
+            let waiting = now_s() < wait_until;
+            self.wait_until.set(if waiting { wait_until as u64 } else { 0 });
             // New Premier matches first: their demos are downloaded, then imported with the rest.
-            if settings.premier_auto && premier_next.is_some() {
+            if settings.premier_auto && premier_next.is_some() && !waiting {
                 let due = premier_next.unwrap();
-                // Just after CS2 closed: wait out the few seconds rather than film first.
-                if due > Instant::now() && due - Instant::now() <= PREMIER_AFTER_CS2 {
-                    std::thread::sleep(due - Instant::now());
-                }
                 if Instant::now() >= due && !system::cs2_running() {
                     premier_next = None;
                     self.set("importing", "Looking for new Premier matches", 0, 0);
@@ -393,12 +420,12 @@ impl Worker {
             }
             // Older matches' details (match page, insights, crosshairs) before automatic filming:
             // a minute at a time, until none are left (an update can make all of them stale).
-            let (rebuilt, more_details) = self.backfill_details(&settings, me);
+            let (rebuilt, more_details) = if waiting { (false, false) } else { self.backfill_details(&settings, me) };
             if rebuilt {
                 self.library_changed();
             }
             // Then matches analyzed with older highlight rules (an update changed them).
-            let (updated, more_rules) = if more_details { (false, false) } else { self.update_highlights(&settings, me) };
+            let (updated, more_rules) = if more_details || waiting { (false, false) } else { self.update_highlights(&settings, me) };
             if updated {
                 self.library_changed();
             }
@@ -428,17 +455,18 @@ impl Worker {
                         Job::RenderLineups(ids) => pending_lineups.extend(ids),
                         Job::Resume => (held, lineups_held) = (false, false),
                         Job::Premier => premier_next = Some(Instant::now()),
+                        Job::FilmNow => film_now = true,
                         _ => {}
                     }
                 }
                 continue;
             }
-            if can_film && ((settings.auto_render && !held) || !pending_render.is_empty()) {
+            if can_film && ((settings.auto_render && !held && !waiting) || !pending_render.is_empty()) {
                 let scope =
                     if pending_render.is_empty() { Scope::LatestSession } else { Scope::Matches(std::mem::take(&mut pending_render)) };
                 held |= self.render(&settings, me, scope);
                 // Then the latest session's worst deaths, for the whiff analyzer.
-                if settings.auto_render && settings.auto_lowlights && !held && !system::cs2_running() {
+                if settings.auto_render && settings.auto_lowlights && !held && !waiting && !system::cs2_running() {
                     let items = latest_lowlights(&settings.library_dir, LOWLIGHTS_PER_MATCH);
                     if !items.is_empty() {
                         held |= self.render(&settings, me, Scope::Items(items));
@@ -446,7 +474,7 @@ impl Worker {
                 }
                 // Then grenade lineup videos, the most thrown first, a batch at a time. Anything
                 // asked for meanwhile, and demos being downloaded (new matches), go first.
-                if settings.auto_render && settings.auto_lineups && !held && !lineups_held && !system::cs2_running() {
+                if settings.auto_render && settings.auto_lineups && !held && !lineups_held && !waiting && !system::cs2_running() {
                     let seen = ASKED.load(Ordering::SeqCst);
                     let mut first = crate::demos::downloading(&self.app);
                     while let Ok(job) = jobs.try_recv() {
@@ -458,6 +486,7 @@ impl Worker {
                             Job::Import(files) => self.forget(&files),
                             Job::Resume => (held, lineups_held) = (false, false),
                             Job::Premier => premier_next = Some(Instant::now()),
+                            Job::FilmNow => film_now = true,
                             Job::Now => {}
                         }
                         first = true;
@@ -487,7 +516,8 @@ impl Worker {
                 Ok(Job::Import(files)) => self.forget(&files),
                 Ok(Job::RenderLineups(ids)) => pending_lineups.extend(ids),
                 Ok(Job::Resume) => (held, lineups_held) = (false, false),
-                    Ok(Job::Premier) => premier_next = Some(Instant::now()),
+                Ok(Job::Premier) => premier_next = Some(Instant::now()),
+                Ok(Job::FilmNow) => film_now = true,
                 Err(RecvTimeoutError::Disconnected) => return,
                 _ => {}
             }

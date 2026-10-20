@@ -19,6 +19,9 @@ fn d_true() -> bool {
 fn d_selectivity() -> String {
     "solid-plays".into()
 }
+fn d_film_wait() -> u32 {
+    60
+}
 fn d_max() -> usize {
     MAX_PER_PLAYER
 }
@@ -43,6 +46,10 @@ pub struct Settings {
     /// download them in CS2's Watch tab).
     #[serde(default = "d_true")]
     pub premier_auto: bool,
+    /// Minutes after CS2 was last open before Veloxify films or checks for Premier matches on its
+    /// own (you may only be between games); 0: right away.
+    #[serde(default = "d_film_wait")]
+    pub film_wait_min: u32,
     pub profile: PathBuf,
     /// Look up the FACEIT account linked to the Steam account (level, ELO, match list).
     #[serde(default = "d_true")]
@@ -96,6 +103,7 @@ impl Settings {
                     auto_lowlights: true,
                     auto_lineups: true,
                     premier_auto: true,
+                    film_wait_min: d_film_wait(),
                     profile: profile.clone(),
                     faceit_enabled: true,
                     faceit_nickname: String::new(),

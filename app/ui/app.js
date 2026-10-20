@@ -8318,6 +8318,8 @@ async function renderSettings(view) {
       <section class="panel">
         <div class="panel-head"><div class="h3">Highlights</div></div>
         ${row("Make highlights automatically", "After you close CS2, new demos are read and your best moments rendered in the background.", sw("auto_render", s.auto_render))}
+        ${row("Wait after you play", "Veloxify doesn't start CS2 to film (or check Valve for Premier matches) until this long after CS2 was last open, so it never gets in the way between games. Your new matches still show up right away. Film now in the status skips the wait.",
+          seg("film_wait_min", s.film_wait_min ?? 60, [[0, "Don't wait"], [30, "30 min"], [60, "1 hour"], [120, "2 hours"]]))}
         ${row("Capture lowlights too", "After the highlights, your 3 worst deaths from each match of the latest session are rendered too, for the whiff analyzer. Others render when you press Watch.", sw("auto_lowlights", s.auto_lowlights ?? true))}
         ${row("Film grenade lineups", `After your clips, Veloxify films the lineups from your demos for the Lineups page (the thrower's view, then the grenade until it goes off): the ones thrown ${LINEUP_AUTO_MIN} or more times, most thrown first. It makes way whenever new matches or clips need filming. Any other lineup films when you open it and press “Film this lineup now”.`, sw("auto_lineups", s.auto_lineups ?? true))}
         ${row("Which moments", "Best only: 3K+, aces, clutches and other always-moments. Solid plays adds 2Ks that mattered and reaction flicks. Everything adds plain 2Ks.",
@@ -8358,7 +8360,7 @@ async function renderSettings(view) {
       saveSettings();
       return;
     }
-    if (["height", "fps", "max_per_match"].includes(key)) value = Number(value);
+    if (["height", "fps", "max_per_match", "film_wait_min"].includes(key)) value = Number(value);
     if (["killfeed_only", "own_crosshair"].includes(key) && typeof value === "string") value = value === "true";
     (RENDER_KEYS.includes(key) ? settingsData.render : settingsData.settings)[key] = value;
     saveSettings();
@@ -8439,7 +8441,7 @@ function wireFaceitRefresh() {
 async function saveSettings() {
   const s = settingsData.settings;
   const update = {
-    watch_dirs: s.watch_dirs, auto_render: s.auto_render, auto_lowlights: s.auto_lowlights ?? true, auto_lineups: s.auto_lineups ?? true, premier_auto: s.premier_auto ?? true, faceit_enabled: s.faceit_enabled, faceit_nickname: s.faceit_nickname,
+    watch_dirs: s.watch_dirs, auto_render: s.auto_render, auto_lowlights: s.auto_lowlights ?? true, auto_lineups: s.auto_lineups ?? true, premier_auto: s.premier_auto ?? true, film_wait_min: Number(s.film_wait_min ?? 60), faceit_enabled: s.faceit_enabled, faceit_nickname: s.faceit_nickname,
     selectivity: s.selectivity, max_per_match: Number(s.max_per_match) || 6, start_with_windows: s.start_with_windows,
     max_clips_gb: Number(s.max_clips_gb) || 0, max_demos_gb: Number(s.max_demos_gb) || 0, render: settingsData.render,
   };
@@ -8540,9 +8542,16 @@ function showStatus(st) {
     : st.state === "waiting" ? "Playing · clips after CS2 closes"
     : st.state === "error" ? "Needs attention" : "Up to date";
   el.title = st.message || "";
-  // While CS2 is busy rendering, the status doubles as a stop button.
+  // While CS2 is busy rendering, the status doubles as a stop button; while filming waits after
+  // you played, as a "film now" button.
+  const waitTill = st.state === "idle" && st.wait_until > Date.now() / 1000 ? new Date(st.wait_until * 1000) : null;
+  if (waitTill) {
+    el.textContent = `Films at ${waitTill.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })} · Film now`;
+    el.title = "Veloxify waits a while after you play before it starts CS2 to film (you may only be between games). Click to film now. The wait is in Settings.";
+  }
   el.classList.toggle("stoppable", st.state === "rendering");
-  el.onclick = st.state === "rendering" ? () => tauri?.core.invoke("stop_rendering") : null;
+  el.classList.toggle("filmable", !!waitTill);
+  el.onclick = st.state === "rendering" ? () => tauri?.core.invoke("stop_rendering") : waitTill ? () => { tauri?.core.invoke("film_now"); el.textContent = "Filming soon"; } : null;
   if (st.state === "rendering") el.title = `CS2 is filming ${(CAPTURE_WHAT[st.kind] || "clip").toLowerCase()}s in the background. Click to stop and hand CS2 back.`;
 }
 
