@@ -7152,7 +7152,7 @@ async function renderSession(view, date, idx) {
         <div><b class="${gradeClass("kd", p.kd)}">${f2(p.kd)}</b><span>K/D</span></div>
         <div><b>${fmtSwing(p.swing)}</b><span>Swing</span></div>
       </div>
-      <div class="sc-maps">${p.results.map((r) => `<span class="${r.won ? "up" : "down"}" title="${esc(mapName(r.map))}">${r.won ? "W" : "L"}</span>`).join("")}</div>
+      <div class="sc-maps" style="--n:${Math.max(1, Math.min(12, p.results.length))}">${p.results.map((r) => `<span class="${r.won ? "up" : "down"}" title="${esc(mapName(r.map))}">${r.won ? "W" : "L"}</span>`).join("")}</div>
     </div>`;
 
   // Full session scoreboard.
@@ -7226,6 +7226,10 @@ async function renderSession(view, date, idx) {
     </div>
     <div class="sv-verdicts">${objectiveHtml(meRow, sdata)}${verdictHtml(judged)}</div>
     ${cards.length ? `<div class="sc-row">${cards.map(card).join("")}</div>` : `<div class="empty">No demos for this session yet.</div>`}
+    <section class="fc-card" style="margin-bottom:20px">
+      <div class="fc-head"><div class="h3">Matches</div></div>
+      ${historyTable(historyRows().filter((r) => sess.match_ids.includes(r.id)).sort((a, b) => a.when - b.when), histCols())}
+    </section>
     ${(() => {
       // Then your highlights on the left half, what we noticed (and setup changes) on the right.
       const side = `${notice.length ? `<section class="panel sv-noticed"><div class="panel-head"><div class="h3">What we noticed</div><span class="grow"></span><span class="sub">Things true of you in all your matches that showed this session too</span></div>
@@ -7241,10 +7245,6 @@ async function renderSession(view, date, idx) {
       </table></div>
       <div class="note">Your party: who FACEIT says queued with you, or (Premier, which doesn't record parties) teammates in two or more of the session's matches. HLTV 3.0, RWS, ADR, KAST and Swing are per round, so session values weight each match by its rounds. Entries: opening duels (the round's first kill) won-lost. Pistol rounds: your kills and deaths in each half's first round. Eco kills: on players with under $2,000 of equipment (not pistol rounds).
         Colors: green is good, red is poor. K/D, K/R and ADR against the usual marks (ADR 82+ is good, 95+ excellent); clutches against what the average player in your matches wins from the same 1vXs (about ${Math.round(rates[1] * 100)}% of 1v1s, ${Math.round(rates[2] * 100)}% of 1v2s, ${Math.round(rates[3] * 100)}% of 1v3s), so a few clutches lean average until the difference is clear.</div>
-    </section>
-    <section class="fc-card" style="margin-bottom:20px">
-      <div class="fc-head"><div class="h3">Matches</div></div>
-      ${historyTable(historyRows().filter((r) => sess.match_ids.includes(r.id)).sort((a, b) => a.when - b.when), histCols())}
     </section>
     ${baselineHtml(judged, sdata)}
     ${notesHtml(sdata, skey)}`;
@@ -7591,16 +7591,19 @@ function baselineHtml(j, data) {
 // your usual is worth telling.
 const NOTE_TAGS = ["Warmed up", "No warm-up", "Tired", "Tilted", "Focused", "New mouse", "New settings", "New crosshair", "Played with friends"];
 function setupAt(data, ts) {
-  // The setup recorded when CS2 closed after this session (or the latest before it).
+  // The setup recorded when CS2 closed after this session, or the latest before it: a new entry
+  // is only recorded when something changes. Sessions before the first record have none.
   let best = null;
   for (const e of data.setups) if (e.ts <= ts + 6 * 3600) best = e;
-  return best && ts - best.ts < 14 * 86400 ? best : null;
+  return best;
 }
 function matchFactors(data, r) {
   const sess = data.sessions.find((s) => s.key === r.session);
   const notes = data.notes[r.session] || {};
   const setup = sess ? setupAt(data, sess.end) : null;
   const practiced = sess && data.practice.some((p) => p.ts <= sess.start && p.ts >= sess.start - 3 * 3600);
+  // Practice is known from the first time the Practice tab was used.
+  const practiceKnown = sess && data.practice.length && sess.start >= Math.min(...data.practice.map((p) => p.ts)) - 3 * 3600;
   const hour = r.hour;
   return {
     time: hour >= 5 && hour < 12 ? "in the morning" : hour < 18 && hour >= 12 ? "in the afternoon" : hour >= 18 && hour < 24 ? "in the evening" : "late at night (after midnight)",
@@ -7611,7 +7614,7 @@ function matchFactors(data, r) {
     resolution: setup?.resolution ? `at ${setup.resolution}${setup.aspect && setup.aspect !== "16:9" ? ` (${setup.aspect})` : ""}` : null,
     sensitivity: setup?.sensitivity ? `at sensitivity ${setup.sensitivity}` : null,
     mouse: setup?.mice?.length ? `with your ${setup.mice.join(" / ")}` : null,
-    practice: sess && data.practice.length ? (practiced ? "after practicing in Veloxify's Practice tab" : "without practicing first") : null,
+    practice: practiceKnown ? (practiced ? "after practicing in Veloxify's Practice tab" : "without practicing first") : null,
     ...Object.fromEntries((notes.tags || []).map((t) => [`tag:${t}`, `in sessions you tagged "${t}"`])),
   };
 }
@@ -7620,18 +7623,26 @@ function noticed(data) {
   if (rows.length < 15) return [];
   const all = wmean(rows, "rating3"), sd = sdOf(rows, "rating3") || 0.3;
   const groups = new Map();
-  for (const r of rows) for (const [f, v] of Object.entries(matchFactors(data, r))) {
+  const factors = new Map(rows.map((r) => [r, matchFactors(data, r)]));
+  for (const r of rows) for (const [f, v] of Object.entries(factors.get(r))) {
     if (v == null) continue;
     const key = `${f}|${v}`;
     if (!groups.has(key)) groups.set(key, { f, v, rows: [] });
     groups.get(key).rows.push(r);
   }
-  // Tags: compare tagged sessions with untagged ones.
+  // Each value against the matches with a different known value of the same thing: "at
+  // sensitivity 1" against matches at another sensitivity, never against matches from before
+  // Veloxify recorded it (always the same setting is nothing to tell). Tags: tagged sessions
+  // against untagged ones.
   const out = [];
   for (const g of groups.values()) {
     const n = g.rows.length;
-    if (n < 4 || n > rows.length - 4) continue;
-    const rest = rows.filter((r) => !g.rows.includes(r));
+    const tag = g.f.startsWith("tag:");
+    const rest = rows.filter((r) => {
+      const v = factors.get(r)[g.f];
+      return tag ? v == null : v != null && v !== g.v;
+    });
+    if (n < 4 || rest.length < 4) continue;
     const m = wmean(g.rows, "rating3"), o = wmean(rest, "rating3");
     const z = (m - o) / (sd * Math.sqrt(1 / n + 1 / rest.length));
     const pct = Math.round((m / o - 1) * 100);

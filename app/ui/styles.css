@@ -528,7 +528,9 @@ code { font-family: Consolas, monospace; font-size: 12px; background: var(--row)
 .sess-sep { font-size: 22px; font-weight: 700; color: var(--faint); }
 /* At most 5 cards (you and your party), always fitting the width: no scrolling. */
 .sc-row { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; margin-bottom: 16px; }
-.sc-card { min-width: 0; background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px 16px; display: grid; gap: 10px; align-content: start; }
+/* The card's one column is held to the card's width (an auto column grew with the stats row and
+   pushed the bars and chips past the edge). */
+.sc-card { min-width: 0; background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px 16px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; align-content: start; }
 .sc-card.me { border-color: var(--accent-line); }
 .sc-name { display: flex; align-items: center; gap: 8px; }
 .sc-name b { font-size: 15.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 150px; }
@@ -539,12 +541,14 @@ code { font-family: Consolas, monospace; font-size: 12px; background: var(--row)
 .sc-track { position: relative; height: 6px; background: var(--chip); border-radius: 3px; }
 .sc-track i { position: absolute; inset: 0 auto 0 0; border-radius: 3px; }
 .sc-track span { position: absolute; top: -3px; width: 2px; height: 12px; background: var(--text); opacity: 0.7; }
-.sc-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; border-top: 1px solid var(--line); padding-top: 10px; }
+.sc-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; border-top: 1px solid var(--line); padding-top: 10px; }
 .sc-stats div { display: grid; text-align: center; }
 .sc-stats b { font-size: 15px; }
 .sc-stats span { font-size: 11px; color: var(--muted); }
-.sc-maps { display: flex; gap: 4px; }
-.sc-maps span { font-size: 11px; font-weight: 800; width: 20px; height: 18px; display: inline-flex; align-items: center; justify-content: center; border-radius: 3px; background: var(--row); }
+/* One chip per match, up to 12 a line (--n): they shrink evenly to fit the card, and a longer
+   session continues on a second line. */
+.sc-maps { display: grid; grid-template-columns: repeat(var(--n, 12), minmax(0, 20px)); gap: 4px 3px; min-width: 0; }
+.sc-maps span { min-width: 0; overflow: hidden; font-size: 11px; font-weight: 800; height: 18px; display: inline-flex; align-items: center; justify-content: center; border-radius: 3px; background: var(--row); }
 .sc-table { overflow-x: auto; padding: 0 12px 4px; }
 .sc-table th.sortable { cursor: pointer; user-select: none; }
 .sc-table th.on { color: var(--accent); }
