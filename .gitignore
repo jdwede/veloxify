@@ -1,4 +1,5 @@
 /target
+/target-dev
 *.dem
 *.dem.gz
 *.dem.zst

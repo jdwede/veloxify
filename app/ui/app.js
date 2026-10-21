@@ -2129,6 +2129,27 @@ async function renderTrends(el) {
 }
 
 // Your custom ratings over the profile's selection (last N matches, source).
+// The profile's Aim bar is Leetify's Aim, like Your ratings: the period's six aim stats against
+// Leetify's average player (50), not the older lobby comparison.
+async function leetifyAimBar(view) {
+  const my = await loadMyStats();
+  const sel = prof.last ? my.slice(-prof.last) : my;
+  const el = view.querySelector('.skill[data-key="aim"]');
+  if (!el || !sel.length) return;
+  const st = meanStats(sel);
+  const v = leetifyAim(st, sel.length > 1);
+  if (v == null) return;
+  el.querySelector(".skill-value").textContent = Math.round(v);
+  el.querySelector(".skill-fill").style.width = `${v}%`;
+  el.querySelector(".skill-track").title = `Aim: ${Math.round(v)} (Leetify's Aim: 50 = Leetify's average player)`;
+  const label = new Map([...STAT_CATALOG.map(([k, l, , fmt]) => [k, [l, fmt]]), ["counter_strafe", ["Counter-strafing", pct0]]]);
+  el.querySelector(".skill-detail").innerHTML = `<table class="sb mini"><thead><tr><th>Stat</th><th>You</th><th>Leetify avg</th></tr></thead>
+    <tbody>${LEETIFY_AIM.map(([k, avg]) => {
+      const [l, fmt] = label.get(k) || [k, (x) => String(Math.round(x))];
+      return `<tr><td>${esc(l)}</td><td>${st[k] == null ? "–" : esc(fmt(st[k]))}</td><td>${esc(fmt(avg))}</td></tr>`;
+    }).join("")}</tbody></table>`;
+}
+
 async function renderMyRatings(el) {
   const [my] = await Promise.all([loadMyStats(), loadBenchmarks()]);
   const list = my.filter((m) => prof.source === "all" || m.source === prof.source);
@@ -2772,10 +2793,10 @@ async function renderReplay3dTab(body, m, id) {
   cancelAnimationFrame(r3dRaf);
   const d = await loadDetails(id);
   if (!d) { body.innerHTML = `<div class="empty">This match's details aren't built yet. Veloxify builds them in the background while CS2 is closed.</div>`; return; }
-  const st = tauri ? await tauri.core.invoke("viewer_state", { id }) : { supported: true, tool: true, map_ready: true, track_ready: true, demo: true, map: m.map };
+  const st = tauri ? await tauri.core.invoke("viewer_state", { id }) : { supported: true, tool: true, map_ready: true, track_ready: true, models_ready: true, demo: true, map: m.map };
   const name = mapName(m.map);
   if (!st.supported) { body.innerHTML = `<div class="empty">3D replays work on CS2's own maps; ${esc(name)} isn't one of them (or CS2 isn't installed on this PC).</div>`; return; }
-  if (!(st.tool && st.map_ready && st.track_ready)) return renderReplay3dSetup(body, m, id, st);
+  if (!(st.tool && st.map_ready && st.track_ready && st.models_ready)) return renderReplay3dSetup(body, m, id, st);
   if (r3d.matchId !== id) Object.assign(r3d, { matchId: id, round: d.rounds[0]?.number || 1, t: -3, playing: false, pov: null, povSet: null });
   const round = d.rounds.find((r) => r.number === r3d.round) || d.rounds[0];
 
@@ -2784,8 +2805,13 @@ async function renderReplay3dTab(body, m, id) {
     <div class="v3d-main">
       <div class="v3d-stage" id="v3d-stage">
         <div class="v3d-labels"></div>
-        <div class="v3d-clock" id="v3d-clock"><span>Round ${round.number}</span><b></b></div>
+        <div class="v3d-flash" id="v3d-flash"></div>
+        <div class="v3d-clock" id="v3d-clock"><span class="ct" id="v3d-ct"></span><b></b><span class="t" id="v3d-t"></span></div>
         <div class="v3d-feed" id="v3d-feed"></div>
+        <div class="v3d-scope" id="v3d-scope" hidden></div>
+        <div class="v3d-xh" id="v3d-xh"></div>
+        <div class="v3d-hud" id="v3d-hud"></div>
+        <canvas class="v3d-radar" id="v3d-radar" hidden></canvas>
         <div class="v3d-pov" id="v3d-pov"></div>
         <div class="v3d-loading" id="v3d-loading"><span>Loading ${esc(name)}…</span><div class="bar"><i></i></div></div>
       </div>
@@ -2798,7 +2824,7 @@ async function renderReplay3dTab(body, m, id) {
       <div class="seg" id="v3d-speed">${[0.25, 0.5, 1, 2, 4].map((v) => `<button data-v="${v}" class="${r3d.speed === v ? "on" : ""}">${v}×</button>`).join("")}</div>
       ${tauri ? `<button class="btn ghost" id="v3d-watch" title="Opens this match's demo in CS2 itself">▶ Watch in CS2</button>` : ""}
     </div>
-    <div class="note">Space plays or pauses, ← → jump 5 seconds, 1–0 watch through a player's eyes, F for the free camera (drag to look, W A S D to move, Q and E down and up, Shift faster). The map comes from your own CS2 install; players are simple figures for now.</div>`;
+    <div class="note">Space plays or pauses, ← → jump 5 seconds, 1–0 watch through a player's eyes, F for the free camera (drag to look, W A S D to move, Q and E down and up, Shift faster). The map, the agents, their animations and guns come from your own CS2 install.</div>`;
   body.querySelectorAll("[data-round]").forEach((b) => (b.onclick = () => { r3d.round = Number(b.dataset.round); r3d.t = -3; renderReplay3dTab(body, m, id); }));
 
   const V = await import("./viewer3d.js");
@@ -2831,7 +2857,13 @@ async function renderReplay3dTab(body, m, id) {
   const sideOf = (pp) => (pp.p ? (pp.p.side === "mine" ? round.mine_side : other(round.mine_side)) : "");
   const meIdx = ps.findIndex((pp) => pp.sid === String(state.index.me));
   if (viewer.trackId !== id) { viewer.setPlayers(ps.map((pp) => pp.name), meIdx); viewer.trackId = id; }
+  viewer.step = track.header.step;
   viewer.setSides(ps.map(sideOf));
+  if (!viewer.models) {
+    fetch(assetUrl("models3d/index.json"), { cache: "no-store" }).then((r) => (r.ok ? r.json() : null))
+      .then((index) => index && viewer.loadModels(assetUrl, index)).then(() => { viewer.setSides(ps.map(sideOf)); update(); })
+      .catch((e) => console.warn("3D replay: players stay simple figures", e));
+  }
   // Through your own eyes the first time.
   if (r3d.povSet !== id) { r3d.pov = meIdx >= 0 ? meIdx : null; r3d.povSet = id; }
   viewer.pov = r3d.pov;
@@ -2839,7 +2871,26 @@ async function renderReplay3dTab(body, m, id) {
 
   const rp = await loadReplay(id);
   const rr2 = rp?.rounds.find((r) => r.number === round.number);
+  // Each player's own crosshair (read from the demo), drawn when watching through their eyes.
+  // CS2's radar (top left): the map turning with the view, teammates as colored dots.
+  const radar = await loadRadar(m.map);
+  const radarImg = radar ? Object.assign(new Image(), { src: assetUrl(`radars/${m.map}.png`) }) : null;
+  const xhCodes = { ...Object.fromEntries((d.players || []).filter((p) => p.crosshair).map((p) => [p.steamid, p.crosshair])), ...(await loadCrosshairs().catch(() => null))?.matches?.[id] };
+  // Another round was picked meanwhile: that one draws.
+  if (!document.body.contains(stage)) return;
+  // Grenades this round; who got flashed and for how long.
+  viewer.effects.setRound((d.throws || []).filter((t) => t.round === round.number));
+  const blinds = (d.blinds || []).filter((b) => b.round === round.number);
+  // The score as the round starts, CT's first (like CS2's top bar).
+  const prev = d.rounds[d.rounds.indexOf(round) - 1];
+  const [mineScore, theirScore] = prev ? [prev.score_mine, prev.score_theirs] : [0, 0];
+  const ctScore = round.mine_side === "CT" ? mineScore : theirScore, tScore = round.mine_side === "CT" ? theirScore : mineScore;
+  body.querySelector("#v3d-ct").textContent = ctScore;
+  body.querySelector("#v3d-t").textContent = tScore;
   const kills = d.kills.filter((k) => k.round === round.number && !k.team_kill);
+  const indexOf = new Map(ps.map((pp) => [pp.sid, pp.i]));
+  viewer.setKills(d.kills.filter((k) => k.round === round.number && indexOf.has(k.victim) && indexOf.has(k.attacker))
+    .map((k) => ({ tick: round.live_tick + k.t * 64, victim: indexOf.get(k.victim), attacker: indexOf.get(k.attacker) })));
   const names = new Map(ps.map((pp) => [pp.sid, pp.name]));
   const sideBySid = new Map(ps.map((pp) => [pp.sid, sideOf(pp)]));
   const SIDE_CSS = { CT: "#5b8fd9", T: "#e0a73a" };
@@ -2847,6 +2898,8 @@ async function renderReplay3dTab(body, m, id) {
   const tMin = (rr.start - round.live_tick) / 64, tMax = (rr.start + (rr.n - 1) * step - round.live_tick) / 64;
   r3d.t = Math.max(tMin, Math.min(tMax, r3d.t));
   const plant = round.plant ? round.plant[0] : null;
+  const planter = round.plant ? ps.findIndex((pp) => pp.sid === round.plant[2]) : -1;
+  viewer.setPlant(plant != null && planter >= 0 ? { tick: round.live_tick + plant * 64, player: planter } : null);
   const slider = body.querySelector("#v3d-time"), tl = body.querySelector("#v3d-tl"), playBtn = body.querySelector("#v3d-play");
   const mmss = (s) => `${s < 0 ? "-" : ""}${Math.floor(Math.abs(s) / 60)}:${String(Math.floor(Math.abs(s) % 60)).padStart(2, "0")}`;
 
@@ -2875,24 +2928,107 @@ async function renderReplay3dTab(body, m, id) {
     side.querySelectorAll("[data-pov]").forEach((b) => (b.onclick = () => pick(b.dataset.pov === "" ? null : Number(b.dataset.pov))));
   }
 
-  let lastFeed = null, lastPov = null, lastAlive = null;
+  let lastFeed = null, lastPov = null, lastAlive = null, lastT = r3d.t;
   function update() {
     const tick = round.live_tick + r3d.t * 64;
     viewer.pov = r3d.pov;
-    viewer.frame(rr, (tick - rr.start) / step);
+    // The animations run with the replay (a jump on the timeline doesn't fast-forward them).
+    const dt = Math.abs(r3d.t - lastT) < 0.5 ? Math.abs(r3d.t - lastT) : 0;
+    lastT = r3d.t;
+    viewer.frame(rr, (tick - rr.start) / step, dt, ps.map((pp) => weaponOf(pp.i, tick)));
     slider.value = String(Math.round(((r3d.t - tMin) / (tMax - tMin)) * 1000));
     tl.textContent = `${mmss(r3d.t)} / ${mmss(tMax)}`;
     const clock = body.querySelector("#v3d-clock b");
     if (clock) clock.textContent = plant != null && r3d.t >= plant ? `Bomb ${Math.max(0, BOMB_S - (r3d.t - plant)).toFixed(1)}` : mmss(Math.max(0, ROUND_S - Math.max(0, r3d.t)));
+    // CS2's kill feed: the watched player's own kills and death outlined in red.
+    const watched = r3d.pov != null ? ps[r3d.pov]?.sid : null;
     const feed = kills.filter((k) => k.t <= r3d.t && r3d.t - k.t < 6).slice(-5)
-      .map((k) => `<div><b style="color:${SIDE_CSS[sideBySid.get(k.attacker)] || "#ccc"}">${esc(names.get(k.attacker) || "World")}</b>${weaponIcon(k.weapon)}${k.headshot ? `<span class="hs">◎</span>` : ""}<b style="color:${SIDE_CSS[sideBySid.get(k.victim)] || "#ccc"}">${esc(names.get(k.victim) || "")}</b></div>`).join("");
+      .map((k) => `<div class="${watched && (k.attacker === watched || k.victim === watched) ? "me" : ""}"><b style="color:${SIDE_CSS[sideBySid.get(k.attacker)] || "#ccc"}">${esc(names.get(k.attacker) || "World")}</b>${weaponIcon(k.weapon)}${k.headshot ? `<span class="hs">◎</span>` : ""}<b style="color:${SIDE_CSS[sideBySid.get(k.victim)] || "#ccc"}">${esc(names.get(k.victim) || "")}</b></div>`).join("");
     if (feed !== lastFeed) { body.querySelector("#v3d-feed").innerHTML = feed; lastFeed = feed; }
     const fig = r3d.pov != null ? viewer.figures[r3d.pov] : null;
     const w = fig ? weaponOf(r3d.pov, tick) : "";
-    const pov = fig ? `<b>${esc(fig.name)}</b><span>${fig.alive ? `${fig.hp} HP` : "dead"}</span>${w ? weaponIcon(w) : ""}` : "";
-    if (pov !== lastPov) { body.querySelector("#v3d-pov").innerHTML = pov; lastPov = pov; }
+    // Flashed: the screen goes white, then clears (CS2 holds it longer for a full flash).
+    const blind = fig ? blinds.filter((b) => b.player === ps[r3d.pov].sid && b.t <= r3d.t && r3d.t < b.t + b.secs).pop() : null;
+    const flash = body.querySelector("#v3d-flash");
+    if (flash) flash.style.opacity = blind ? String(Math.min(1, (blind.t + blind.secs - r3d.t) / Math.max(0.6, blind.secs * 0.5))) : "0";
+    // CS2's HUD for the watched player: health and armor, ammo, money, their crosshair (or the scope).
+    const h = fig?.alive ? V.hudAt(track, rr, r3d.pov, tick) : null;
+    const sniper = /^(awp|ssg08|scar20|g3sg1)$/.test(w);
+    const hud = fig?.alive ? `<div class="hud-l"><span class="hud-hp ${fig.hp <= 20 ? "low" : ""}">${HUD_ICON.hp}<b>${fig.hp}</b></span>${h ? `<span class="hud-ar"><img src="${assetUrl(`weapons/${h.helmet ? "armor_helmet" : "kevlar"}.svg`)}" alt=""><b>${h.armor}</b></span>` : ""}</div>
+      ${h ? `<div class="hud-money">$${h.money}</div>` : ""}
+      ${w ? `<div class="hud-r">${h && !/knife|bayonet|grenade|flashbang|molotov|decoy|c4|taser/.test(w) ? `<b>${h.ammo}</b>` : ""}${weaponIcon(w)}</div>` : ""}` : "";
+    const xh = fig?.alive && !sniper && !viewer.scoped ? `${xhCodes[ps[r3d.pov].sid] || ""}|${stage.clientHeight}` : "";
+    const pov = fig ? `<i style="background:${SIDE_CSS[fig.side] || "#999"}"></i><b>${esc(fig.name)}</b>` : "";
+    if (pov + hud + xh + viewer.scoped !== lastPov) {
+      lastPov = pov + hud + xh + viewer.scoped;
+      body.querySelector("#v3d-pov").innerHTML = pov;
+      body.querySelector("#v3d-hud").innerHTML = hud;
+      const code = xhCodes[ps[r3d.pov]?.sid];
+      const c = code ? xhOf(code) : null;
+      // As on the player's screen, scaled to this one (crosshair sizes are for 1080p).
+      const px = Math.max(48, Math.round(stage.clientHeight / 6));
+      body.querySelector("#v3d-xh").innerHTML = xh ? (c ? xhSvg(c, px, stage.clientHeight / 1080) : XH_DEFAULT) : "";
+      body.querySelector("#v3d-scope").hidden = !viewer.scoped;
+    }
     const alive = viewer.figures.map((x) => (x.alive ? 1 : 0)).join("");
     if (alive !== lastAlive) { lastAlive = alive; drawSide(); }
+    drawRadar();
+  }
+  // Teammates' colors on CS2's radar, in team order.
+  const RADAR_COLORS = ["#4a8cff", "#3ad46a", "#f4dc4a", "#ff8a24", "#b65cff"];
+  function drawRadar() {
+    const cv = body.querySelector("#v3d-radar");
+    if (!cv) return;
+    cv.hidden = !(radar && radarImg?.complete && radarImg.naturalWidth);
+    if (cv.hidden) return;
+    const css = Math.round(stage.clientHeight * 0.26), dpr = window.devicePixelRatio || 1;
+    if (cv.width !== Math.round(css * dpr)) { cv.width = cv.height = Math.round(css * dpr); cv.style.width = cv.style.height = `${css}px`; }
+    const g = cv.getContext("2d"), W = cv.width;
+    // What the view is on: the watched player, or the free camera. Game units across the radar:
+    const ACROSS = 2600, k = W / (ACROSS / radar.scale);
+    const p = viewer.free.pos, yaw = viewer.free.yaw;
+    const px = (p.x - radar.pos_x) / radar.scale, py = (radar.pos_y - p.y) / radar.scale;
+    g.setTransform(1, 0, 0, 1, 0, 0);
+    g.clearRect(0, 0, W, W);
+    g.fillStyle = "rgba(8, 10, 14, 0.55)";
+    g.fillRect(0, 0, W, W);
+    g.save();
+    g.translate(W / 2, W / 2);
+    g.rotate((yaw - 90) * Math.PI / 180);
+    g.globalAlpha = 0.9;
+    g.drawImage(radarImg, -px * k, -py * k, radarImg.naturalWidth * k * (radar.size || 1024) / radarImg.naturalWidth, radarImg.naturalHeight * k * (radar.size || 1024) / radarImg.naturalWidth);
+    g.globalAlpha = 1;
+    // Teammates of whoever is watched (everyone on the free camera), alive ones only.
+    const team = r3d.pov != null ? viewer.figures[r3d.pov]?.side : null;
+    let n = 0;
+    viewer.figures.forEach((fg, i) => {
+      if (!fg.alive || (team && fg.side !== team)) { if (!team || fg.side === team) n++; return; }
+      const col = team ? RADAR_COLORS[n++ % 5] : SIDE_CSS[fg.side] || "#ccc";
+      if (i === r3d.pov) return;
+      const q = fg.group.position;
+      const x = ((q.z / 0.0254 - radar.pos_x) / radar.scale - px) * k, y = ((radar.pos_y - q.x / 0.0254) / radar.scale - py) * k;
+      g.beginPath();
+      g.arc(x, y, W * 0.028, 0, Math.PI * 2);
+      g.fillStyle = col;
+      g.fill();
+      g.lineWidth = Math.max(1, W * 0.007);
+      g.strokeStyle = "rgba(0,0,0,0.8)";
+      g.stroke();
+    });
+    g.restore();
+    // You (or the camera) in the middle, facing up.
+    g.translate(W / 2, W / 2);
+    g.beginPath();
+    g.moveTo(0, -W * 0.05);
+    g.lineTo(W * 0.033, W * 0.035);
+    g.lineTo(0, W * 0.018);
+    g.lineTo(-W * 0.033, W * 0.035);
+    g.closePath();
+    g.fillStyle = "#fff";
+    g.fill();
+    g.strokeStyle = "rgba(0,0,0,0.85)";
+    g.lineWidth = Math.max(1, W * 0.008);
+    g.stroke();
   }
   const setPlaying = (on) => { r3d.playing = on; playBtn.textContent = on ? "❚❚ Pause" : "▶ Play"; };
   setPlaying(r3d.playing);
@@ -2931,7 +3067,16 @@ async function renderReplay3dTab(body, m, id) {
   drawSide();
   update();
   r3dRaf = requestAnimationFrame(loop);
+  // The radar shows once its picture is in.
+  radarImg?.decode().then(() => { if (document.body.contains(stage)) update(); }).catch(() => {});
 }
+
+// The 3D replay's health icon, flat and white like CS2's (armor uses CS2's own icons).
+const HUD_ICON = {
+  hp: `<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M9 2h6v7h7v6h-7v7H9v-7H2V9h7z"/></svg>`,
+};
+// A player whose crosshair isn't read yet: CS2's default (a small green cross).
+const XH_DEFAULT = `<svg width="40" height="40" viewBox="0 0 40 40" aria-hidden="true" shape-rendering="crispEdges"><g fill="#32dc32" stroke="#000" stroke-width="1" paint-order="stroke"><rect x="22" y="19" width="7" height="2"/><rect x="11" y="19" width="7" height="2"/><rect x="19" y="22" width="2" height="7"/><rect x="19" y="11" width="2" height="7"/></g></svg>`;
 
 // What the 3D replay still needs, and one button to make it: the tool (once), the map (once per
 // map), this match's movement.
@@ -2940,6 +3085,7 @@ function renderReplay3dSetup(body, m, id, st) {
   const steps = [
     !st.tool && "Source 2 Viewer, a free open-source tool, is downloaded once (53 MB). It reads the maps from your own CS2 install; nothing there is changed.",
     !st.map_ready && `${esc(name)} is prepared once: about a minute, about 300 MB on disk.`,
+    !st.models_ready && "CS2's agents, their animations and the guns used in this match are prepared (about a minute the first time; after that only new guns, in seconds).",
     !st.track_ready && "The demo is read for everyone's movement and aim (a few seconds).",
   ].filter(Boolean);
   body.innerHTML = `<section class="panel v3d-setup">
@@ -3585,7 +3731,7 @@ function renderProfile(view) {
   const bars = p.components.map((k) => `
     <div class="skill" data-key="${k.key}">
       <div class="skill-row">
-        <span class="skill-name">${esc(k.name)}${k.key === "aim" ? ' <span class="beta" title="Reaction time and crosshair placement are coming; for now Aim uses accuracy, head accuracy and headshot kills.">beta</span>' : ""}</span>
+        <span class="skill-name">${esc(k.name)}</span>
         <span class="skill-value">${k.key === "opening" || k.key === "clutch" ? esc(k.value) : Math.round(k.score)}</span>
       </div>
       <div class="skill-track" title="${esc(k.name)}: ${Math.round(k.score)} (50 = average player in your lobbies)">
@@ -3651,6 +3797,7 @@ function renderProfile(view) {
 
   renderMyRatings(view.querySelector("#my-ratings"));
   renderTrends(view.querySelector("#trends"));
+  leetifyAimBar(view);
   view.querySelectorAll(".seg[data-pkey]").forEach((el) => el.querySelectorAll("button").forEach((b) => (b.onclick = () => {
     const k = el.dataset.pkey;
     prof[k] = k === "last" ? Number(b.dataset.v) : b.dataset.v;
