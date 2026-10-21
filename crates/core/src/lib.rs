@@ -14,6 +14,7 @@ pub mod mapgeo;
 pub mod model;
 pub mod profile;
 pub mod raw;
+pub mod replay3d;
 pub mod scouting;
 pub mod sight;
 pub mod stats;

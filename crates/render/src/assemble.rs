@@ -26,7 +26,7 @@ pub fn use_ffmpeg(path: std::path::PathBuf) {
     let _ = FFMPEG.set(path);
 }
 
-fn ffmpeg_exe() -> std::ffi::OsString {
+pub fn ffmpeg_exe() -> std::ffi::OsString {
     FFMPEG.get().map(|p| p.as_os_str().to_owned()).unwrap_or_else(|| "ffmpeg".into())
 }
 

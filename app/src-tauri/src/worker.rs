@@ -250,8 +250,9 @@ impl Worker {
         // Right tray color from the start (the first import can take a while).
         self.set(if system::cs2_running() { "waiting" } else { "idle" }, "Starting", 0, 0);
         loop {
-            // An update is downloading: nothing new starts (Veloxify closes for the installer).
-            if crate::updater::updating() {
+            // An update is downloading (Veloxify closes for the installer) or a 3D replay is being
+            // prepared: nothing new starts meanwhile.
+            if crate::updater::updating() || crate::viewer::busy() {
                 std::thread::sleep(Duration::from_secs(2));
                 continue;
             }

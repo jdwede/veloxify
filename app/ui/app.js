@@ -732,7 +732,7 @@ async function renderMatchPage(view, id, tab) {
   const m = s.stats_only ? null : await loadMatch(id);
   if (m) [m._roster] = await Promise.all([loadRoster(m), loadPremierParties()]);
   const tabs = [["overview", "Overview"]];
-  if (m) tabs.push(["timeline", "Timeline"], ["replay", "2D Replay"], ["lineups", "Lineups"], ["aim", "Aim"], ["utility", "Utility"], ["activity", "Activity"], ["trades", "Trades"], ["opening", "Opening Duels"], ["clutches", "Clutches"], ["h2h", "Head to Head"], ["breakdown", "Rating Breakdown"], ["zones", "Map Zones"], ["ratings", "Ratings"],
+  if (m) tabs.push(["timeline", "Timeline"], ["replay", "2D Replay"], ["replay3d", "3D Replay"], ["lineups", "Lineups"], ["aim", "Aim"], ["utility", "Utility"], ["activity", "Activity"], ["trades", "Trades"], ["opening", "Opening Duels"], ["clutches", "Clutches"], ["h2h", "Head to Head"], ["breakdown", "Rating Breakdown"], ["zones", "Map Zones"], ["ratings", "Ratings"],
     ["highlights", `Highlights${m.highlights.length ? ` (${m.highlights.length})` : ""}`], ["lowlights", `Lowlights${(m.lowlights || []).length ? ` (${m.lowlights.length})` : ""}`]);
   if (!tabs.some(([k]) => k === tab)) tab = "overview";
   const fm = s.faceit;
@@ -752,11 +752,12 @@ async function renderMatchPage(view, id, tab) {
         <div class="mp-result"><b>${resultWord(s.result)}</b><span class="mp-score"><span class="${s.result}">${s.score_mine}</span>:<span>${s.score_theirs}</span></span></div>
         <div class="mp-meta">${stamp}<i>|</i>${esc(mapName(s.map))}<i>|</i>${esc(source)}${s.source_label && s.source_label.toLowerCase() !== source.toLowerCase() ? ` · ${esc(s.source_label)}` : ""}${s.duration_s ? `<i>|</i>${fmtDur(s.duration_s)}` : ""}</div>
       </div>
-      <div class="mp-chips">${elo}${room ? `<button class="mp-chip link" id="mp-room">${ICONS.external} FACEIT room</button>` : ""}</div>
+      <div class="mp-chips">${elo}${m && tauri ? `<button class="mp-chip link" id="mp-watch" title="Opens this match's demo in CS2 itself (CS2 starts normally, with your own settings)">▶ Watch in CS2</button>` : ""}${room ? `<button class="mp-chip link" id="mp-room">${ICONS.external} FACEIT room</button>` : ""}</div>
       <nav class="mp-tabs">${tabs.map(([k, label]) => `<a href="${matchHref(id, k === "overview" ? "" : k)}" class="${k === tab ? "active" : ""}">${label}</a>`).join("")}</nav>
     </section>
     <div class="mp-body" id="mp-body"></div>`;
   view.querySelector("#mp-room")?.addEventListener("click", () => openFaceitRoom(room));
+  view.querySelector("#mp-watch")?.addEventListener("click", (e) => watchInCs2(id, e.currentTarget));
   const body = view.querySelector("#mp-body");
   if (!m) return renderStatsOnly(body, s.played_at.slice(0, 10), s);
   if (tab === "highlights") return renderHighlights(body, [id]);
@@ -776,6 +777,7 @@ async function renderMatchPage(view, id, tab) {
   if (tab === "timeline") return renderTimelineTab(body, m, id);
   if (tab === "lineups") return renderLineupsTab(body, m, id);
   if (tab === "replay") return renderReplayTab(body, m, id);
+  if (tab === "replay3d") return renderReplay3dTab(body, m, id);
   body.innerHTML = `<div class="ov-grid"><div id="mp-summary"></div><div id="mp-board"></div></div>`;
   renderMatchScoreboard(body.querySelector("#mp-board"), m);
   await renderMatchSummary(body.querySelector("#mp-summary"), m, id);
@@ -2734,6 +2736,243 @@ async function renderLineupsTab(body, m, id) {
     vp.setPointerCapture(e.pointerId);
     vp.onpointermove = (ev) => { lineups.pan = [ev.clientX - start[0], ev.clientY - start[1]]; apply(); };
     vp.onpointerup = () => { vp.onpointermove = null; };
+  };
+}
+
+// ---- match page: Watch in CS2 and the 3D replay -----------------------------------------------------
+
+// Opens the match's demo in CS2 itself. When CS2 is already open, shows the console command instead.
+async function watchInCs2(id, btn) {
+  const was = btn?.textContent;
+  if (btn) { btn.disabled = true; btn.textContent = "Starting CS2…"; }
+  try {
+    const cmd = await tauri.core.invoke("watch_in_cs2", { id });
+    if (cmd) {
+      if (confirm(`CS2 is already open. To watch this demo, open CS2's console (~) and enter:\n\n${cmd}\n\nCopy it now?`)) {
+        try { await navigator.clipboard.writeText(cmd); } catch (e) { /* the command is shown above */ }
+      }
+    } else if (btn) {
+      btn.textContent = "CS2 is starting with the demo · Shift+F2 for its demo controls";
+      setTimeout(() => { btn.textContent = was; }, 9000);
+    }
+  } catch (err) {
+    alert(`Couldn't open the demo in CS2: ${err}`);
+  } finally {
+    if (btn) { btn.disabled = false; if (btn.textContent === "Starting CS2…") btn.textContent = was; }
+  }
+}
+
+// The 3D replay: CS2's map, prepared once from your own CS2 install, and everyone's movement and
+// aim from the demo. Any player's eyes or a free camera; scrubbing is instant (nothing is replayed).
+const r3d = { matchId: null, round: 1, t: -3, speed: 1, playing: false, pov: null, povSet: null };
+const r3dTracks = new Map();
+let r3dRaf = 0;
+
+async function renderReplay3dTab(body, m, id) {
+  cancelAnimationFrame(r3dRaf);
+  const d = await loadDetails(id);
+  if (!d) { body.innerHTML = `<div class="empty">This match's details aren't built yet. Veloxify builds them in the background while CS2 is closed.</div>`; return; }
+  const st = tauri ? await tauri.core.invoke("viewer_state", { id }) : { supported: true, tool: true, map_ready: true, track_ready: true, demo: true, map: m.map };
+  const name = mapName(m.map);
+  if (!st.supported) { body.innerHTML = `<div class="empty">3D replays work on CS2's own maps; ${esc(name)} isn't one of them (or CS2 isn't installed on this PC).</div>`; return; }
+  if (!(st.tool && st.map_ready && st.track_ready)) return renderReplay3dSetup(body, m, id, st);
+  if (r3d.matchId !== id) Object.assign(r3d, { matchId: id, round: d.rounds[0]?.number || 1, t: -3, playing: false, pov: null, povSet: null });
+  const round = d.rounds.find((r) => r.number === r3d.round) || d.rounds[0];
+
+  body.innerHTML = `
+    <section class="tl-strip">${roundStripHtml(d.rounds, round.number)}</section>
+    <div class="v3d-main">
+      <div class="v3d-stage" id="v3d-stage">
+        <div class="v3d-labels"></div>
+        <div class="v3d-clock" id="v3d-clock"><span>Round ${round.number}</span><b></b></div>
+        <div class="v3d-feed" id="v3d-feed"></div>
+        <div class="v3d-pov" id="v3d-pov"></div>
+        <div class="v3d-loading" id="v3d-loading"><span>Loading ${esc(name)}…</span><div class="bar"><i></i></div></div>
+      </div>
+      <aside class="v3d-side" id="v3d-side"></aside>
+    </div>
+    <div class="v3d-controls">
+      <button class="btn" id="v3d-play">▶ Play</button>
+      <input type="range" id="v3d-time" min="0" max="1000" value="0">
+      <span class="v3d-time" id="v3d-tl"></span>
+      <div class="seg" id="v3d-speed">${[0.25, 0.5, 1, 2, 4].map((v) => `<button data-v="${v}" class="${r3d.speed === v ? "on" : ""}">${v}×</button>`).join("")}</div>
+      ${tauri ? `<button class="btn ghost" id="v3d-watch" title="Opens this match's demo in CS2 itself">▶ Watch in CS2</button>` : ""}
+    </div>
+    <div class="note">Space plays or pauses, ← → jump 5 seconds, 1–0 watch through a player's eyes, F for the free camera (drag to look, W A S D to move, Q and E down and up, Shift faster). The map comes from your own CS2 install; players are simple figures for now.</div>`;
+  body.querySelectorAll("[data-round]").forEach((b) => (b.onclick = () => { r3d.round = Number(b.dataset.round); r3d.t = -3; renderReplay3dTab(body, m, id); }));
+
+  const V = await import("./viewer3d.js");
+  try {
+    if (!r3dTracks.has(id)) r3dTracks.set(id, await V.loadTrack(assetUrl(`matches/${id}.r3d.gz`)));
+  } catch (err) {
+    body.querySelector("#v3d-loading").innerHTML = `<span>Couldn't read this match's 3D replay: ${esc(String(err))}</span>`;
+    return;
+  }
+  const track = r3dTracks.get(id);
+  const rr = track.rounds.find((r) => r.number === round.number);
+  const stage = body.querySelector("#v3d-stage");
+  if (!rr || !stage) return;
+  const viewer = V.getViewer();
+  viewer.mount(stage);
+  const loading = stage.querySelector("#v3d-loading");
+  try {
+    await viewer.loadMap(m.map, (f) => assetUrl(`maps3d/${m.map}/${f}`), (p) => { const i = loading.querySelector("i"); if (i) i.style.width = `${Math.round(p * 100)}%`; });
+  } catch (err) {
+    loading.innerHTML = `<span>Couldn't load the map: ${esc(String(err))}</span>`;
+    return;
+  }
+  if (!document.body.contains(stage)) return;
+  loading.remove();
+
+  // Players in the track's order; their side this round (CT or T) from which team they're on.
+  const bySid = new Map(m.players.map((p) => [String(p.steamid), p]));
+  const ps = track.header.players.map((sid, i) => ({ i, sid, p: bySid.get(sid), name: bySid.get(sid)?.name || track.header.names[i] }));
+  const other = (s) => (s === "T" ? "CT" : "T");
+  const sideOf = (pp) => (pp.p ? (pp.p.side === "mine" ? round.mine_side : other(round.mine_side)) : "");
+  const meIdx = ps.findIndex((pp) => pp.sid === String(state.index.me));
+  if (viewer.trackId !== id) { viewer.setPlayers(ps.map((pp) => pp.name), meIdx); viewer.trackId = id; }
+  viewer.setSides(ps.map(sideOf));
+  // Through your own eyes the first time.
+  if (r3d.povSet !== id) { r3d.pov = meIdx >= 0 ? meIdx : null; r3d.povSet = id; }
+  viewer.pov = r3d.pov;
+  if (viewer.free.pos.lengthSq() === 0) viewer.overview(track.rounds.find((r) => r.number === round.number), 0);
+
+  const rp = await loadReplay(id);
+  const rr2 = rp?.rounds.find((r) => r.number === round.number);
+  const kills = d.kills.filter((k) => k.round === round.number && !k.team_kill);
+  const names = new Map(ps.map((pp) => [pp.sid, pp.name]));
+  const sideBySid = new Map(ps.map((pp) => [pp.sid, sideOf(pp)]));
+  const SIDE_CSS = { CT: "#5b8fd9", T: "#e0a73a" };
+  const step = track.header.step;
+  const tMin = (rr.start - round.live_tick) / 64, tMax = (rr.start + (rr.n - 1) * step - round.live_tick) / 64;
+  r3d.t = Math.max(tMin, Math.min(tMax, r3d.t));
+  const plant = round.plant ? round.plant[0] : null;
+  const slider = body.querySelector("#v3d-time"), tl = body.querySelector("#v3d-tl"), playBtn = body.querySelector("#v3d-play");
+  const mmss = (s) => `${s < 0 ? "-" : ""}${Math.floor(Math.abs(s) / 60)}:${String(Math.floor(Math.abs(s) % 60)).padStart(2, "0")}`;
+
+  // What each player holds (from the 2D replay, 8 times a second).
+  const weaponOf = (i, tick) => {
+    if (!rr2 || !rp.weapons) return "";
+    const k = Math.max(0, Math.min(rr2.frames.length - 1, Math.round((tick - rr2.start) / rp.step)));
+    const w = rr2.frames[k]?.[i * (rp.stride || 4) + 4];
+    return w >= 0 ? rp.weapons[w] || "" : "";
+  };
+  // CT first, then T: the order the list shows and the number keys pick.
+  const listed = [...ps.filter((pp) => sideOf(pp) === "CT"), ...ps.filter((pp) => sideOf(pp) !== "CT")];
+  const pick = (i) => { r3d.pov = i; viewer.pov = i; drawSide(); update(); viewer.canvas.focus(); };
+  viewer.onFreeCam = () => { if (r3d.pov !== null) { r3d.pov = null; viewer.pov = null; drawSide(); } };
+  function drawSide() {
+    const side = body.querySelector("#v3d-side");
+    if (!side) return;
+    const btn = (pp) => {
+      const n = listed.indexOf(pp) + 1;
+      const alive = viewer.figures[pp.i]?.alive !== false;
+      return `<button class="v3d-who ${r3d.pov === pp.i ? "on" : ""} ${alive ? "" : "dead"}" data-pov="${pp.i}" style="--c:${SIDE_CSS[sideOf(pp)] || "#999"}">
+        <span class="key">${n <= 10 ? n % 10 : ""}</span>${avatarHtml(pp.sid, 22)}<b>${esc(pp.name)}</b>${pp.i === meIdx ? `<em class="hs-you">You</em>` : ""}</button>`;
+    };
+    side.innerHTML = ["CT", "T"].map((s) => `<div class="v3d-team"><div class="v3d-team-h" style="color:${SIDE_CSS[s]}">${s === "CT" ? "Counter-Terrorists" : "Terrorists"}</div>${listed.filter((pp) => sideOf(pp) === s).map(btn).join("")}</div>`).join("")
+      + `<button class="v3d-who free ${r3d.pov === null ? "on" : ""}" data-pov=""><span class="key">F</span><b>Free camera</b></button>`;
+    side.querySelectorAll("[data-pov]").forEach((b) => (b.onclick = () => pick(b.dataset.pov === "" ? null : Number(b.dataset.pov))));
+  }
+
+  let lastFeed = null, lastPov = null, lastAlive = null;
+  function update() {
+    const tick = round.live_tick + r3d.t * 64;
+    viewer.pov = r3d.pov;
+    viewer.frame(rr, (tick - rr.start) / step);
+    slider.value = String(Math.round(((r3d.t - tMin) / (tMax - tMin)) * 1000));
+    tl.textContent = `${mmss(r3d.t)} / ${mmss(tMax)}`;
+    const clock = body.querySelector("#v3d-clock b");
+    if (clock) clock.textContent = plant != null && r3d.t >= plant ? `Bomb ${Math.max(0, BOMB_S - (r3d.t - plant)).toFixed(1)}` : mmss(Math.max(0, ROUND_S - Math.max(0, r3d.t)));
+    const feed = kills.filter((k) => k.t <= r3d.t && r3d.t - k.t < 6).slice(-5)
+      .map((k) => `<div><b style="color:${SIDE_CSS[sideBySid.get(k.attacker)] || "#ccc"}">${esc(names.get(k.attacker) || "World")}</b>${weaponIcon(k.weapon)}${k.headshot ? `<span class="hs">◎</span>` : ""}<b style="color:${SIDE_CSS[sideBySid.get(k.victim)] || "#ccc"}">${esc(names.get(k.victim) || "")}</b></div>`).join("");
+    if (feed !== lastFeed) { body.querySelector("#v3d-feed").innerHTML = feed; lastFeed = feed; }
+    const fig = r3d.pov != null ? viewer.figures[r3d.pov] : null;
+    const w = fig ? weaponOf(r3d.pov, tick) : "";
+    const pov = fig ? `<b>${esc(fig.name)}</b><span>${fig.alive ? `${fig.hp} HP` : "dead"}</span>${w ? weaponIcon(w) : ""}` : "";
+    if (pov !== lastPov) { body.querySelector("#v3d-pov").innerHTML = pov; lastPov = pov; }
+    const alive = viewer.figures.map((x) => (x.alive ? 1 : 0)).join("");
+    if (alive !== lastAlive) { lastAlive = alive; drawSide(); }
+  }
+  const setPlaying = (on) => { r3d.playing = on; playBtn.textContent = on ? "❚❚ Pause" : "▶ Play"; };
+  setPlaying(r3d.playing);
+  playBtn.onclick = () => { if (!r3d.playing && r3d.t >= tMax) r3d.t = tMin; setPlaying(!r3d.playing); viewer.canvas.focus(); };
+  slider.oninput = () => { r3d.t = tMin + (Number(slider.value) / 1000) * (tMax - tMin); update(); };
+  body.querySelectorAll("#v3d-speed button").forEach((b) => (b.onclick = () => {
+    r3d.speed = Number(b.dataset.v);
+    body.querySelectorAll("#v3d-speed button").forEach((x) => x.classList.toggle("on", x === b));
+  }));
+  body.querySelector("#v3d-watch")?.addEventListener("click", (e) => watchInCs2(id, e.currentTarget));
+  viewer.onInput = update;
+  const onKey = (e) => {
+    if (!document.body.contains(stage)) { document.removeEventListener("keydown", onKey); return; }
+    if (/^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName) && e.target !== slider) return;
+    if ("wasdqe".includes(e.key.toLowerCase()) && e.target === viewer.canvas) return; // the free camera's keys
+    if (e.key === " ") { e.preventDefault(); playBtn.click(); }
+    else if (e.key === "ArrowRight" || e.key === "ArrowLeft") { e.preventDefault(); r3d.t = Math.max(tMin, Math.min(tMax, r3d.t + (e.key === "ArrowRight" ? 5 : -5))); update(); }
+    else if (/^[0-9]$/.test(e.key)) { const pp = listed[(Number(e.key) + 9) % 10]; if (pp) pick(pp.i); }
+    else if (e.key === "f" || e.key === "F") pick(null);
+  };
+  document.addEventListener("keydown", onKey);
+  let last = performance.now();
+  const loop = (now) => {
+    if (!document.body.contains(stage)) { r3d.playing = false; return; }
+    const dt = Math.min(0.1, (now - last) / 1000);
+    last = now;
+    let moved = viewer.stepKeys(dt);
+    if (r3d.playing) {
+      r3d.t += dt * r3d.speed;
+      if (r3d.t >= tMax) { r3d.t = tMax; setPlaying(false); }
+      moved = true;
+    }
+    if (moved) update();
+    r3dRaf = requestAnimationFrame(loop);
+  };
+  drawSide();
+  update();
+  r3dRaf = requestAnimationFrame(loop);
+}
+
+// What the 3D replay still needs, and one button to make it: the tool (once), the map (once per
+// map), this match's movement.
+function renderReplay3dSetup(body, m, id, st) {
+  const name = mapName(m.map);
+  const steps = [
+    !st.tool && "Source 2 Viewer, a free open-source tool, is downloaded once (53 MB). It reads the maps from your own CS2 install; nothing there is changed.",
+    !st.map_ready && `${esc(name)} is prepared once: about a minute, about 300 MB on disk.`,
+    !st.track_ready && "The demo is read for everyone's movement and aim (a few seconds).",
+  ].filter(Boolean);
+  body.innerHTML = `<section class="panel v3d-setup">
+      <div class="h3">3D replay</div>
+      <p>Watch any round in 3D, through any player's eyes or with a free camera, without opening CS2. Scrubbing is instant.</p>
+      <ul>${steps.map((s) => `<li>${s}</li>`).join("")}</ul>
+      ${!st.demo && !st.track_ready ? `<div class="empty small">This match's demo has been deleted (Settings, storage limits), so its 3D replay can't be made.</div>`
+        : `<button class="btn primary" id="v3d-prep">${st.tool ? "Set up 3D replay" : "Download and set up 3D replay"}</button>`}
+      <div class="v3d-progress" hidden><span></span><div class="bar"><i></i></div></div>
+      <div class="sub">CS2 can stay closed. Veloxify pauses its other background work meanwhile.</div>
+    </section>`;
+  const btn = body.querySelector("#v3d-prep");
+  if (!btn) return;
+  btn.onclick = async () => {
+    btn.disabled = true;
+    const prog = body.querySelector(".v3d-progress");
+    prog.hidden = false;
+    prog.querySelector("span").textContent = "Starting…";
+    const un = await tauri.event.listen("veloxify://viewer", (e) => {
+      if (e.payload.id !== id) return;
+      prog.querySelector("span").textContent = e.payload.what;
+      prog.querySelector("i").style.width = `${Math.round((e.payload.done || 0) * 100)}%`;
+      prog.classList.toggle("indeterminate", !e.payload.done);
+    });
+    try {
+      await tauri.core.invoke("viewer_prepare", { id });
+      un();
+      renderReplay3dTab(body, m, id);
+    } catch (err) {
+      un();
+      btn.disabled = false;
+      prog.querySelector("span").textContent = `Couldn't set it up: ${err}`;
+    }
   };
 }
 

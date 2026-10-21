@@ -6,6 +6,8 @@
   <title>Veloxify</title>
   <link rel="icon" type="image/png" href="assets/favicon.png">
   <link rel="stylesheet" href="styles.css">
+  <!-- The 3D replay's engine (three.js r160, MIT), loaded only when a 3D replay opens. -->
+  <script type="importmap">{ "imports": { "three": "./vendor/three/three.module.js", "three/addons/": "./vendor/three/addons/" } }</script>
   <script>
     // Saved theme (Settings > Appearance), applied before the first paint.
     try {

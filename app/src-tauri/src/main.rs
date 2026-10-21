@@ -21,6 +21,7 @@ mod share;
 mod system;
 mod tracking;
 mod updater;
+mod viewer;
 mod worker;
 
 use serde::{Deserialize, Serialize};
@@ -223,6 +224,43 @@ fn save_settings(state: State<AppState>, update: SettingsUpdate) -> Result<(), S
 async fn pick_folder(app: tauri::AppHandle) -> Option<String> {
     use tauri_plugin_dialog::DialogExt;
     app.dialog().file().blocking_pick_folder().and_then(|p| p.into_path().ok()).map(|p| p.display().to_string())
+}
+
+/// What the match's 3D replay has and still needs.
+#[tauri::command]
+fn viewer_state(state: State<AppState>, id: String) -> Result<viewer::State, String> {
+    let lib = state.settings.lock().unwrap().library_dir.clone();
+    viewer::state(&lib, &id).map_err(|e| format!("{e:#}"))
+}
+
+/// Makes what the 3D replay needs (asked for in the app): the tool once, the map once, the match's
+/// movement. Progress comes as `veloxify://viewer` events. Not while Veloxify is filming.
+#[tauri::command]
+async fn viewer_prepare(app: tauri::AppHandle, state: State<'_, AppState>, id: String) -> Result<(), String> {
+    use tauri::Emitter;
+    if state.status.lock().unwrap().state == "rendering" {
+        return Err("Veloxify is filming: the 3D replay can be prepared when it's done (or stop filming at the top right)".into());
+    }
+    let lib = state.settings.lock().unwrap().library_dir.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        viewer::prepare(&lib, &id, &|what, done| {
+            let _ = app.emit("veloxify://viewer", serde_json::json!({ "id": id, "what": what, "done": done }));
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| format!("{e:#}"))
+}
+
+/// Opens the match's demo in CS2 (the user clicked Watch in CS2). Returns the console command to
+/// paste when CS2 is already open.
+#[tauri::command]
+async fn watch_in_cs2(state: State<'_, AppState>, id: String) -> Result<Option<String>, String> {
+    if state.status.lock().unwrap().state == "rendering" {
+        return Err("Veloxify is filming in CS2 right now: stop it first (top right), then watch".into());
+    }
+    let lib = state.settings.lock().unwrap().library_dir.clone();
+    tauri::async_runtime::spawn_blocking(move || viewer::watch_in_cs2(&lib, &id)).await.map_err(|e| e.to_string())?.map_err(|e| format!("{e:#}"))
 }
 
 /// The newest release when it's newer than this Veloxify (checked at start, then every 6 hours).
@@ -713,6 +751,19 @@ fn main() {
         });
         return;
     }
+    // Prepares a match's 3D replay without the window (testing): the log goes in maps3d/.
+    if let Some(i) = args.iter().position(|a| a == "--prepare-3d") {
+        let lib = Settings::load().library_dir;
+        let _ = std::fs::create_dir_all(lib.join("maps3d"));
+        let t0 = std::time::Instant::now();
+        let log = std::sync::Mutex::new(String::new());
+        let result = viewer::prepare(&lib, args.get(i + 1).map(String::as_str).unwrap_or(""), &|what, done| {
+            log.lock().unwrap().push_str(&format!("{:>6.1}s {what} {done:.2}\n", t0.elapsed().as_secs_f64()));
+        });
+        let text = format!("{}{result:?} after {:.1}s\n", log.lock().unwrap(), t0.elapsed().as_secs_f64());
+        let _ = std::fs::write(lib.join("maps3d").join("prepare.log"), text);
+        return;
+    }
     if let Some(i) = args.iter().position(|a| a == "--extract-radars") {
         let lib = Settings::load().library_dir;
         let maps: Vec<String> = args[i + 1..].to_vec();
@@ -758,6 +809,9 @@ fn main() {
             refresh_faceit,
             get_update,
             check_update,
+            viewer_state,
+            viewer_prepare,
+            watch_in_cs2,
             install_update,
             open_faceit,
             open_library,
