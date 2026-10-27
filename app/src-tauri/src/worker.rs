@@ -60,8 +60,8 @@ enum Batch {
     Lineups(Option<Vec<String>>),
 }
 
-/// Lineup videos filmed per automatic run (about 15 s each).
-const LINEUPS_PER_RUN: usize = 30;
+/// Lineup videos filmed per automatic run (about 20 s each).
+const LINEUPS_PER_RUN: usize = 40;
 
 /// Bumped each time the user asks for something to be filmed (a clip, a lineup, a match's
 /// highlights): an automatic lineup batch gives way to it (see [`Worker::run_batch`]).
@@ -234,6 +234,8 @@ impl Worker {
         let mut insights_pending = true;
         // The user's CS2 setup (resolution, sensitivity, mouse) is recorded once per launch too.
         let mut setup_checked = false;
+        // Lineup videos still to get their picture and stutter check (once per launch, then done).
+        let mut lineups_checked = false;
         // Filming was stopped (Stop rendering, CS2 or a FACEIT match wanted): no more automatic
         // filming until they've played again, as the notification says ("more after your next
         // game"). What they ask for still films, and so do new matches' highlights (demos got
@@ -437,6 +439,16 @@ impl Worker {
             }
             let more_details = more_details || more_rules;
             insights_pending |= rebuilt || imported || updated;
+            // Lineup videos made before they had a full-size picture and a stutter check get them
+            // (half a minute at a time; a choppy one is filmed again with the other lineups).
+            if !lineups_checked && !system::cs2_running() {
+                let (n, more) = batch::check_lineup_videos(&settings.library_dir, Duration::from_secs(30));
+                if n > 0 {
+                    vlog!("lineup videos: {n} checked for stutter{}", if more { ", more next time" } else { "" });
+                    self.library_changed();
+                }
+                lineups_checked = !more;
+            }
             if insights_pending && !system::cs2_running() {
                 match cs2hl_core::insights::update(&settings.library_dir, Duration::from_secs(30)) {
                     Ok(0) => insights_pending = false,
@@ -467,20 +479,23 @@ impl Worker {
                 }
                 continue;
             }
-            if can_film && ((settings.auto_render && !held && !waiting) || !pending_render.is_empty()) {
-                let scope =
-                    if pending_render.is_empty() { Scope::LatestSession } else { Scope::Matches(std::mem::take(&mut pending_render)) };
-                held |= self.render(&settings, me, scope);
+            // Each kind films on its own switch (Settings): highlights, then lowlights, then lineups.
+            if can_film && ((!held && !waiting) || !pending_render.is_empty()) {
+                if (settings.auto_render && !held && !waiting) || !pending_render.is_empty() {
+                    let scope =
+                        if pending_render.is_empty() { Scope::LatestSession } else { Scope::Matches(std::mem::take(&mut pending_render)) };
+                    held |= self.render(&settings, me, scope);
+                }
                 // Then the latest session's worst deaths, for the whiff analyzer.
-                if settings.auto_render && settings.auto_lowlights && !held && !waiting && !system::cs2_running() {
-                    let items = latest_lowlights(&settings.library_dir, LOWLIGHTS_PER_MATCH);
+                if settings.auto_lowlights && settings.lowlights_per_match > 0 && !held && !waiting && !system::cs2_running() {
+                    let items = latest_lowlights(&settings.library_dir, settings.lowlights_per_match);
                     if !items.is_empty() {
                         held |= self.render(&settings, me, Scope::Items(items));
                     }
                 }
                 // Then grenade lineup videos, the most thrown first, a batch at a time. Anything
                 // asked for meanwhile, and demos being downloaded (new matches), go first.
-                if settings.auto_render && settings.auto_lineups && !held && !lineups_held && !waiting && !system::cs2_running() {
+                if settings.auto_lineups && !held && !lineups_held && !waiting && !system::cs2_running() {
                     let seen = ASKED.load(Ordering::SeqCst);
                     let mut first = crate::demos::downloading(&self.app);
                     while let Ok(job) = jobs.try_recv() {
@@ -786,7 +801,7 @@ impl Worker {
         }
         let empty = match &what {
             Batch::Clips(scope) => batch::plan(&lib, scope).map_or(true, |p| p.is_empty()),
-            Batch::Lineups(ids) => batch::plan_lineups(&lib, ids.as_deref()).is_empty(),
+            Batch::Lineups(ids) => batch::plan_lineups(&lib, ids.as_deref(), &settings.lineup_plan()).is_empty(),
         };
         if empty {
             return false;
@@ -911,7 +926,7 @@ impl Worker {
             Batch::Clips(scope) => batch::render(&lib, me, profile, &work, scope, None, abort, &mut on),
             Batch::Lineups(ids) => {
                 let limit = if ids.is_some() { usize::MAX } else { LINEUPS_PER_RUN };
-                batch::render_lineups(&lib, me, profile, &work, ids, limit, abort, &mut on)
+                batch::render_lineups(&lib, me, profile, &work, ids, &settings.lineup_plan(), limit, abort, &mut on)
             }
         };
         rendering.store(false, Ordering::SeqCst);
@@ -957,9 +972,6 @@ impl DetailsFailed {
         self.0.insert(id.to_string(), (cs2hl_core::details::VERSION, demo_size));
     }
 }
-
-/// Lowlights rendered automatically per match (the worst ones; the rest render on Watch).
-const LOWLIGHTS_PER_MATCH: usize = 3;
 
 /// The latest session's worst lowlights still without a clip: (match id, lowlight id).
 fn latest_lowlights(lib: &Path, per_match: usize) -> Vec<(String, String)> {

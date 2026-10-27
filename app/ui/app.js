@@ -229,12 +229,10 @@ const ICONS = {
   external: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></svg>',
   rating: '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.4" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M12 12l4-4" stroke-linecap="round"/></svg>',
 };
-// Lineups thrown this many times or more get a video on their own (batch::LINEUP_AUTO_MIN_THROWS);
-// the rest when asked for.
-const LINEUP_AUTO_MIN = 4;
-const lineupWaitText = (count) => count >= LINEUP_AUTO_MIN
-  ? "Veloxify films it in the background, after your highlights."
-  : `Veloxify films lineups thrown ${LINEUP_AUTO_MIN}+ times on its own. This one was thrown ${count} time${count === 1 ? "" : "s"}: film it whenever you like.`;
+// Whether a lineup gets its video on its own (one of each map's most thrown, as chosen in Settings).
+const lineupWaitText = (id) => state.lineupPlan?.has(id)
+  ? "It's one of this map's most thrown lineups: Veloxify films it in the background, after your clips."
+  : "Veloxify films each map's most thrown lineups on its own (how many, and which grenades, is in Settings). Film this one whenever you like.";
 const faceitLibId = (fm) => `faceit-${fm.match_id.replace(/^1-/, "")}-m${Math.max(1, fm.map_number)}`;
 function openFaceitRoom(matchId) {
   const path = `en/cs2/room/${matchId}`;
@@ -2667,7 +2665,6 @@ async function renderLineupsTab(body, m, id) {
   const [d, radar, mapLineups] = await Promise.all([loadDetails(id), loadRadar(m.map), loadMapLineups(m.map), loadLineups()]);
   // The library-wide lineup each throw belongs to (its video).
   const lineupOf = (t) => mapLineups?.by_throw?.[`${id}@${t.tick}`];
-  const lineupCount = (lid) => mapLineups?.lineups?.find((l) => l.id === lid)?.count || 0;
   if (!d) return noDetails(body);
   if (!d.throws) { body.innerHTML = `<div class="empty">Lineups need this match analyzed again; Veloxify does that in the background while CS2 is closed.</div>`; return; }
   if (lineups.matchId !== id) Object.assign(lineups, { matchId: id, sel: null, player: "", zoom: 1, pan: [0, 0] });
@@ -2720,8 +2717,9 @@ async function renderLineupsTab(body, m, id) {
       </section>
       <section class="tl-events ln-side">
         ${s ? `<div class="ln-detail">
-          ${(() => { const lid = lineupOf(s), c = lid && lineupClip(lid); return c?.clip ? `<video class="ln-video" src="${assetUrl(c.clip)}" controls autoplay muted loop playsinline></video>`
-            : lid && tauri ? `<div class="gn-novideo"><b>No video yet</b><span>${esc(lineupWaitText(lineupCount(lid)))}</span><button class="btn primary" id="ln-film" data-lid="${esc(lid)}">Film this lineup now</button></div>` : ""; })()}
+          ${(() => { const lid = lineupOf(s), c = lid && lineupClip(lid); return (c?.clip ? `<video class="ln-video" src="${assetUrl(c.clip)}" controls autoplay muted loop playsinline></video>`
+            : lid && tauri ? `<div class="gn-novideo"><b>No video yet</b><span>${esc(lineupWaitText(lid))}</span><button class="btn primary" id="ln-film" data-lid="${esc(lid)}">Film this lineup now</button></div>` : "")
+            + (c?.aim && mapLineups?.lineups?.some((l) => l.id === lid) ? `<button class="gn-aimshot" id="ln-aimshot" data-lid="${esc(lid)}" title="The exact lineup, as it's thrown: click to see it large"><img src="${assetUrl(c.aim)}" alt="The thrower's view as it's thrown" loading="lazy"><i class="gn-aim-mark"></i><span class="gn-aim-label">The lineup · click to enlarge</span></button>` : ""); })()}
           <div class="ln-title">${weaponIcon(NADE_INFO[s.kind][1])}<b>${esc(callout(s.from) || "Spot")} → ${esc(callout(s.to) || "landing")}</b></div>
           <div class="sub">${esc(names.get(s.player) || "")} · ${s.side} · round${s.rounds.length > 1 ? "s" : ""} ${s.rounds.join(", ")} · ${mmss(s.t)}</div>
           <ul class="ln-facts"><li>${TECH[s.technique] || s.technique}, ${CLICK[s.click] || s.click}</li>
@@ -2746,6 +2744,10 @@ async function renderLineupsTab(body, m, id) {
   body.querySelectorAll("[data-ln]").forEach((el) => (el.onclick = () => { lineups.sel = Number(el.dataset.ln); rerender(); }));
   body.querySelector("#ln-back")?.addEventListener("click", () => { lineups.sel = null; rerender(); });
   body.querySelector("#ln-copy")?.addEventListener("click", (e) => { navigator.clipboard?.writeText(setpos); e.target.textContent = "Copied"; });
+  body.querySelector("#ln-aimshot")?.addEventListener("click", (e) => {
+    const lid = e.currentTarget.dataset.lid, l = mapLineups?.lineups?.find((x) => x.id === lid);
+    if (l) openLineupShot(l, lineupClip(lid), mapLineups, m.map, lineupNames(mapLineups, m.map).get(lid) || l.name);
+  });
   body.querySelector("#ln-film")?.addEventListener("click", async (e) => { e.target.disabled = true; e.target.textContent = "Queued: it films when CS2 is closed"; await tauri.core.invoke("render_lineups", { ids: [e.target.dataset.lid] }); });
   const canvas = body.querySelector(".tl-canvas"), zoom = body.querySelector(".tl-zoom"), vp = body.querySelector(".tl-viewport");
   const apply = () => { canvas.style.transform = `translate(${lineups.pan[0]}px,${lineups.pan[1]}px) scale(${lineups.zoom})`; zoom.value = lineups.zoom; };
@@ -3906,6 +3908,9 @@ async function loadLineups(force = false) {
   try {
     state.lineupClips = tauri ? await tauri.core.invoke("lineup_clips") : await (await fetch(assetUrl("lineup_clips.json"), { cache: "no-store" })).json();
   } catch (e) { state.lineupClips = state.lineupClips || {}; }
+  try {
+    if (tauri) state.lineupPlan = new Set((await tauri.core.invoke("lineup_plan_info", { plan: null })).chosen);
+  } catch (e) { /* the wait text stays general */ }
   return state.lineups;
 }
 const NADE_KINDS = [["smoke", "Smokes", "smokegrenade"], ["molotov", "Molotovs", "molotov"], ["flash", "Flashes", "flashbang"], ["he", "HEs", "hegrenade"]];
@@ -3941,6 +3946,69 @@ async function renderGrenades(view, map) {
         <div class="gn-map-counts">${NADE_KINDS.map(([k, , icon]) => `<span title="${esc(k)} lineups">${weaponIcon(icon)}<b>${d.counts[k] || 0}</b></span>`).join("")}</div>
         <div class="gn-map-foot"><span>${d.instant || 0} instant smokes</span><span>${total - (d.instant || 0)} set lineups</span><span>${videos} videos</span></div></a>`;
     }).join("")}</div>`;
+}
+
+// A lineup's picture, large: the thrower's view the moment it's thrown, the crosshair spot marked,
+// and what you need to repeat it (where to stand, how it's thrown) laid over it. Esc or a click
+// closes it.
+function openLineupShot(l, clip, d, map, name) {
+  document.querySelector(".ls-box")?.remove();
+  const kind = { smoke: "Smoke", molotov: "Molotov", flash: "Flash", he: "HE" }[l.kind] || l.kind;
+  const icon = weaponIcon(NADE_KINDS.find((x) => x[0] === l.kind)?.[2] || "smokegrenade");
+  const click = ({ left: "Left click", right: "Right click", both: "Left + right click" })[l.click] || l.click;
+  const from = areaName(d, map, l.from_place), to = areaName(d, map, l.to_place);
+  const chips = [
+    `<span class="ls-chip side-${l.side === "T" ? "t" : "ct"}">${esc(l.side)}</span>`,
+    l.category === "instant" ? `<span class="ls-chip strong">Instant${l.spawn ? ` · Spawn #${l.spawn}` : ""}</span>` : `<span class="ls-chip strong">Set lineup</span>`,
+    l.technique ? `<span class="ls-chip strong">${esc(l.technique)}</span>` : "",
+    click ? `<span class="ls-chip">${esc(click)}</span>` : "",
+    `<span class="ls-chip">Thrown ${l.count}×</span>`,
+  ].join("");
+  const box = document.createElement("div");
+  box.className = "ls-box";
+  box.setAttribute("role", "dialog");
+  box.setAttribute("aria-label", `${name}: the lineup`);
+  box.innerHTML = `<div class="ls-stage">
+      <img class="ls-img" src="${assetUrl(clip.aim)}" alt="${esc(name)}: the thrower's view as it's thrown">
+      <div class="ls-mark"><i></i><span>Crosshair here</span></div>
+      <div class="ls-info"><div class="ls-title">${icon}<b>${esc(name)}</b></div>
+        <div class="ls-chips">${chips}</div>
+        <div class="ls-route">${esc(from || "?")} <span>→</span> ${esc(to || "?")}</div></div>
+      <div class="ls-radar"><img alt="" src="${assetUrl(`radars/${map}.png`)}"><svg viewBox="0 0 1024 1024"></svg><span>${l.category === "instant" && l.spawn ? `Spawn #${l.spawn}` : "Stand here"}</span></div>
+      <button class="ls-close" aria-label="Close">✕</button>
+    </div>`;
+  document.body.appendChild(box);
+  const close = () => { box.remove(); document.removeEventListener("keydown", onKey); };
+  const onKey = (e) => { if (e.key === "Escape") close(); };
+  document.addEventListener("keydown", onKey);
+  box.addEventListener("click", (e) => { if (e.target === box || e.target.closest(".ls-close")) close(); });
+  // Where to stand (and the spawn spots, for an instant smoke), the flight, where it lands.
+  loadRadar(map).then((radar) => {
+    const svg = box.querySelector(".ls-radar svg");
+    if (!radar || !svg) { box.querySelector(".ls-radar")?.remove(); return; }
+    const size = radar.size || 1024;
+    svg.setAttribute("viewBox", `0 0 ${size} ${size}`);
+    const at = (x, y) => [(x - radar.pos_x) / radar.scale, (radar.pos_y - y) / radar.scale];
+    const flight = l.path?.length > 1 ? l.path : [[...l.to, 0]];
+    const whole = Math.hypot(flight[0][0] - l.from[0], flight[0][1] - l.from[1]) < 150 ? flight : [l.from, ...flight];
+    const pts = whole.map(([x, y]) => at(x, y).join(",")).join(" ");
+    const [fx, fy] = at(l.from[0], l.from[1]), [tx, ty] = at(l.to[0], l.to[1]);
+    const spawns = l.category === "instant" ? (d.spawns?.[l.side] || []).map(([x, y], i) => {
+      const [sx, sy] = at(x, y);
+      return `<g class="ls-spawn ${i + 1 === l.spawn ? "on" : ""}"><circle cx="${sx}" cy="${sy}" r="13"/><text x="${sx}" y="${sy + 5}" text-anchor="middle">${i + 1}</text></g>`;
+    }).join("") : "";
+    svg.innerHTML = `${spawns}<polyline class="ls-path ${esc(l.kind)}" points="${pts}"/><circle class="ls-to ${esc(l.kind)}" cx="${tx}" cy="${ty}" r="16"/><circle class="ls-from" cx="${fx}" cy="${fy}" r="11"/>`;
+    // Zoomed to the throw: the radar shows the part of the map between the spot and the landing.
+    const xs = [fx, tx], ys = [fy, ty];
+    const pad = 110, x0 = Math.min(...xs) - pad, y0 = Math.min(...ys) - pad, w = Math.max(...xs) - x0 + pad, h = Math.max(...ys) - y0 + pad, side = Math.max(w, h, 260);
+    const cx = (Math.min(...xs) + Math.max(...xs)) / 2, cy = (Math.min(...ys) + Math.max(...ys)) / 2;
+    const vb = [cx - side / 2, cy - side / 2, side, side];
+    svg.setAttribute("viewBox", vb.join(" "));
+    const img = box.querySelector(".ls-radar img");
+    img.style.width = `${(size / side) * 100}%`;
+    img.style.left = `${(-vb[0] / side) * 100}%`;
+    img.style.top = `${(-vb[1] / side) * 100}%`;
+  });
 }
 
 function renderGrenadeMap(view, d, map) {
@@ -4039,7 +4107,8 @@ function renderGrenadeMap(view, d, map) {
         ${sel ? `<div class="gn-detail">
           <div class="gn-video">${clip?.clip ? `<video id="gn-video" src="${assetUrl(clip.clip)}" controls autoplay muted loop playsinline></video>`
             : clip?.too_old ? `<div class="gn-novideo"><b>No video</b><span>Every time this was thrown, it was in a demo from before a CS2 update, and CS2 can't play those demos any more. It gets a video the next time it's thrown in one of your matches.</span></div>`
-            : `<div class="gn-novideo">${clip?.error ? `<b>No video</b><span>${esc(clip.error)}</span>` : `<b>No video yet</b><span>${esc(lineupWaitText(sel.count))}</span>`}${tauri ? `<button class="btn primary" id="gn-render">Film this lineup now</button>` : ""}</div>`}</div>
+            : `<div class="gn-novideo">${clip?.error ? `<b>No video</b><span>${esc(clip.error)}</span>` : `<b>No video yet</b><span>${esc(lineupWaitText(sel.id))}</span>`}${tauri ? `<button class="btn primary" id="gn-render">Film this lineup now</button>` : ""}</div>`}</div>
+          ${clip?.aim ? `<button class="gn-aimshot" id="gn-aimshot" title="The exact lineup, as it's thrown: click to see it large"><img src="${assetUrl(clip.aim)}" alt="The thrower's view as it's thrown" loading="lazy"><i class="gn-aim-mark"></i><span class="gn-aim-label">The lineup · click to enlarge</span></button>` : ""}
           <div class="gn-title">${kindIcon(sel.kind)}${grenades.renaming ? `<input class="gn-rename-in" id="gn-rename-in" value="${esc(nm(sel))}" maxlength="60" aria-label="Lineup name">` : `<b>${esc(nm(sel))}</b>`}${sel.spawn ? `<span class="gn-spawnchip">Spawn #${sel.spawn}</span>` : ""}<span class="gn-x">×${sel.count}</span>
             ${tauri ? `<button class="btn ghost small gn-star ${isFav(sel) ? "on" : ""}" id="gn-fav" title="${isFav(sel) ? "Remove from favorites" : "Add to favorites"}">${ICONS.star}</button>` : ""}
             ${tauri ? `<button class="btn ghost small" id="gn-rename">${grenades.renaming ? "Save" : "Rename"}</button>${mapCallouts(map).names[sel.id] && !grenades.renaming ? `<button class="btn ghost small" id="gn-rename-reset" title="Back to the automatic name">Reset</button>` : ""}` : ""}</div>
@@ -4062,6 +4131,7 @@ function renderGrenadeMap(view, d, map) {
     <div class="note">Instant smokes: smokes thrown in the first two seconds of the round from where the thrower spawned; spawn numbers are the spawn spots on that side of the map. Set lineups: lined up first (standing still with the crosshair held, or a run from a standstill into a jump throw), then thrown. A lineup counts when it was thrown at least twice from the same spot to the same place, whoever threw it.</div>`;
 
   const rerender = () => renderGrenadeMap(view, d, map);
+  view.querySelector("#gn-aimshot")?.addEventListener("click", () => openLineupShot(sel, clip, d, map, nm(sel)));
   view.querySelectorAll("[data-kind]").forEach((b) => (b.onclick = () => { const k = b.dataset.kind; if (grenades.kinds.has(k)) grenades.kinds.delete(k); else grenades.kinds.add(k); grenades.sel = null; rerender(); }));
   view.querySelectorAll("[data-cat]").forEach((b) => (b.onclick = () => { grenades.category = b.dataset.cat; grenades.spawn = null; grenades.sel = null; rerender(); }));
   view.querySelectorAll("[data-side]").forEach((b) => (b.onclick = () => { grenades.side = b.dataset.side; grenades.spawn = null; grenades.sel = null; rerender(); }));
@@ -8685,7 +8755,8 @@ function wireAppearance(view) {
 
 let settingsData = null;
 const PREVIEW_SETTINGS = {
-  settings: { watch_dirs: ["C:\\Users\\you\\Downloads"], auto_render: true, auto_lowlights: true, faceit_enabled: true, faceit_nickname: "", selectivity: "solid-plays", max_per_match: 6, start_with_windows: false, steamid64: null },
+  settings: { watch_dirs: ["C:\\Users\\you\\Downloads"], auto_render: true, auto_lowlights: true, auto_lineups: true, faceit_enabled: true, faceit_nickname: "", selectivity: "solid-plays", max_per_match: 6, start_with_windows: false, steamid64: null,
+    highlight_kinds: [], clutch_min: 1, skip_eco: false, lowlights_per_match: 3, lineups_per_map: 30, lineup_kinds: ["smoke", "molotov", "flash", "he"], lineup_categories: ["instant", "set"] },
   detected_steamid: null, steam_name: null, version: "preview", clips: 0, clip_bytes: 0,
   render: { height: 1080, fps: 60, transition: "cut", killfeed_only: true, own_crosshair: false, xray: false, audio: true },
 };
@@ -8735,15 +8806,30 @@ async function renderSettings(view) {
       </section>
       ${appearancePanel()}
       <section class="panel">
-        <div class="panel-head"><div class="h3">Highlights</div></div>
-        ${row("Make highlights automatically", "After you close CS2, new demos are read and your best moments rendered in the background.", sw("auto_render", s.auto_render))}
+        <div class="panel-head"><div class="h3">Filming</div><span class="grow"></span><span class="sub">CS2 records in real time: the less it films, the sooner it's done</span></div>
         ${row("Wait after you play", "Veloxify doesn't start CS2 to film (or check Valve for Premier matches) until this long after CS2 was last open, so it never gets in the way between games. Your new matches still show up right away. Film now in the status skips the wait.",
           seg("film_wait_min", s.film_wait_min ?? 60, [[0, "Don't wait"], [30, "30 min"], [60, "1 hour"], [120, "2 hours"]]))}
-        ${row("Capture lowlights too", "After the highlights, your 3 worst deaths from each match of the latest session are rendered too, for the whiff analyzer. Others render when you press Watch.", sw("auto_lowlights", s.auto_lowlights ?? true))}
-        ${row("Film grenade lineups", `After your clips, Veloxify films the lineups from your demos for the Lineups page (the thrower's view, then the grenade until it goes off): the ones thrown ${LINEUP_AUTO_MIN} or more times, most thrown first. It makes way whenever new matches or clips need filming. Any other lineup films when you open it and press “Film this lineup now”.`, sw("auto_lineups", s.auto_lineups ?? true))}
-        ${row("Which moments", "Best only: 3K+, aces, clutches and other always-moments. Solid plays adds 2Ks that mattered and reaction flicks. Everything adds plain 2Ks.",
-          seg("selectivity", s.selectivity, [["highlights-only", "Best only"], ["solid-plays", "Solid plays"], ["everything", "Everything"]]))}
-        ${row("Clips per match", "The most clips kept from one match; the best ones win.", `<input type="number" data-key="max_per_match" min="1" max="20" value="${s.max_per_match}" ${tauri ? "" : "disabled"}>`)}
+      </section>
+      <section class="panel">
+        <div class="panel-head"><div class="h3">Highlights</div><span class="grow"></span><span class="sub">Film automatically</span>${sw("auto_render", s.auto_render)}</div>
+        ${row("What counts as a highlight", "Tick the moments you want clips of, or start from a quick pick. It applies to every match at once (matches read before Veloxify 0.4.15 can only drop moments, not gain new kinds).",
+          seg("hl_preset", hlPreset(hlKinds(s)), [["highlights-only", "Best only"], ["solid-plays", "Solid plays"], ["everything", "Everything"], ...(hlPreset(hlKinds(s)) === "custom" ? [["custom", "Your own"]] : [])]))}
+        <div class="set-kinds" id="hl-kinds">${HL_KINDS.map(([k, label, tip]) => `<label class="kind-check" title="${esc(tip || "")}"><input type="checkbox" data-hlkind="${k}" ${hlKinds(s).includes(k) ? "checked" : ""} ${tauri ? "" : "disabled"}><span><b>${label}</b>${tip ? `<span class="sub">${tip}</span>` : ""}</span></label>`).join("")}</div>
+        ${row("Clutches from", "Won clutches count from this many enemies left.", seg("clutch_min", s.clutch_min ?? 1, [[1, "1v1"], [2, "1v2"], [3, "1v3"]]))}
+        ${row("Leave out eco kills", "Moments where most kills were on players who'd saved. Aces and clutches stay.", sw("skip_eco", s.skip_eco ?? false))}
+        ${row("Most per match", "Aces, 4Ks, 3Ks, clutches, ninja defuses and rare kills are always kept; the best of the rest, up to this many from one match.", `<input type="number" data-key="max_per_match" min="1" max="20" value="${s.max_per_match}" ${tauri ? "" : "disabled"}>`)}
+      </section>
+      <section class="panel">
+        <div class="panel-head"><div class="h3">Lowlights</div><span class="grow"></span><span class="sub">Film automatically</span>${sw("auto_lowlights", s.auto_lowlights ?? true)}</div>
+        ${row("Per match", "Your worst deaths from each match of your latest session, for the whiff analyzer. Any other films when you press Watch.", seg("lowlights_per_match", s.lowlights_per_match ?? 3, [[1, "1"], [2, "2"], [3, "3"], [5, "5"]]))}
+      </section>
+      <section class="panel">
+        <div class="panel-head"><div class="h3">Grenade lineups</div><span class="grow"></span><span class="sub">Film automatically</span>${sw("auto_lineups", s.auto_lineups ?? true)}</div>
+        ${row("Videos per map", "The most thrown lineups on each map get a video (the thrower's view, then the grenade until it goes off) and a full-size picture of the exact aim. The same lineup is never filmed twice. Any other lineup films when you open it and press Film this lineup now.",
+          seg("lineups_per_map", s.lineups_per_map ?? 30, [[10, "10"], [15, "15"], [20, "20"], [30, "30"], [50, "50"]]))}
+        ${row("Grenades", "", `<div class="chips">${NADE_KINDS.map(([k, label, icon]) => `<button class="chip ${(s.lineup_kinds || []).includes(k) ? "on" : ""}" data-lnkind="${k}" ${tauri ? "" : "disabled"}>${weaponIcon(icon)} ${label}</button>`).join("")}</div>`)}
+        ${row("Lineups", "Instant smokes are thrown from spawn as the round starts; set lineups after lining up.", `<div class="chips">${[["instant", "Instant smokes"], ["set", "Set lineups"]].map(([k, label]) => `<button class="chip ${(s.lineup_categories || []).includes(k) ? "on" : ""}" data-lncat="${k}" ${tauri ? "" : "disabled"}>${label}</button>`).join("")}</div>`)}
+        <div class="set-note" id="ln-plan"></div>
       </section>
       <section class="panel">
         <div class="panel-head"><div class="h3">Clip look</div><span class="grow"></span><span class="sub">For clips rendered from now on</span></div>
@@ -8779,11 +8865,61 @@ async function renderSettings(view) {
       saveSettings();
       return;
     }
-    if (["height", "fps", "max_per_match", "film_wait_min"].includes(key)) value = Number(value);
+    if (key === "hl_preset") {
+      if (value === "custom") return;
+      settingsData.settings.selectivity = value;
+      settingsData.settings.highlight_kinds = [...HL_PRESETS[value]];
+      view.querySelectorAll("[data-hlkind]").forEach((c) => (c.checked = HL_PRESETS[value].includes(c.dataset.hlkind)));
+      saveSettings();
+      return;
+    }
+    if (["height", "fps", "max_per_match", "film_wait_min", "clutch_min", "lowlights_per_match", "lineups_per_map"].includes(key)) value = Number(value);
     if (["killfeed_only", "own_crosshair"].includes(key) && typeof value === "string") value = value === "true";
     (RENDER_KEYS.includes(key) ? settingsData.render : settingsData.settings)[key] = value;
     saveSettings();
+    if (key === "lineups_per_map") showLineupPlan();
   };
+  // What counts as a highlight: each kind on or off (the quick pick shows which one it matches).
+  view.querySelectorAll("[data-hlkind]").forEach((c) => (c.onchange = () => {
+    const kinds = new Set(hlKinds(settingsData.settings));
+    if (c.checked) kinds.add(c.dataset.hlkind); else kinds.delete(c.dataset.hlkind);
+    settingsData.settings.highlight_kinds = HL_KINDS.map(([k]) => k).filter((k) => kinds.has(k));
+    const preset = hlPreset(settingsData.settings.highlight_kinds);
+    const segEl = view.querySelector('.seg[data-key="hl_preset"]');
+    segEl?.querySelectorAll("button").forEach((b) => b.classList.toggle("on", b.dataset.v === preset));
+    saveSettings();
+  }));
+  // Which lineups get videos, and how many that makes.
+  const toggleIn = (list, k) => (list.includes(k) ? list.filter((x) => x !== k) : [...list, k]);
+  view.querySelectorAll("[data-lnkind]").forEach((b) => (b.onclick = () => {
+    const next = toggleIn(settingsData.settings.lineup_kinds || [], b.dataset.lnkind);
+    if (!next.length) return; // at least one kind of grenade
+    settingsData.settings.lineup_kinds = next;
+    b.classList.toggle("on");
+    saveSettings();
+    showLineupPlan();
+  }));
+  view.querySelectorAll("[data-lncat]").forEach((b) => (b.onclick = () => {
+    const next = toggleIn(settingsData.settings.lineup_categories || [], b.dataset.lncat);
+    if (!next.length) return;
+    settingsData.settings.lineup_categories = next;
+    b.classList.toggle("on");
+    saveSettings();
+    showLineupPlan();
+  }));
+  async function showLineupPlan() {
+    const box = view.querySelector("#ln-plan");
+    if (!box) return;
+    const st = settingsData.settings;
+    try {
+      const info = await tauri.core.invoke("lineup_plan_info", { plan: { per_map: Number(st.lineups_per_map ?? 30), kinds: st.lineup_kinds || [], categories: st.lineup_categories || [] } });
+      const left = info.chosen.length - info.filmed;
+      box.textContent = info.chosen.length
+        ? `${info.chosen.length} lineup${info.chosen.length === 1 ? "" : "s"} across ${info.maps} map${info.maps === 1 ? "" : "s"} get videos: ${info.filmed} filmed${left ? `, ${left} to go (about ${Math.max(1, Math.round(left / 3))} min of filming)` : ", all done"}.`
+        : "No lineups thrown 3 or more times with these choices yet.";
+    } catch (e) { box.textContent = ""; }
+  }
+  showLineupPlan();
   view.querySelectorAll(".switch input").forEach((i) => (i.onchange = () => set(i.dataset.key, i.checked)));
   view.querySelectorAll(".seg[data-key]").forEach((el) => el.querySelectorAll("button").forEach((b) => (b.onclick = () => {
     el.querySelectorAll("button").forEach((x) => x.classList.toggle("on", x === b));
@@ -8908,11 +9044,32 @@ async function faceitRefreshed() {
   if (box) { box.innerHTML = faceitAccountRow(); wireFaceitRefresh(); }
 }
 
+// What counts as a highlight (Settings): the kinds of moment, and the quick picks.
+const HL_KINDS = [
+  ["ace", "Aces"], ["4k", "4Ks"], ["3k", "3Ks"], ["2k", "2Ks", "In a fair fight: not when they'd saved"],
+  ["clutch", "Clutches won"], ["ninja", "Ninja defuses", "Defused with enemies still alive"],
+  ["rare", "Rare kills", "Noscopes, knife, jumping and grenade-hit kills"], ["precision", "Deagle, R8 and Scout multi-kills"],
+  ["flick", "Reaction flicks", "They hit you first and you snapped onto them"], ["special", "Special single kills", "Through a wall or smoke, while flashed, with a Zeus or an HE"],
+  ["defuse", "Defuses"],
+];
+const HL_PRESETS = {
+  "highlights-only": ["ace", "4k", "3k", "clutch", "ninja", "rare", "precision"],
+  "solid-plays": ["ace", "4k", "3k", "2k", "clutch", "ninja", "rare", "precision", "flick"],
+  everything: HL_KINDS.map(([k]) => k),
+};
+const hlKinds = (s) => (s.highlight_kinds?.length ? s.highlight_kinds : HL_PRESETS[s.selectivity] || HL_PRESETS["solid-plays"]);
+function hlPreset(kinds) {
+  const key = [...kinds].sort().join();
+  return Object.keys(HL_PRESETS).find((p) => [...HL_PRESETS[p]].sort().join() === key) || "custom";
+}
+
 async function saveSettings() {
   const s = settingsData.settings;
   const update = {
     watch_dirs: s.watch_dirs, auto_render: s.auto_render, auto_lowlights: s.auto_lowlights ?? true, auto_lineups: s.auto_lineups ?? true, premier_auto: s.premier_auto ?? true, film_wait_min: Number(s.film_wait_min ?? 60), faceit_enabled: s.faceit_enabled, faceit_nickname: s.faceit_nickname,
     selectivity: s.selectivity, max_per_match: Number(s.max_per_match) || 6, start_with_windows: s.start_with_windows,
+    highlight_kinds: hlKinds(s), clutch_min: Number(s.clutch_min ?? 1), skip_eco: !!s.skip_eco, lowlights_per_match: Number(s.lowlights_per_match ?? 3),
+    lineups_per_map: Number(s.lineups_per_map ?? 30), lineup_kinds: s.lineup_kinds || ["smoke", "molotov", "flash", "he"], lineup_categories: s.lineup_categories || ["instant", "set"],
     max_clips_gb: Number(s.max_clips_gb) || 0, max_demos_gb: Number(s.max_demos_gb) || 0, render: settingsData.render,
   };
   const saved = document.getElementById("saved");

@@ -2107,3 +2107,55 @@ ul.ins-list { list-style: none; padding-left: 0; }
 .v3d-progress.indeterminate .bar i { width: 30% !important; animation: v3d-slide 1.2s ease-in-out infinite; }
 @keyframes v3d-slide { from { transform: translateX(-100%); } to { transform: translateX(340%); } }
 @media (max-width: 1000px) { .v3d-main { grid-template-columns: 1fr; } }
+
+/* Settings: what counts as a highlight, one tick per kind of moment. */
+.set-kinds { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 6px 14px; padding: 4px 20px 12px; }
+.kind-check { display: flex; gap: 8px; align-items: flex-start; padding: 6px 8px; border-radius: 6px; cursor: pointer; }
+.kind-check:hover { background: var(--hover, rgba(255, 255, 255, 0.04)); }
+.kind-check input { margin-top: 3px; accent-color: var(--accent); }
+.kind-check span { display: grid; gap: 1px; }
+.kind-check .sub { font-size: 12px; }
+.set-note { padding: 4px 20px 14px; color: var(--muted); font-size: 13px; }
+.set-note:empty { display: none; }
+
+/* A lineup's picture (the thrower's view as it's thrown) under its video: click to enlarge. */
+.gn-aimshot { position: relative; display: block; width: 100%; margin-top: 8px; padding: 0; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: #000; cursor: zoom-in; }
+.gn-aimshot img { display: block; width: 100%; aspect-ratio: 16 / 9; object-fit: cover; }
+.gn-aim-mark { position: absolute; left: 50%; top: 50%; width: 18px; height: 18px; margin: -9px 0 0 -9px; border: 2px solid #ffd54a; border-radius: 50%; box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.6); pointer-events: none; }
+.gn-aim-label { position: absolute; left: 8px; bottom: 8px; padding: 2px 8px; border-radius: 4px; background: rgba(0, 0, 0, 0.65); color: #fff; font-size: 12px; }
+
+/* The lineup picture, large, with what you need to repeat it laid over it. */
+.ls-box { position: fixed; inset: 0; z-index: 1000; display: grid; place-items: center; padding: 24px; background: rgba(0, 0, 0, 0.82); cursor: zoom-out; }
+.ls-stage { position: relative; width: min(100%, calc((100vh - 48px) * 16 / 9)); aspect-ratio: 16 / 9; cursor: default; border-radius: 8px; overflow: hidden; box-shadow: 0 10px 40px rgba(0, 0, 0, 0.6); }
+.ls-img { display: block; width: 100%; height: 100%; object-fit: cover; background: #000; }
+.ls-mark { position: absolute; left: 50%; top: 50%; pointer-events: none; }
+.ls-mark i { position: absolute; left: -16px; top: -16px; width: 32px; height: 32px; border: 2px solid #ffd54a; border-radius: 50%; box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.7), inset 0 0 0 1px rgba(0, 0, 0, 0.5); }
+.ls-mark span { position: absolute; left: 24px; top: -11px; white-space: nowrap; padding: 2px 8px; border-radius: 4px; background: rgba(0, 0, 0, 0.7); color: #ffd54a; font-size: 12px; font-weight: 700; }
+.ls-info { position: absolute; left: 14px; top: 14px; max-width: 60%; display: grid; gap: 8px; padding: 12px 14px; border-radius: 8px; background: rgba(10, 12, 16, 0.78); color: #fff; }
+.ls-title { display: flex; align-items: center; gap: 8px; font-size: 17px; }
+.ls-title .wicon { height: 20px; }
+.ls-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.ls-chip { padding: 3px 9px; border-radius: 999px; background: rgba(255, 255, 255, 0.12); font-size: 13px; }
+.ls-chip.strong { background: rgba(255, 213, 74, 0.2); color: #ffe48a; font-weight: 700; }
+.ls-chip.side-t { background: rgba(224, 167, 58, 0.3); color: #ffd28a; font-weight: 800; }
+.ls-chip.side-ct { background: rgba(91, 143, 217, 0.3); color: #b8d3ff; font-weight: 800; }
+.ls-route { font-size: 13px; color: #d6dae2; }
+.ls-route span { color: #ffd54a; }
+.ls-radar { position: absolute; right: 14px; bottom: 14px; width: 24%; aspect-ratio: 1; overflow: hidden; border-radius: 8px; background: #0b0d10; box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.15); }
+.ls-radar img { position: absolute; max-width: none; opacity: 0.9; }
+.ls-radar svg { position: absolute; inset: 0; width: 100%; height: 100%; }
+.ls-radar > span { position: absolute; left: 6px; top: 6px; padding: 1px 6px; border-radius: 4px; background: rgba(0, 0, 0, 0.7); color: #fff; font-size: 11px; font-weight: 700; }
+.ls-path { fill: none; stroke: #fff; stroke-width: 6; stroke-dasharray: 14 9; opacity: 0.85; }
+.ls-from { fill: #ffd54a; stroke: #000; stroke-width: 4; }
+.ls-to { fill: rgba(255, 255, 255, 0.25); stroke: #fff; stroke-width: 4; }
+.ls-to.smoke { fill: rgba(200, 200, 210, 0.45); }
+.ls-to.molotov { fill: rgba(255, 120, 40, 0.5); stroke: #ff9a4a; }
+.ls-to.flash { fill: rgba(255, 255, 255, 0.6); }
+.ls-to.he { fill: rgba(255, 80, 60, 0.45); stroke: #ff6a5a; }
+.ls-spawn circle { fill: rgba(0, 0, 0, 0.6); stroke: rgba(255, 255, 255, 0.5); stroke-width: 3; }
+.ls-spawn text { fill: #fff; font-size: 15px; font-weight: 800; }
+.ls-spawn.on circle { fill: #ffd54a; stroke: #000; }
+.ls-spawn.on text { fill: #000; }
+.ls-close { position: absolute; right: 10px; top: 10px; width: 34px; height: 34px; border: 0; border-radius: 50%; background: rgba(0, 0, 0, 0.6); color: #fff; font-size: 16px; cursor: pointer; }
+.ls-close:hover { background: rgba(0, 0, 0, 0.85); }
+@media (max-width: 700px) { .ls-info { max-width: 80%; } .ls-radar { width: 34%; } }

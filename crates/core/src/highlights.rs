@@ -108,6 +108,124 @@ pub struct Highlight {
     pub duration_s: f64,
 }
 
+/// What a moment counts as, in the words the Settings page uses (a moment can be several):
+/// "ace", "4k", "3k", "2k" (a 2K in a fair fight), "clutch", "ninja" (ninja defuse), "rare"
+/// (noscope, knife, jumping or grenade-impact kill), "precision" (Deagle, R8 or Scout multi-kill),
+/// "flick" (reaction flick), "special" (one kill through a wall or smoke, while flashed, with a Zeus
+/// or an HE) and "defuse". From a moment's tags and kill counts, so stored moments can be sorted
+/// again when the settings change.
+pub fn kinds_of(tags: &[String], kills: u32, eco_kills: u32) -> Vec<&'static str> {
+    let has = |t: &str| tags.iter().any(|x| x == t);
+    let mut out = vec![];
+    match kills {
+        0 | 1 => {}
+        2 if kills - eco_kills.min(kills) >= 2 => out.push("2k"),
+        2 => {}
+        3 => out.push("3k"),
+        4 => out.push("4k"),
+        _ => out.push("ace"),
+    }
+    if tags.iter().any(|t| t.ends_with(" clutch") && t.starts_with("1v")) {
+        out.push("clutch");
+    }
+    if has("ninja defuse") {
+        out.push("ninja");
+    }
+    if has("defuse") {
+        out.push("defuse");
+    }
+    if ["noscope", "knife kill", "grenade impact kill", "jumping kill"].iter().any(|t| has(t)) {
+        out.push("rare");
+    }
+    if tags.iter().any(|t| t.ends_with(" multi-kill")) {
+        out.push("precision");
+    }
+    if has("reaction flick") {
+        out.push("flick");
+    }
+    if kills == 1 && ["wallbang", "through smoke", "while flashed", "zeus", "HE kill"].iter().any(|t| has(t)) {
+        out.push("special");
+    }
+    out
+}
+
+/// Kinds always kept whatever the per-match cap (the rest are the best ones up to it).
+pub const DEFINITIVE_KINDS: [&str; 7] = ["ace", "4k", "3k", "clutch", "ninja", "rare", "precision"];
+
+/// The kinds each of the old three levels (Settings' quick choices) stands for.
+pub fn preset_kinds(sel: Selectivity) -> Vec<String> {
+    let mut k: Vec<&str> = DEFINITIVE_KINDS.to_vec();
+    if sel != Selectivity::HighlightsOnly {
+        k.extend(["2k", "flick"]);
+    }
+    if sel == Selectivity::Everything {
+        k.extend(["special", "defuse"]);
+    }
+    k.into_iter().map(String::from).collect()
+}
+
+/// What the user counts as a highlight (Settings).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HighlightRules {
+    /// Kinds that make a moment a highlight (see [`kinds_of`]).
+    pub kinds: Vec<String>,
+    /// Clutches count from 1 vs this many.
+    pub clutch_min: u32,
+    /// Leave out moments where most kills were on players who'd saved (aces and clutches stay).
+    pub skip_eco: bool,
+    /// The most moments kept from one match besides the definitive ones ([`DEFINITIVE_KINDS`]).
+    pub cap: usize,
+}
+
+impl Default for HighlightRules {
+    fn default() -> Self {
+        Self { kinds: preset_kinds(Selectivity::SolidPlays), clutch_min: 1, skip_eco: false, cap: MAX_PER_PLAYER }
+    }
+}
+
+impl HighlightRules {
+    /// Whether a moment with these tags counts, and whether it's one always kept.
+    pub fn judge(&self, tags: &[String], kills: u32, eco_kills: u32, clutch_vs: u32) -> (bool, bool) {
+        let kinds = kinds_of(tags, kills, eco_kills);
+        let on = |k: &str| self.kinds.iter().any(|x| x == k) && (k != "clutch" || clutch_vs >= self.clutch_min);
+        let hits: Vec<&str> = kinds.into_iter().filter(|k| on(k)).collect();
+        if hits.is_empty() {
+            return (false, false);
+        }
+        if self.skip_eco && tags.iter().any(|t| t == "vs eco") && !hits.iter().any(|k| *k == "ace" || *k == "clutch") {
+            return (false, false);
+        }
+        (true, hits.iter().any(|k| DEFINITIVE_KINDS.contains(k)))
+    }
+}
+
+/// Splits moments into the ones kept (the definitive kinds, then the best others up to the cap)
+/// and the rest, each best first. `info` gives a moment's (score, tags, kills, eco kills, clutch vs).
+pub fn split_by_rules<T>(all: Vec<T>, rules: &HighlightRules, info: impl Fn(&T) -> (f64, &[String], u32, u32, u32)) -> (Vec<T>, Vec<T>) {
+    let mut judged: Vec<(bool, bool, f64, T)> = all
+        .into_iter()
+        .map(|h| {
+            let (score, tags, kills, eco, clutch) = info(&h);
+            let (ok, definitive) = rules.judge(tags, kills, eco, clutch);
+            (ok, definitive, score, h)
+        })
+        .collect();
+    judged.sort_by(|a, b| b.1.cmp(&a.1).then(b.2.total_cmp(&a.2)));
+    let definitive = judged.iter().filter(|j| j.0 && j.1).count();
+    let room = definitive.max(rules.cap);
+    let (mut keep, mut rest) = (vec![], vec![]);
+    for (ok, _, score, h) in judged {
+        if ok && keep.len() < room {
+            keep.push((score, h));
+        } else {
+            rest.push((score, h));
+        }
+    }
+    keep.sort_by(|a, b| b.0.total_cmp(&a.0));
+    rest.sort_by(|a, b| b.0.total_cmp(&a.0));
+    (keep.into_iter().map(|x| x.1).collect(), rest.into_iter().map(|x| x.1).collect())
+}
+
 /// Picks the moments to keep: every tier-3 moment, plus the best others up to `cap` in total.
 pub fn select(mut all: Vec<Highlight>, sel: Selectivity, cap: usize) -> Vec<Highlight> {
     all.retain(|h| h.tier >= sel.min_tier());
@@ -686,5 +804,40 @@ pub fn pretty_weapon(w: &str) -> String {
         "taser" => "Zeus".into(),
         w if w.starts_with("knife") || w == "bayonet" => "Knife".into(),
         other => other.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod rules_tests {
+    use super::*;
+
+    fn tags(t: &[&str]) -> Vec<String> {
+        t.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn kinds_from_tags() {
+        assert_eq!(kinds_of(&tags(&["3K", "1v2 clutch"]), 3, 0), vec!["3k", "clutch"]);
+        // A 2K on players who'd saved isn't a fair 2K.
+        assert!(kinds_of(&tags(&["2K"]), 2, 1).is_empty());
+        assert_eq!(kinds_of(&tags(&["2K", "reaction flick"]), 2, 0), vec!["2k", "flick"]);
+        assert_eq!(kinds_of(&tags(&["wallbang"]), 1, 0), vec!["special"]);
+        assert_eq!(kinds_of(&tags(&["Deagle multi-kill", "2K"]), 2, 0), vec!["2k", "precision"]);
+    }
+
+    #[test]
+    fn rules_pick_and_cap() {
+        let rules = HighlightRules { kinds: tags(&["3k", "clutch"]), clutch_min: 2, skip_eco: false, cap: 1 };
+        assert_eq!(rules.judge(&tags(&["1v1 clutch"]), 1, 0, 1), (false, false));
+        assert_eq!(rules.judge(&tags(&["1v2 clutch"]), 1, 0, 2), (true, true));
+        assert_eq!(rules.judge(&tags(&["2K"]), 2, 0, 0), (false, false));
+        let eco = HighlightRules { skip_eco: true, ..rules.clone() };
+        assert_eq!(eco.judge(&tags(&["3K", "vs eco"]), 3, 2, 0), (false, false));
+        // Definitive moments are all kept; others only up to the cap.
+        let solid = HighlightRules { kinds: preset_kinds(Selectivity::SolidPlays), clutch_min: 1, skip_eco: false, cap: 1 };
+        let all = vec![(5.0, tags(&["2K"]), 2u32), (4.0, tags(&["2K"]), 2), (3.0, tags(&["3K"]), 3), (2.0, tags(&["4K"]), 4)];
+        let (keep, rest) = split_by_rules(all, &solid, |h| (h.0, h.1.as_slice(), h.2, 0, 0));
+        assert_eq!(keep.iter().map(|h| h.0).collect::<Vec<_>>(), vec![3.0, 2.0]);
+        assert_eq!(rest.len(), 2);
     }
 }

@@ -288,6 +288,47 @@ pub fn probe(video: &Path) -> Result<(f64, u32)> {
 }
 
 /// Preview frame `at` seconds into a clip (or just before its end).
+/// One frame of a video at full size (a lineup's picture: the exact aim), as a high-quality JPEG.
+pub fn make_still(clip: &Path, out: &Path, at: f64) -> Result<()> {
+    let (dur, _) = probe(clip)?;
+    let t = at.min(dur - 0.5).max(0.0);
+    let mut c = ffmpeg();
+    c.args(["-ss", &format!("{t:.2}"), "-i"]).arg(clip);
+    c.args(["-frames:v", "1", "-q:v", "2"]).arg(out);
+    run(c)?;
+    Ok(())
+}
+
+/// Frames of a stretch that repeat the one before while the picture around them moves, as a share
+/// of the stretch (0 to 1): a camera chasing a grenade moves every frame, so a repeat there is the
+/// picture stepping instead of gliding (choppy). `None` if ffmpeg couldn't read it, or the stretch
+/// barely moves (nothing to judge).
+pub fn stutter_share(video: &Path, from_s: f64, to_s: f64) -> Option<f64> {
+    const W: usize = 160;
+    const H: usize = 90;
+    if to_s - from_s < 0.3 {
+        return None;
+    }
+    let mut c = ffmpeg();
+    c.args(["-ss", &format!("{from_s:.2}"), "-t", &format!("{:.2}", to_s - from_s), "-i"]).arg(video);
+    c.args(["-an", "-vf", &format!("scale={W}:{H},format=gray"), "-f", "rawvideo", "-"]);
+    let raw = run(c).ok()?;
+    let frames: Vec<&[u8]> = raw.chunks_exact(W * H).collect();
+    if frames.len() < 10 {
+        return None;
+    }
+    let diffs: Vec<f64> = frames.windows(2).map(|p| p[0].iter().zip(p[1]).map(|(a, b)| (*a as i32 - *b as i32).unsigned_abs() as f64).sum::<f64>() / (W * H) as f64).collect();
+    let mut sorted = diffs.clone();
+    sorted.sort_by(f64::total_cmp);
+    let typical = sorted[sorted.len() / 2];
+    // The picture has to be moving for a repeated frame to mean anything.
+    if typical < 1.0 {
+        return None;
+    }
+    let repeats = diffs.iter().filter(|&&d| d < typical * 0.12).count();
+    Some(repeats as f64 / diffs.len() as f64)
+}
+
 pub fn make_thumb_at(clip: &Path, thumb: &Path, at: f64) -> Result<()> {
     let (dur, _) = probe(clip)?;
     let t = at.min(dur - 0.5).max(0.0);

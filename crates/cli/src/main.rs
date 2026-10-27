@@ -141,10 +141,10 @@ fn library(args: &[String]) -> Result<()> {
             // Also detect highlights for this player (opt-in, repeatable).
             "--also" => policy.also_clip.push(val()?.parse()?),
             "--selectivity" => {
-                policy.selectivity = cs2hl_core::highlights::Selectivity::parse(val()?)
-                    .context("--selectivity everything|solid-plays|highlights-only")?
+                let sel = cs2hl_core::highlights::Selectivity::parse(val()?).context("--selectivity everything|solid-plays|highlights-only")?;
+                policy.rules.kinds = cs2hl_core::highlights::preset_kinds(sel)
             }
-            "--max-per-match" => policy.max_per_player = val()?.parse()?,
+            "--max-per-match" => policy.rules.cap = val()?.parse()?,
             "--refresh" => {
                 refresh = true;
                 skip.push(i);

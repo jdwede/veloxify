@@ -86,6 +86,24 @@ impl LineupShot {
 }
 
 /// `spec_goto` arguments looking from `cam` at `target`: x y z pitch yaw.
+/// Windows' timer at 1 ms while it lives (sleeps are otherwise rounded up to 15.6 ms).
+struct FineTimer;
+impl FineTimer {
+    fn new() -> Self {
+        unsafe {
+            windows::Win32::Media::timeBeginPeriod(1);
+        }
+        FineTimer
+    }
+}
+impl Drop for FineTimer {
+    fn drop(&mut self) {
+        unsafe {
+            windows::Win32::Media::timeEndPeriod(1);
+        }
+    }
+}
+
 fn look(cam: [f64; 3], target: [f64; 3]) -> String {
     let (dx, dy, dz) = (target[0] - cam[0], target[1] - cam[1], target[2] - cam[2]);
     let yaw = dy.atan2(dx).to_degrees();
@@ -705,6 +723,9 @@ impl Renderer {
             }
             vc.send("demo_resume");
             let t0 = Instant::now();
+            // Windows' timer is coarse (15.6 ms): finer while the camera is driven, so a new
+            // position reaches CS2 for every frame it draws (steps between them read as stutter).
+            let _fine = FineTimer::new();
             // Drive the camera while the demo plays in real time: the thrower's eyes until the
             // grenade leaves the hand, then a free camera chasing it, then holding on where it
             // went off.
@@ -741,7 +762,7 @@ impl Renderer {
                     };
                     vc.send(&cmd);
                 }
-                std::thread::sleep(Duration::from_millis(15));
+                std::thread::sleep(Duration::from_millis(3));
             }
             let outcome = capture.join().map_err(|_| anyhow!("capture thread panicked"))??;
             vc.send("demo_pause");

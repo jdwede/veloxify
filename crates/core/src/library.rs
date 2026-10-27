@@ -11,19 +11,13 @@ use crate::stats::{Counts, Derived, PlayerStats};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-/// Which moments become clips: who gets them, how picky selection is, and how many per match.
-#[derive(Debug, Clone)]
+/// Which moments become clips: who gets them, and what counts as a highlight (with how many per
+/// match).
+#[derive(Debug, Clone, Default)]
 pub struct ClipPolicy {
     /// Players besides you whose highlights are also detected (opt-in; empty by default).
     pub also_clip: Vec<u64>,
-    pub selectivity: highlights::Selectivity,
-    pub max_per_player: usize,
-}
-
-impl Default for ClipPolicy {
-    fn default() -> Self {
-        Self { also_clip: vec![], selectivity: highlights::Selectivity::SolidPlays, max_per_player: highlights::MAX_PER_PLAYER }
-    }
+    pub rules: highlights::HighlightRules,
 }
 
 /// A new session starts after a break this long: about a night's sleep, not the date (a late
@@ -151,6 +145,10 @@ pub struct MatchEntry {
     pub demo_path: String,
     pub players: Vec<PlayerRow>,
     pub highlights: Vec<HighlightEntry>,
+    /// The other moments found (they don't count as highlights with the current settings): kept
+    /// so a change in Settings can sort them again without reading the demo.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub candidates: Vec<HighlightEntry>,
     /// Misses you were punished for (see `lowlights`), worst first.
     #[serde(default)]
     pub lowlights: Vec<Lowlight>,
@@ -467,16 +465,15 @@ pub fn match_entry(
                 .unwrap_or(0),
         })
         .collect();
-    let mut hls: Vec<HighlightEntry> = m
-        .players
-        .iter()
-        .filter(|p| p.steamid == me || policy.also_clip.contains(&p.steamid))
-        .flat_map(|p| {
-            let flicks = demo.and_then(|d| highlights::reaction_flicks(d, m, p.steamid).ok()).unwrap_or_default();
-            highlights::select(highlights::detect(m, a, p.steamid, &flicks), policy.selectivity, policy.max_per_player)
-        })
-        .map(|h| highlight_entry(id, &h, m, a))
-        .collect();
+    // Every moment found, sorted into highlights (what Settings counts as one) and the rest.
+    let (mut hls, mut candidates): (Vec<HighlightEntry>, Vec<HighlightEntry>) = (vec![], vec![]);
+    for p in m.players.iter().filter(|p| p.steamid == me || policy.also_clip.contains(&p.steamid)) {
+        let flicks = demo.and_then(|d| highlights::reaction_flicks(d, m, p.steamid).ok()).unwrap_or_default();
+        let all: Vec<HighlightEntry> = highlights::detect(m, a, p.steamid, &flicks).iter().map(|h| highlight_entry(id, h, m, a)).collect();
+        let (keep, rest) = split_highlights(all, &policy.rules);
+        hls.extend(keep);
+        candidates.extend(rest);
+    }
     let lls: Vec<Lowlight> = lowlights::detect(m, me, demo)
         .into_iter()
         .map(|mut l| {
@@ -507,6 +504,7 @@ pub fn match_entry(
         demo_path: demo_path.to_string(),
         players,
         highlights: hls,
+        candidates,
         lowlights: lls,
         potm,
         competition: None,
@@ -514,6 +512,49 @@ pub fn match_entry(
         elo: None,
         elo_delta: None,
     })
+}
+
+/// One player's moments split by the user's rules: (highlights, the rest).
+pub fn split_highlights(all: Vec<HighlightEntry>, rules: &highlights::HighlightRules) -> (Vec<HighlightEntry>, Vec<HighlightEntry>) {
+    highlights::split_by_rules(all, rules, |h| (h.score, h.tags.as_slice(), h.details.kills, h.details.eco_kills, h.details.clutch_vs))
+}
+
+/// Sorts every match's moments again after the highlight settings changed: what counts now moves
+/// into the highlights, what doesn't moves out (a moment already filmed always stays). Returns how
+/// many matches changed. Matches read before moments were all kept can only lose highlights here.
+pub fn reselect(root: &std::path::Path, policy: &ClipPolicy) -> anyhow::Result<usize> {
+    let mut changed = 0;
+    for f in std::fs::read_dir(root.join("matches"))?.flatten() {
+        let path = f.path();
+        if !is_entry_file(&path) {
+            continue;
+        }
+        let Ok(mut e) = std::fs::read_to_string(&path).map_err(anyhow::Error::from).and_then(|t| Ok(serde_json::from_str::<MatchEntry>(&t)?)) else { continue };
+        let before: Vec<String> = e.highlights.iter().map(|h| h.id.clone()).collect();
+        let mut pool: Vec<HighlightEntry> = std::mem::take(&mut e.highlights);
+        pool.append(&mut e.candidates);
+        let mut players: Vec<String> = pool.iter().map(|h| h.player.clone()).collect();
+        players.sort();
+        players.dedup();
+        for p in players {
+            let (mine, rest): (Vec<HighlightEntry>, Vec<HighlightEntry>) = pool.into_iter().partition(|h| h.player == p);
+            pool = rest;
+            let (filmed, open): (Vec<HighlightEntry>, Vec<HighlightEntry>) = mine.into_iter().partition(|h| h.clip.is_some());
+            let (keep, others) = split_highlights(open, &policy.rules);
+            e.highlights.extend(filmed);
+            e.highlights.extend(keep);
+            e.candidates.extend(others);
+        }
+        e.highlights.sort_by(|x, y| y.score.total_cmp(&x.score));
+        let after: Vec<String> = e.highlights.iter().map(|h| h.id.clone()).collect();
+        if after != before {
+            let tmp = path.with_extension("json.tmp");
+            std::fs::write(&tmp, serde_json::to_string_pretty(&e)?)?;
+            std::fs::rename(tmp, &path)?;
+            changed += 1;
+        }
+    }
+    Ok(changed)
 }
 
 fn highlight_entry(match_id: &str, h: &Highlight, m: &Match, a: &Analysis) -> HighlightEntry {

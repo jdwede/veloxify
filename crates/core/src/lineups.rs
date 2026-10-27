@@ -38,6 +38,11 @@ const SAME_AIM: f32 = 0.5;
 /// is picked out of them).
 const MERGE_AIM: f32 = 2.0;
 const MERGE_LANDING: f32 = 250.0;
+/// The same lineup grouped twice: from nearly the same spot, aimed within this many degrees and
+/// landing this close (a slightly different stance on the same lineup).
+const DUP_SPOT: f32 = 64.0;
+const DUP_AIM: f32 = 3.0;
+const DUP_LANDING: f32 = 120.0;
 /// A grenade landing farther than this from anywhere a player has stood (in the library's kills)
 /// is off the map or on a roof: a miss. Flashes pop in the air (over a wall, above a site), so
 /// they get more room.
@@ -52,7 +57,7 @@ const RARE_SHARE: f32 = 0.20;
 /// lineup, not a miss).
 const MISS_AIM: f32 = 5.0;
 /// Bumped when the rules above change: `lineups.json` from older rules is rebuilt.
-pub const VERSION: u32 = 8;
+pub const VERSION: u32 = 9;
 /// Spawn spots closer than this are one spot.
 const SPAWN_RADIUS: f32 = 48.0;
 /// Example throws kept per lineup.
@@ -365,8 +370,15 @@ pub fn write(root: &Path) -> Result<()> {
         entries.get(match_id).and_then(|e| e.players.iter().find(|p| p.steamid == sid)).map(|p| p.name.clone()).unwrap_or_default()
     };
 
+    // The lineups as they were: a lineup keeps its id when it's rebuilt (its video, name, and the
+    // user's favorite or removal stay with it), found by the throws it's made of.
+    let before = load(root);
     let mut out = Lineups::default();
     for (map, throws) in &by_map {
+        let old: &[Lineup] = before.maps.get(map).map_or(&[], |m| m.lineups.as_slice());
+        let old_by_throw: HashMap<&str, &str> = before.maps.get(map).map(|m| m.by_throw.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect()).unwrap_or_default();
+        let old_ids: std::collections::HashSet<&str> = old.iter().map(|l| l.id.as_str()).collect();
+        let mut taken: std::collections::HashSet<String> = std::collections::HashSet::new();
         // Spawn spots per side, from where throwers stood when rounds went live.
         let mut spawns: BTreeMap<String, Vec<([f32; 2], usize)>> = BTreeMap::new();
         for (_, t) in throws {
@@ -454,13 +466,13 @@ pub fn write(root: &Path) -> Result<()> {
         for g in groups {
             let aim = group_aim(&g.members);
             let into = joined.iter_mut().find(|h| {
+                let (spot, landing) = ((h.at[0] - g.at[0]).hypot(h.at[1] - g.at[1]), (h.to[0] - g.to[0]).hypot(h.to[1] - g.to[1]));
                 h.instant == g.instant
                     && h.kind == g.kind
                     && h.side == g.side
-                    && (h.at[0] - g.at[0]).hypot(h.at[1] - g.at[1]) < SAME_SPOT
                     && (h.at[2] - g.at[2]).abs() < SAME_HEIGHT
-                    && (h.to[0] - g.to[0]).hypot(h.to[1] - g.to[1]) < MERGE_LANDING
-                    && aims_within(group_aim(&h.members), aim, MERGE_AIM)
+                    && ((spot < SAME_SPOT && landing < MERGE_LANDING && aims_within(group_aim(&h.members), aim, MERGE_AIM))
+                        || (spot < DUP_SPOT && landing < DUP_LANDING && aims_within(group_aim(&h.members), aim, DUP_AIM)))
             });
             match into {
                 Some(h) => h.members.extend(g.members),
@@ -576,20 +588,48 @@ pub fn write(root: &Path) -> Result<()> {
             let mut throwers: Vec<&str> = g.members.iter().map(|(_, t)| t.player.as_str()).collect();
             throwers.sort_unstable();
             throwers.dedup();
-            // Named after its first throw (the earliest played), so new matches don't rename it.
-            let first = g.members.iter().min_by_key(|(mid, t)| (played(mid), *mid, t.tick)).map(|(_, t)| *t).unwrap_or(r);
-            let mut id = format!(
-                "{map}-{}-{}-{}-{}-{}-{}",
-                g.kind,
-                g.side,
-                (first.from[0] / 16.0).round() as i32,
-                (first.from[1] / 16.0).round() as i32,
-                first.pitch.round() as i32,
-                first.yaw.round() as i32
-            );
+            // The id it had: the old lineup most of its throws were in (a lineup that split keeps it
+            // in its bigger part, which comes first; two that joined keep the bigger one's)...
+            let mut votes: BTreeMap<&str, usize> = BTreeMap::new();
+            for (mid, t) in &g.members {
+                if let Some(old_id) = old_by_throw.get(format!("{mid}@{}", t.tick).as_str()).filter(|id| !taken.contains(**id)) {
+                    *votes.entry(*old_id).or_default() += 1;
+                }
+            }
+            let inherited = votes.into_iter().max_by_key(|(id, n)| (*n, std::cmp::Reverse(*id))).map(|(id, _)| id.to_string()).or_else(|| {
+                // ...or one thrown from the same spot with the same aim to the same place.
+                old.iter()
+                    .filter(|o| !taken.contains(&o.id) && o.kind == g.kind && o.side == g.side && o.category == category)
+                    .map(|o| ((o.from[0] - r.from[0]).hypot(o.from[1] - r.from[1]), o))
+                    .filter(|(d, o)| *d < DUP_SPOT && aims_within((o.pitch, o.yaw), (r.pitch, r.yaw), DUP_AIM) && (o.to[0] - r.to[0]).hypot(o.to[1] - r.to[1]) < MERGE_LANDING)
+                    .min_by(|a, b| a.0.total_cmp(&b.0))
+                    .map(|(_, o)| o.id.clone())
+            });
+            let mut id = match inherited {
+                Some(id) => id,
+                // A new lineup: named after its first throw (the earliest played).
+                None => {
+                    let first = g.members.iter().min_by_key(|(mid, t)| (played(mid), *mid, t.tick)).map(|(_, t)| *t).unwrap_or(r);
+                    let mut id = format!(
+                        "{map}-{}-{}-{}-{}-{}-{}",
+                        g.kind,
+                        g.side,
+                        (first.from[0] / 16.0).round() as i32,
+                        (first.from[1] / 16.0).round() as i32,
+                        first.pitch.round() as i32,
+                        first.yaw.round() as i32
+                    );
+                    // Not one an old lineup had (its video would come with it).
+                    while old_ids.contains(id.as_str()) && !taken.contains(&id) {
+                        id.push('b');
+                    }
+                    id
+                }
+            };
             while !used_ids.insert(id.clone()) {
                 id.push('b');
             }
+            taken.insert(id.clone());
             for (mid, t) in &g.members {
                 out.by_throw.insert(format!("{mid}@{}", t.tick), id.clone());
             }

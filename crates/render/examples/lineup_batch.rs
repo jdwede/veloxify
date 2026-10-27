@@ -2,7 +2,7 @@
 //!   cargo run --release -p cs2hl-render --example lineup_batch -- <steamid64> <profile.json> <library> <how many> [lineup ids,...]
 
 use anyhow::Result;
-use cs2hl_render::batch::{render_lineups, Event};
+use cs2hl_render::batch::{render_lineups, Event, LineupPlan};
 use cs2hl_render::profile::Profile;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
@@ -20,7 +20,7 @@ fn main() -> Result<()> {
     std::fs::create_dir_all(&work)?;
     let t0 = Instant::now();
     let stamp = || format!("{:>6.1}s", t0.elapsed().as_secs_f64());
-    let done = render_lineups(&lib, me, profile, &work, ids, n, Arc::new(AtomicBool::new(false)), &mut |e| match e {
+    let done = render_lineups(&lib, me, profile, &work, ids, &LineupPlan::default(), n, Arc::new(AtomicBool::new(false)), &mut |e| match e {
         Event::Plan { total, more } => println!("{} plan: {total} ({more} more later)", stamp()),
         Event::Filming { title } => println!("{} filming {title}", stamp()),
         Event::Rendered { match_id, title, took_s, .. } => println!("{} RENDERED {title} ({match_id}) in {took_s:.0}s", stamp()),

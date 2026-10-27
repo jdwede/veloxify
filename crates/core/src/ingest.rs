@@ -58,7 +58,7 @@ pub fn add_demo(root: &Path, path: &Path, me: u64, policy: &ClipPolicy, refresh:
         return Ok(Added::Skipped { id, reason: format!("player {me} is not in this match") });
     };
     if let Some(prev) = previous {
-        for h in entry.highlights.iter_mut() {
+        for h in entry.highlights.iter_mut().chain(entry.candidates.iter_mut()) {
             // The clip is kept unless what it shows changed (it's filmed again then).
             if let Some(old) = prev.highlights.iter().find(|o| o.id == h.id && o.segments == h.segments) {
                 h.clip = old.clip.clone();
@@ -66,6 +66,11 @@ pub fn add_demo(root: &Path, path: &Path, me: u64, policy: &ClipPolicy, refresh:
                 h.thumb = old.thumb.clone();
             }
         }
+        // A moment already filmed stays a highlight, whatever the settings say now.
+        let (filmed, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut entry.candidates).into_iter().partition(|h| h.clip.is_some());
+        entry.candidates = rest;
+        entry.highlights.extend(filmed);
+        entry.highlights.sort_by(|x, y| y.score.total_cmp(&x.score));
         // The play of the match keeps its clip the same way.
         if let (Some(p), Some(old)) = (entry.potm.as_mut(), prev.potm.as_ref()) {
             if old.id == p.id && old.segments == p.segments {

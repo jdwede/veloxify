@@ -1,10 +1,9 @@
 //! Rendering a library's pending highlights, best "hands" first.
 //!
-//! Three passes over the pending highlights: 3K+ first, then flashy or always-tier moments, then
-//! the rest. Within a pass, highlights are grouped by match (matches ordered by their best hand)
-//! and a demo is only reloaded when the next highlight comes from a different match. Each match
-//! file is saved as soon as a clip is done, so the app shows clips as they finish and an
-//! interrupted run loses nothing.
+//! Highlights are filmed a match at a time (each demo loaded once: a load takes about 11 s),
+//! matches with the best moments first and each match's best moments first. Each match file is
+//! saved as soon as a clip is done, so the app shows clips as they finish and an interrupted run
+//! loses nothing.
 
 use crate::assemble::{make_thumb, make_thumb_at, SETTLE_S};
 use crate::profile::Profile;
@@ -70,16 +69,6 @@ pub enum Event {
     Log(String),
 }
 
-fn band(h: &HighlightEntry) -> u8 {
-    if h.hand >= 300 {
-        0
-    } else if h.hand % 100 >= 25 || h.tier == 3 {
-        1
-    } else {
-        2
-    }
-}
-
 fn load(path: &Path) -> Result<MatchEntry> {
     Ok(serde_json::from_str(&std::fs::read_to_string(path)?)?)
 }
@@ -131,17 +120,20 @@ pub fn plan(lib: &Path, scope: &Scope) -> Result<Vec<(String, String)>> {
             m.highlights.into_iter().filter(|h| h.clip.is_none() && h.render_error.is_none() && curation.auto_render(&h.id)).map(|h| (id.clone(), h)),
         );
     }
+    // A match at a time (one demo load each), the match with the best moment first.
+    let mut groups: BTreeMap<&str, Vec<&HighlightEntry>> = BTreeMap::new();
+    for (mid, h) in &pending {
+        groups.entry(mid.as_str()).or_default().push(h);
+    }
+    let mut groups: Vec<_> = groups.into_iter().collect();
+    groups.sort_by_key(|(_, hs)| std::cmp::Reverse(hs.iter().map(|h| h.hand).max().unwrap_or(0)));
     let mut order = vec![];
-    for b in 0..3 {
-        let mut groups: BTreeMap<&str, Vec<&HighlightEntry>> = BTreeMap::new();
-        for (mid, h) in pending.iter().filter(|(_, h)| band(h) == b) {
-            groups.entry(mid.as_str()).or_default().push(h);
-        }
-        let mut groups: Vec<_> = groups.into_iter().collect();
-        groups.sort_by_key(|(_, hs)| std::cmp::Reverse(hs.iter().map(|h| h.hand).max().unwrap_or(0)));
-        for (mid, mut hs) in groups {
-            hs.sort_by_key(|h| std::cmp::Reverse(h.hand));
-            order.extend(hs.into_iter().map(|h| (mid.to_string(), h.id.clone())));
+    for (mid, mut hs) in groups {
+        hs.sort_by_key(|h| std::cmp::Reverse(h.hand));
+        order.extend(hs.into_iter().map(|h| (mid.to_string(), h.id.clone())));
+        // The match's play of the match right after its own highlights (the demo is loaded).
+        if let Some(i) = potms.iter().position(|(m, _)| m == mid) {
+            order.push(potms.remove(i));
         }
     }
     order.extend(potms);
@@ -540,7 +532,81 @@ pub struct LineupClip {
     /// It couldn't be filmed because every throw of it is in a demo CS2 can't play any more.
     #[serde(default)]
     pub too_old: bool,
+    /// The thrower's view the moment it's thrown, full size: the exact lineup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aim: Option<String>,
+    /// How much of the grenade's flight stutters in the video (see `assemble::stutter_share`),
+    /// once checked; a choppy one is filmed again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stutter: Option<f64>,
+    /// Times it was filmed again for stuttering.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub refilms: u32,
 }
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
+}
+
+/// Which lineups get videos on their own (Settings): the most thrown on each map, up to
+/// `per_map`, of these grenades ("smoke", "molotov", "flash", "he") and these kinds of lineup
+/// ("instant", "set").
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct LineupPlan {
+    pub per_map: usize,
+    pub kinds: Vec<String>,
+    pub categories: Vec<String>,
+}
+
+impl Default for LineupPlan {
+    fn default() -> Self {
+        Self {
+            per_map: 30,
+            kinds: ["smoke", "molotov", "flash", "he"].map(String::from).to_vec(),
+            categories: ["instant", "set"].map(String::from).to_vec(),
+        }
+    }
+}
+
+/// The same lineup grouped twice (thrown from nearly the same spot, with nearly the same aim, to
+/// nearly the same place): it's filmed once.
+fn near_copy(a: &cs2hl_core::lineups::Lineup, b: &cs2hl_core::lineups::Lineup) -> bool {
+    let yaw = ((a.yaw - b.yaw + 540.0).rem_euclid(360.0) - 180.0).abs();
+    a.kind == b.kind
+        && a.side == b.side
+        && (a.from[0] - b.from[0]).hypot(a.from[1] - b.from[1]) < 64.0
+        && (a.pitch - b.pitch).abs() < 2.5
+        && yaw < 2.5
+        && (a.to[0] - b.to[0]).hypot(a.to[1] - b.to[1]) < 150.0
+}
+
+/// The lineups that get videos on their own, by map, most thrown first (see [`LineupPlan`]).
+pub fn chosen_lineups(lib: &Path, plan: &LineupPlan) -> BTreeMap<String, Vec<cs2hl_core::lineups::Lineup>> {
+    let all = cs2hl_core::lineups::load(lib);
+    let mut out = BTreeMap::new();
+    for (map, m) in all.maps {
+        let mut ls: Vec<cs2hl_core::lineups::Lineup> = m
+            .lineups
+            .into_iter()
+            .filter(|l| l.count >= LINEUP_AUTO_MIN_THROWS && plan.kinds.contains(&l.kind) && plan.categories.contains(&l.category))
+            .collect();
+        ls.sort_by(|a, b| b.count.cmp(&a.count).then(b.matches.cmp(&a.matches)).then(a.id.cmp(&b.id)));
+        let mut chosen: Vec<cs2hl_core::lineups::Lineup> = vec![];
+        for l in ls {
+            if chosen.len() >= plan.per_map {
+                break;
+            }
+            if !chosen.iter().any(|c| near_copy(c, &l)) {
+                chosen.push(l);
+            }
+        }
+        out.insert(map, chosen);
+    }
+    out
+}
+
+/// A lineup video whose grenade flight stutters more than this is filmed again (once).
+pub const STUTTER_MAX: f64 = 0.08;
 
 /// After the lineups are rebuilt: a video whose lineup id is gone moves to the lineup its throw
 /// belongs to now (if that one has no video yet); videos of lineups that no longer exist are
@@ -643,31 +709,92 @@ fn save_lineup_clips(lib: &Path, clips: &BTreeMap<String, LineupClip>) -> Result
     Ok(())
 }
 
-/// Lineups filmed on their own are those thrown at least this many times; the rest (most of them,
-/// thrown 2 or 3 times) film when asked for ("Film this lineup now"), so filming lineups ends.
-pub const LINEUP_AUTO_MIN_THROWS: usize = 4;
+/// Lineups filmed on their own are thrown at least this many times (twice can be chance); any
+/// other films when asked for ("Film this lineup now").
+pub const LINEUP_AUTO_MIN_THROWS: usize = 3;
 
-/// Lineups still without a video, most thrown first: the ones asked for (`ids`), or every lineup
-/// thrown [`LINEUP_AUTO_MIN_THROWS`] times or more.
-pub fn plan_lineups(lib: &Path, ids: Option<&[String]>) -> Vec<cs2hl_core::lineups::Lineup> {
-    let all = cs2hl_core::lineups::load(lib);
+/// Whether a lineup still needs its video: none yet (and none that failed, unless it's been thrown
+/// more since or it's asked for), or one that stutters and hasn't been filmed again yet.
+fn needs_video(l: &cs2hl_core::lineups::Lineup, c: Option<&LineupClip>, asked: bool) -> bool {
+    match c {
+        None => true,
+        Some(c) if c.clip.is_some() => c.stutter.is_some_and(|s| s > STUTTER_MAX) && c.refilms == 0,
+        Some(c) => asked || c.error.is_none() || l.count > c.count,
+    }
+}
+
+/// Lineups still to film: the ones asked for (`ids`), or the ones chosen to get videos on their
+/// own (see [`chosen_lineups`]), each map's most thrown first, a map's #1 before any map's #2.
+pub fn plan_lineups(lib: &Path, ids: Option<&[String]>, plan: &LineupPlan) -> Vec<cs2hl_core::lineups::Lineup> {
     let done = load_lineup_clips(lib);
-    let mut todo: Vec<cs2hl_core::lineups::Lineup> = all
-        .maps
-        .into_values()
-        .flat_map(|m| m.lineups)
-        .filter(|l| match ids {
-            Some(ids) => ids.contains(&l.id),
-            None => l.count >= LINEUP_AUTO_MIN_THROWS,
-        })
-        .filter(|l| done.get(&l.id).is_none_or(|c| c.clip.is_none() && (ids.is_some() || c.error.is_none() || l.count > c.count)))
-        .collect();
-    todo.sort_by(|a, b| b.count.cmp(&a.count).then(b.matches.cmp(&a.matches)));
+    if let Some(ids) = ids {
+        let mut todo: Vec<cs2hl_core::lineups::Lineup> = cs2hl_core::lineups::load(lib)
+            .maps
+            .into_values()
+            .flat_map(|m| m.lineups)
+            .filter(|l| ids.contains(&l.id) && needs_video(l, done.get(&l.id), true))
+            .collect();
+        todo.sort_by(|a, b| b.count.cmp(&a.count).then(b.matches.cmp(&a.matches)));
+        return todo;
+    }
+    let per_map: Vec<Vec<cs2hl_core::lineups::Lineup>> = chosen_lineups(lib, plan).into_values().collect();
+    let deepest = per_map.iter().map(Vec::len).max().unwrap_or(0);
+    let mut todo = vec![];
+    for rank in 0..deepest {
+        for list in &per_map {
+            if let Some(l) = list.get(rank).filter(|l| needs_video(l, done.get(&l.id), false)) {
+                todo.push(l.clone());
+            }
+        }
+    }
     todo
 }
 
 /// Seconds of the thrower's own view before the throw.
 const LINEUP_LEAD_S: f64 = 2.5;
+
+/// Lineup videos made before their picture and stutter check existed get them: the full-size
+/// still of the throw, and how much of the flight stutters (a choppy one is filmed again, once).
+/// Works for up to `budget`; returns how many were checked and whether more are left.
+pub fn check_lineup_videos(lib: &Path, budget: std::time::Duration) -> (usize, bool) {
+    let mut clips = load_lineup_clips(lib);
+    let todo: Vec<String> = clips.iter().filter(|(_, c)| c.clip.is_some() && (c.aim.is_none() || c.stutter.is_none())).map(|(k, _)| k.clone()).collect();
+    if todo.is_empty() {
+        return (0, false);
+    }
+    // Each video's flight time, from its throw.
+    let all = cs2hl_core::lineups::load(lib);
+    let pop_of = |mid: &str, tick: i32| -> Option<i32> {
+        all.maps.values().flat_map(|m| m.lineups.iter()).flat_map(|l| std::iter::once(&l.video).chain(&l.examples)).find(|o| o.match_id == mid && o.tick == tick).map(|o| o.pop_tick)
+    };
+    let started = Instant::now();
+    let mut done = 0;
+    for id in &todo {
+        if started.elapsed() > budget {
+            break;
+        }
+        let Some(c) = clips.get_mut(id) else { continue };
+        let Some(rel) = c.clip.clone() else { continue };
+        let video = lib.join(&rel);
+        if !video.exists() {
+            continue;
+        }
+        if c.aim.is_none() {
+            let aim = format!("lineups/{id}-aim.jpg");
+            if crate::assemble::make_still(&video, &lib.join(&aim), LINEUP_LEAD_S - 0.1).is_ok() {
+                c.aim = Some(aim);
+            }
+        }
+        if c.stutter.is_none() {
+            let flight = pop_of(&c.match_id, c.tick).map_or(2.0, |p| (p - c.tick).max(32) as f64 / TICKRATE);
+            // Not measurable (a still flight): counted as smooth, so it isn't checked again.
+            c.stutter = Some(crate::assemble::stutter_share(&video, LINEUP_LEAD_S + 0.25, LINEUP_LEAD_S + flight).unwrap_or(0.0));
+        }
+        done += 1;
+    }
+    let _ = save_lineup_clips(lib, &clips);
+    (done, done < todo.len())
+}
 
 /// The tick the camera is checked at (before the settle time that precedes the clip): where the
 /// thrower must be standing then.
@@ -716,12 +843,13 @@ pub fn render_lineups(
     profile: Profile,
     work_dir: &Path,
     ids: Option<Vec<String>>,
+    plan: &LineupPlan,
     limit: usize,
     abort: Arc<AtomicBool>,
     on: &mut dyn FnMut(Event),
 ) -> Result<usize> {
     use crate::session::{LineupShot, WrongPov};
-    let todo = plan_lineups(lib, ids.as_deref());
+    let todo = plan_lineups(lib, ids.as_deref(), plan);
     let entry_of = |mid: &str| -> Option<MatchEntry> { load(&lib.join("matches").join(format!("{mid}.json"))).ok() };
     let mut unplayable = load_unplayable(lib);
     let mut load_failed = load_failures(lib);
@@ -770,9 +898,41 @@ pub fn render_lineups(
         jobs.push(Job { id: l.id.clone(), title: l.name.clone(), kind: l.kind.clone(), count: l.count, tries });
     }
     save_lineup_clips(lib, &clips)?;
-    // Straight down the list, most thrown first (each from its newest throw CS2 can play).
+    // This run's share of the list (most important first), filmed a demo at a time: each lineup
+    // from a demo as many of the others were thrown in too (a load takes about 11 s), newer demos
+    // first; its other throws stay as fallbacks.
     let waiting = jobs.len();
-    let jobs: Vec<Job> = jobs.into_iter().take(limit).collect();
+    let mut jobs: Vec<Job> = jobs.into_iter().take(limit).collect();
+    {
+        let mut left: Vec<usize> = (0..jobs.len()).collect();
+        let mut order: Vec<usize> = vec![];
+        while !left.is_empty() {
+            let mut cover: HashMap<String, (usize, i64)> = HashMap::new();
+            for &j in &left {
+                let mut seen: Vec<&str> = vec![];
+                for t in jobs[j].tries.iter().take(4) {
+                    if !seen.contains(&t.match_id.as_str()) {
+                        seen.push(t.match_id.as_str());
+                        let e = cover.entry(t.match_id.clone()).or_insert((0, when(&t.match_id).unwrap_or(0)));
+                        e.0 += 1;
+                    }
+                }
+            }
+            let Some(best) = cover.into_iter().max_by(|a, b| a.1 .0.cmp(&b.1 .0).then(a.1 .1.cmp(&b.1 .1))).map(|(m, _)| m) else {
+                order.append(&mut left);
+                break;
+            };
+            left.retain(|&j| {
+                let Some(k) = jobs[j].tries.iter().take(4).position(|t| t.match_id == best) else { return true };
+                let t = jobs[j].tries.remove(k);
+                jobs[j].tries.insert(0, t);
+                order.push(j);
+                false
+            });
+        }
+        let mut slots: Vec<Option<Job>> = jobs.into_iter().map(Some).collect();
+        jobs = order.into_iter().filter_map(|j| slots[j].take()).collect();
+    }
     on(Event::Plan { total: jobs.len(), more: waiting - jobs.len() });
     if jobs.is_empty() {
         return Ok(0);
@@ -963,19 +1123,58 @@ pub fn render_lineups(
             on(Event::Filming { title: job.title.clone() });
             // A flash's white-out where it pops is still footage of it, not CS2 stopping.
             let still_s = if job.kind == "flash" { 4.0 } else { 2.0 };
-            let recorded = r.record_lineup(&shot, &lib.join(&rel)).and_then(|()| match crate::assemble::frozen_share_with(&lib.join(&rel), still_s) {
-                Some(f) if f > crate::assemble::FROZEN_MAX => {
-                    let _ = std::fs::remove_file(lib.join(&rel));
-                    Err(crate::assemble::Frozen(f).into())
+            // Filmed into a new file: a video already there (one that stutters) stays until this
+            // one is better.
+            let new = lib.join(format!("lineups/{}.new.mp4", job.id));
+            let flight = (shot.pop_tick - shot.throw_tick).max(1) as f64 / TICKRATE;
+            let mut stutter = None;
+            let mut recorded = Err(anyhow::anyhow!("not filmed"));
+            for attempt in 0..2 {
+                recorded = r.record_lineup(&shot, &new).and_then(|()| match crate::assemble::frozen_share_with(&new, still_s) {
+                    Some(f) if f > crate::assemble::FROZEN_MAX => {
+                        let _ = std::fs::remove_file(&new);
+                        Err(crate::assemble::Frozen(f).into())
+                    }
+                    _ => Ok(()),
+                });
+                if recorded.is_err() {
+                    break;
                 }
-                _ => Ok(()),
-            });
+                // The camera chasing the grenade should glide: a choppy take is filmed once more.
+                stutter = crate::assemble::stutter_share(&new, lead + 0.25, lead + flight);
+                match stutter {
+                    Some(st) if st > STUTTER_MAX && attempt == 0 => on(Event::Log(format!("{}: {:.0}% of the flight stutters; filming it again", job.title, st * 100.0))),
+                    _ => break,
+                }
+            }
+            let prev = clips.get(&job.id).cloned();
+            // Filming again for stutter: the new take replaces the old only if it's smoother.
+            let worse = recorded.is_ok() && prev.as_ref().is_some_and(|p| p.clip.is_some() && p.stutter.zip(stutter).is_some_and(|(old, now)| now >= old));
+            if worse {
+                let _ = std::fs::remove_file(&new);
+            } else if recorded.is_ok() {
+                std::fs::rename(&new, lib.join(&rel))?;
+            }
             match recorded {
+                Ok(()) if worse => {
+                    if let Some(c) = clips.get_mut(&job.id) {
+                        c.refilms += 1;
+                    }
+                    save_lineup_clips(lib, &clips)?;
+                    rendered += 1;
+                    on(Event::Rendered { match_id: o.match_id.clone(), title: job.title.clone(), clip_s: lead + hold, took_s: ts.elapsed().as_secs_f64() });
+                    drain(on);
+                    continue 'jobs;
+                }
                 Ok(()) => {
-                    // The thumbnail: the thrower lined up, just before the throw.
+                    // The thumbnail: the thrower lined up, just before the throw; and the same moment
+                    // full size, for the lineup's picture.
                     let thumb = format!("lineups/{}.jpg", job.id);
                     let thumb = make_thumb_at(&lib.join(&rel), &lib.join(&thumb), lead - 0.3).is_ok().then_some(thumb);
-                    clips.insert(job.id.clone(), LineupClip { clip: Some(rel), thumb, match_id: o.match_id.clone(), tick: o.tick, ..Default::default() });
+                    let aim = format!("lineups/{}-aim.jpg", job.id);
+                    let aim = crate::assemble::make_still(&lib.join(&rel), &lib.join(&aim), lead - 0.1).is_ok().then_some(aim);
+                    let refilms = prev.as_ref().filter(|p| p.clip.is_some()).map_or(0, |p| p.refilms + 1);
+                    clips.insert(job.id.clone(), LineupClip { clip: Some(rel), thumb, aim, stutter, refilms, match_id: o.match_id.clone(), tick: o.tick, ..Default::default() });
                     save_lineup_clips(lib, &clips)?;
                     rendered += 1;
                     frozen_streak = 0;
@@ -1004,7 +1203,13 @@ pub fn render_lineups(
             next.push((job, idx + 1, last_error));
             continue;
         }
-        clips.insert(job.id.clone(), LineupClip { error: Some(if last_error.is_empty() { "Couldn't film it.".into() } else { last_error.clone() }), count: job.count, ..Default::default() });
+        // A lineup with a video already (filmed again for stutter) keeps it.
+        match clips.get_mut(&job.id).filter(|c| c.clip.is_some()) {
+            Some(c) => c.refilms += 1,
+            None => {
+                clips.insert(job.id.clone(), LineupClip { error: Some(if last_error.is_empty() { "Couldn't film it.".into() } else { last_error.clone() }), count: job.count, ..Default::default() });
+            }
+        }
         save_lineup_clips(lib, &clips)?;
         on(Event::Failed { match_id: String::new(), title: job.title.clone(), error: last_error });
         drain(on);

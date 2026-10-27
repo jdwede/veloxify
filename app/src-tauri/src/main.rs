@@ -185,12 +185,27 @@ struct SettingsUpdate {
     max_clips_gb: f64,
     #[serde(default)]
     max_demos_gb: f64,
+    #[serde(default)]
+    highlight_kinds: Option<Vec<String>>,
+    #[serde(default)]
+    clutch_min: Option<u32>,
+    #[serde(default)]
+    skip_eco: Option<bool>,
+    #[serde(default)]
+    lowlights_per_match: Option<usize>,
+    #[serde(default)]
+    lineups_per_map: Option<usize>,
+    #[serde(default)]
+    lineup_kinds: Option<Vec<String>>,
+    #[serde(default)]
+    lineup_categories: Option<Vec<String>>,
     render: RenderOptions,
 }
 
 #[tauri::command]
-fn save_settings(state: State<AppState>, update: SettingsUpdate) -> Result<(), String> {
+fn save_settings(app: tauri::AppHandle, state: State<AppState>, update: SettingsUpdate) -> Result<(), String> {
     let mut s = state.settings.lock().unwrap();
+    let rules_before = serde_json::to_string(&s.highlight_rules()).unwrap_or_default();
     if s.start_with_windows != update.start_with_windows {
         system::set_start_with_windows(update.start_with_windows)?;
     }
@@ -209,7 +224,48 @@ fn save_settings(state: State<AppState>, update: SettingsUpdate) -> Result<(), S
     s.start_with_windows = update.start_with_windows;
     s.max_clips_gb = update.max_clips_gb.max(0.0);
     s.max_demos_gb = update.max_demos_gb.max(0.0);
+    const HIGHLIGHT_KINDS: [&str; 11] = ["ace", "4k", "3k", "2k", "clutch", "ninja", "rare", "precision", "flick", "special", "defuse"];
+    if let Some(k) = update.highlight_kinds {
+        s.highlight_kinds = k.into_iter().filter(|x| HIGHLIGHT_KINDS.contains(&x.as_str())).collect();
+    }
+    if let Some(n) = update.clutch_min {
+        s.clutch_min = n.clamp(1, 5);
+    }
+    if let Some(b) = update.skip_eco {
+        s.skip_eco = b;
+    }
+    if let Some(n) = update.lowlights_per_match {
+        s.lowlights_per_match = n.min(10);
+    }
+    if let Some(n) = update.lineups_per_map {
+        s.lineups_per_map = n.clamp(1, 200);
+    }
+    if let Some(k) = update.lineup_kinds {
+        s.lineup_kinds = k.into_iter().filter(|x| ["smoke", "molotov", "flash", "he"].contains(&x.as_str())).collect();
+    }
+    if let Some(c) = update.lineup_categories {
+        s.lineup_categories = c.into_iter().filter(|x| x == "instant" || x == "set").collect();
+    }
     s.save();
+    // What counts as a highlight changed: every match's moments are sorted again (a few seconds,
+    // in the background), and the app hears when that's done.
+    if serde_json::to_string(&s.highlight_rules()).unwrap_or_default() != rules_before {
+        let (lib, policy) = (s.library_dir.clone(), s.clip_policy());
+        let me = s.steamid64.or_else(system::active_steam_user);
+        std::thread::spawn(move || {
+            use tauri::Emitter;
+            match cs2hl_core::library::reselect(&lib, &policy) {
+                Ok(n) => {
+                    vlog!("highlight settings changed: {n} matches sorted again");
+                    if let Some(me) = me {
+                        let _ = cs2hl_core::ingest::rebuild_index(&lib, me);
+                    }
+                    let _ = app.emit("veloxify://library", ());
+                }
+                Err(e) => vlog!("highlight settings changed: {e:#}"),
+            }
+        });
+    }
     update.render.save(&s.profile).map_err(|e| e.to_string())?;
     if faceit_changed && s.faceit_enabled {
         let _ = state.jobs.lock().unwrap().send(Job::Faceit);
@@ -651,6 +707,22 @@ fn render_lineups(state: State<AppState>, ids: Vec<String>) {
 }
 
 /// Lineup videos made so far (by lineup id).
+/// Which lineups get videos on their own (with these settings, or the saved ones), and how many of
+/// them are filmed so far.
+#[tauri::command]
+fn lineup_plan_info(state: State<AppState>, plan: Option<cs2hl_render::batch::LineupPlan>) -> serde_json::Value {
+    let (lib, saved) = {
+        let s = state.settings.lock().unwrap();
+        (s.library_dir.clone(), s.lineup_plan())
+    };
+    let plan = plan.unwrap_or(saved);
+    let chosen = cs2hl_render::batch::chosen_lineups(&lib, &plan);
+    let clips = cs2hl_render::batch::load_lineup_clips(&lib);
+    let ids: Vec<&String> = chosen.values().flatten().map(|l| &l.id).collect();
+    let filmed = ids.iter().filter(|id| clips.get(id.as_str()).is_some_and(|c| c.clip.is_some())).count();
+    serde_json::json!({ "chosen": ids, "filmed": filmed, "maps": chosen.len() })
+}
+
 #[tauri::command]
 fn lineup_clips(state: State<AppState>) -> std::collections::BTreeMap<String, cs2hl_render::batch::LineupClip> {
     cs2hl_render::batch::load_lineup_clips(&state.settings.lock().unwrap().library_dir)
@@ -832,6 +904,7 @@ fn main() {
             league_info,
             render_lineups,
             lineup_clips,
+            lineup_plan_info,
             save_practice,
             open_link,
             save_debug_log,

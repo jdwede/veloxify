@@ -1,7 +1,8 @@
 //! App settings and state, stored in `%LOCALAPPDATA%\Veloxify`.
 
-use cs2hl_core::highlights::{Selectivity, MAX_PER_PLAYER};
+use cs2hl_core::highlights::{preset_kinds, HighlightRules, Selectivity, MAX_PER_PLAYER};
 use cs2hl_core::library::ClipPolicy;
+use cs2hl_render::batch::LineupPlan;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -24,6 +25,21 @@ fn d_film_wait() -> u32 {
 }
 fn d_max() -> usize {
     MAX_PER_PLAYER
+}
+fn d_one() -> u32 {
+    1
+}
+fn d_lowlights() -> usize {
+    3
+}
+fn d_lineups_per_map() -> usize {
+    LineupPlan::default().per_map
+}
+fn d_lineup_kinds() -> Vec<String> {
+    LineupPlan::default().kinds
+}
+fn d_lineup_categories() -> Vec<String> {
+    LineupPlan::default().categories
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -62,6 +78,26 @@ pub struct Settings {
     pub selectivity: String,
     #[serde(default = "d_max")]
     pub max_per_match: usize,
+    /// What counts as a highlight (see `highlights::kinds_of`); empty: the `selectivity` level's.
+    #[serde(default)]
+    pub highlight_kinds: Vec<String>,
+    /// Clutches count from 1 vs this many.
+    #[serde(default = "d_one")]
+    pub clutch_min: u32,
+    /// Leave out moments where most kills were on players who'd saved.
+    #[serde(default)]
+    pub skip_eco: bool,
+    /// Lowlights filmed automatically per match of the latest session (the worst ones).
+    #[serde(default = "d_lowlights")]
+    pub lowlights_per_match: usize,
+    /// Grenade lineup videos filmed automatically: the most thrown on each map, up to this many.
+    #[serde(default = "d_lineups_per_map")]
+    pub lineups_per_map: usize,
+    /// Which grenades ("smoke", "molotov", "flash", "he") and lineups ("instant", "set") those are.
+    #[serde(default = "d_lineup_kinds")]
+    pub lineup_kinds: Vec<String>,
+    #[serde(default = "d_lineup_categories")]
+    pub lineup_categories: Vec<String>,
     /// Teammates whose highlights are also made (SteamID64s; off unless added).
     #[serde(default)]
     pub also_clip: Vec<u64>,
@@ -109,6 +145,13 @@ impl Settings {
                     faceit_nickname: String::new(),
                     selectivity: d_selectivity(),
                     max_per_match: d_max(),
+                    highlight_kinds: vec![],
+                    clutch_min: 1,
+                    skip_eco: false,
+                    lowlights_per_match: d_lowlights(),
+                    lineups_per_map: d_lineups_per_map(),
+                    lineup_kinds: d_lineup_kinds(),
+                    lineup_categories: d_lineup_categories(),
                     also_clip: vec![],
                     start_with_windows: false,
                     max_clips_gb: 0.0,
@@ -128,12 +171,19 @@ impl Settings {
         let _ = std::fs::write(data_dir().join("settings.json"), serde_json::to_string_pretty(self).unwrap_or_default());
     }
 
+    /// What counts as a highlight: the kinds chosen in Settings (or the old level's).
+    pub fn highlight_rules(&self) -> HighlightRules {
+        let kinds = if self.highlight_kinds.is_empty() { preset_kinds(Selectivity::parse(&self.selectivity).unwrap_or(Selectivity::SolidPlays)) } else { self.highlight_kinds.clone() };
+        HighlightRules { kinds, clutch_min: self.clutch_min.clamp(1, 5), skip_eco: self.skip_eco, cap: self.max_per_match.clamp(1, 20) }
+    }
+
     pub fn clip_policy(&self) -> ClipPolicy {
-        ClipPolicy {
-            also_clip: self.also_clip.clone(),
-            selectivity: Selectivity::parse(&self.selectivity).unwrap_or(Selectivity::SolidPlays),
-            max_per_player: self.max_per_match.clamp(1, 20),
-        }
+        ClipPolicy { also_clip: self.also_clip.clone(), rules: self.highlight_rules() }
+    }
+
+    /// Which lineups get videos on their own.
+    pub fn lineup_plan(&self) -> LineupPlan {
+        LineupPlan { per_map: self.lineups_per_map.clamp(1, 200), kinds: self.lineup_kinds.clone(), categories: self.lineup_categories.clone() }
     }
 }
 
