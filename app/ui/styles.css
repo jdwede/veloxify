@@ -2159,3 +2159,52 @@ ul.ins-list { list-style: none; padding-left: 0; }
 .ls-close { position: absolute; right: 10px; top: 10px; width: 34px; height: 34px; border: 0; border-radius: 50%; background: rgba(0, 0, 0, 0.6); color: #fff; font-size: 16px; cursor: pointer; }
 .ls-close:hover { background: rgba(0, 0, 0, 0.85); }
 @media (max-width: 700px) { .ls-info { max-width: 80%; } .ls-radar { width: 34%; } }
+
+/* Mechanics: an area per card, then each area's stats in a table with their effect on its score. */
+.mc-areas { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 12px; margin: 4px 0 14px; }
+.mc-area { display: flex; align-items: center; gap: 14px; background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px 16px; color: var(--text); text-decoration: none; }
+.mc-area:hover { border-color: var(--accent); }
+.mc-area-t { display: flex; flex-direction: column; gap: 3px; min-width: 0; font-size: 15px; }
+.mc-area-t .sub i { font-style: normal; }
+.mc-area-s { font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mc-how { margin: 0 0 22px; padding: 10px 16px; background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); color: var(--muted); font-size: 13px; line-height: 1.5; }
+.mc-how summary { cursor: pointer; color: var(--text); font-weight: 600; }
+.mc-how p { margin: 8px 0 0; }
+.mc-how b { color: var(--text); }
+.mc-table { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
+.mc-tr { display: grid; grid-template-columns: minmax(170px, 2.2fr) 60px repeat(3, minmax(74px, 1fr)) 150px minmax(150px, 1.4fr); gap: 10px; align-items: center; padding: 9px 16px; border-top: 1px solid var(--line); font-size: 13px; }
+.mc-tr:not(.mc-th) { cursor: pointer; }
+.mc-tr:not(.mc-th):hover, .mc-tr.open { background: var(--hover, rgba(255, 255, 255, 0.03)); }
+.mc-th { border-top: 0; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; }
+.mc-st { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.mc-st b { font-weight: 600; }
+.mc-st .ps-grade { font-style: normal; font-size: 10px; padding: 1px 6px; }
+.mc-w { color: var(--muted); font-variant-numeric: tabular-nums; }
+.mc-v { font-variant-numeric: tabular-nums; }
+.mc-v b { font-size: 14px; }
+.mc-spark svg { display: block; overflow: visible; }
+.mc-spark .mc-sp-line { fill: none; stroke: var(--muted); stroke-width: 1.4; }
+.mc-spark .mc-sp-avg { stroke: var(--faint, #666); stroke-width: 1; stroke-dasharray: 3 3; }
+.mc-spark circle { cursor: pointer; }
+.mc-spark circle.good { fill: var(--win); }
+.mc-spark circle.bad { fill: var(--loss); }
+.mc-eff { display: flex; align-items: center; gap: 8px; font-variant-numeric: tabular-nums; }
+.mc-eff b { min-width: 44px; text-align: right; }
+.mc-bar { position: relative; flex: 1; height: 8px; border-radius: 4px; background: var(--chip, rgba(255, 255, 255, 0.06)); }
+.mc-bar::before { content: ""; position: absolute; left: 50%; top: -2px; bottom: -2px; width: 1px; background: var(--muted); opacity: 0.5; }
+.mc-bar i { position: absolute; top: 0; bottom: 0; border-radius: 4px; }
+.mc-bar i.pos { left: 50%; background: var(--win); }
+.mc-bar i.neg { right: 50%; background: var(--loss); }
+.mc-more { padding: 4px 16px 12px; border-top: 1px dashed var(--line); font-size: 13px; color: var(--muted); line-height: 1.5; }
+.mc-more p { margin: 8px 0 0; }
+.mc-more b { color: var(--text); }
+.mc-verdict { display: grid; gap: 6px; margin-top: 10px; padding: 10px 16px; background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); font-size: 13px; }
+.mc-verdict span { margin-right: 10px; font-weight: 700; font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; }
+.mc-verdict i { font-style: normal; font-weight: 700; }
+.mc-verdict .ps-tip { margin: 6px 0 0; }
+.mc-section .note { margin-top: 10px; }
+.mc-section .mc-card.mc-special { margin-top: 12px; }
+@media (max-width: 1100px) {
+  .mc-tr { grid-template-columns: minmax(150px, 2fr) 50px repeat(3, minmax(64px, 1fr)) minmax(120px, 1.2fr); }
+  .mc-tr > .mc-spark, .mc-th > span:nth-child(6) { display: none; }
+}
