@@ -97,6 +97,38 @@ fn launch_waiting_in(text: &str, now: chrono::NaiveDateTime) -> Option<String> {
     })
 }
 
+/// Why Steam's start of CS2 since `since` (local time) failed, from its log: e.g. AppError_16
+/// when it was asked while it still counted an earlier CS2 as running.
+pub fn launch_failed(since: chrono::NaiveDateTime) -> Option<String> {
+    launch_failed_in(&log_tail("console_log.txt")?, since)
+}
+
+fn launch_failed_in(text: &str, since: chrono::NaiveDateTime) -> Option<String> {
+    // [2026-10-28 14:48:34] GameAction [AppID 730, ActionID 429] : LaunchApp failed with AppError_16 with ""
+    text.lines().rev().find_map(|l| {
+        let (at, rest) = l.strip_prefix('[')?.split_once("] GameAction [AppID 730, ActionID ")?;
+        let at = chrono::NaiveDateTime::parse_from_str(at, "%Y-%m-%d %H:%M:%S").ok()?;
+        let error = rest.split_once("] : LaunchApp failed with ")?.1.split(' ').next()?;
+        (at >= since).then(|| format!("Steam couldn't start it ({error})"))
+    })
+}
+
+/// Whether Steam still counts a CS2 as running (its log: added, not removed since). It notices a
+/// CS2 that closed a few seconds late, and won't start another until then.
+pub fn tracks_cs2() -> bool {
+    log_tail("gameprocess_log.txt").is_some_and(|t| tracks_cs2_in(&t))
+}
+
+fn tracks_cs2_in(text: &str) -> bool {
+    text.lines().rev().find_map(|l| {
+        if l.ends_with("] Remove 730 from running list") {
+            Some(false)
+        } else {
+            l.contains("] AppID 730 adding PID ").then_some(true)
+        }
+    }) == Some(true)
+}
+
 /// Whether the latest CS2 Steam started has Veloxify's `-insecure` (Steam logs each game's
 /// command line as it starts it); None when Steam's log doesn't say.
 pub fn last_cs2_was_ours() -> Option<bool> {
@@ -206,7 +238,7 @@ pub fn exists(p: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{last_played_in, launch_waiting_in};
+    use super::{last_played_in, launch_failed_in, launch_waiting_in, tracks_cs2_in};
 
     const LOG: &str = r#"[2026-10-28 04:07:45] ExecCommandLine: ""c:\program files (x86)\steam\steam.exe" -applaunch 730 -insecure"
 [2026-10-28 04:07:45] GameAction [AppID 730, ActionID 105] : LaunchApp changed task to UpdatingAppInfo with ""
@@ -250,5 +282,25 @@ mod tests {
 "#;
         // Your CS2 started itself again at 04:26:05 (Steam logs a close then too): it closed at 04:51:37.
         assert_eq!(last_played_in(log), Some(at("2026-10-28 04:51:37")));
+    }
+
+    #[test]
+    fn steam_slow_to_see_cs2_gone() {
+        let log = r#"[2026-10-28 14:47:54] AppID 730 adding PID 60992 as a tracked process ""C:\cs2.exe" -steam -insecure"
+[2026-10-28 14:47:55] AppID 730 adding PID 123716 as a tracked process
+[2026-10-28 14:48:22] SSGL: persona state flags"#;
+        assert!(tracks_cs2_in(log));
+        let gone = format!("{log}\n[2026-10-28 14:48:37] AppID 730 no longer tracking PID 123716, exit code -1073741819\n[2026-10-28 14:48:37] Remove 730 from running list");
+        assert!(!tracks_cs2_in(&gone));
+    }
+
+    #[test]
+    fn steam_refusing_a_start() {
+        let log = r#"[2026-10-28 14:48:29] GameAction [AppID 730, ActionID 429] : LaunchApp changed task to WaitingPrevProcess with ""
+[2026-10-28 14:48:34] GameAction [AppID 730, ActionID 429] : LaunchApp failed with AppError_16 with ""
+[2026-10-28 14:48:34] GameAction [AppID 730, ActionID 429] : LaunchApp changed task to Failed with """#;
+        let at = |t: &str| chrono::NaiveDateTime::parse_from_str(t, "%Y-%m-%d %H:%M:%S").unwrap();
+        assert_eq!(launch_failed_in(log, at("2026-10-28 14:48:28")).as_deref(), Some("Steam couldn't start it (AppError_16)"));
+        assert_eq!(launch_failed_in(log, at("2026-10-28 14:50:00")), None);
     }
 }

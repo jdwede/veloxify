@@ -162,7 +162,7 @@ impl std::fmt::Display for Cs2Crashed {
 impl std::error::Error for Cs2Crashed {}
 
 /// CS2 crashed while opening a demo. Some demos do that every time (since CS2's 22 October 2026
-/// update: FACEIT demos where a player has a pet chicken), so it's the demo, not CS2 at large.
+/// update, some FACEIT demos), so it's the demo, not CS2 at large.
 #[derive(Debug)]
 pub struct DemoCrashed(pub PathBuf);
 
@@ -413,24 +413,25 @@ impl Renderer {
         }
         self.vc = None;
         *self.applied.lock().unwrap() = None;
-        // A crashed CS2 takes a few seconds to write its crash report and go: Steam won't start
-        // another meanwhile.
-        let t0 = Instant::now();
-        while cs2_running() && t0.elapsed() < Duration::from_secs(30) {
-            self.pause(Duration::from_millis(500))?;
-        }
         self.launch()
     }
 
     fn launch(&mut self) -> Result<()> {
         let o = &self.profile.output;
         let prev = window::foreground();
+        // A CS2 that just closed (or crashed, writing its crash report) takes a few seconds to go,
+        // and Steam a few more to notice: it refuses to start another meanwhile.
+        let gone = Instant::now();
+        while (cs2_running() || steam::tracks_cs2()) && gone.elapsed() < Duration::from_secs(30) {
+            self.pause(Duration::from_millis(500))?;
+        }
         // Steam still busy with (or stuck on) an earlier start of CS2: asking again only piles up.
         if let Some(why) = steam::launch_waiting() {
             bail!(NotStarted(why));
         }
         (self.log)("launching CS2 in the background");
         let t0 = Instant::now();
+        let asked_at = chrono::Local::now().naive_local() - chrono::TimeDelta::seconds(1);
         let exe = steam::steam_exe();
         let (w, h) = (o.width.to_string(), o.height.to_string());
         // `+demo_ui_mode 0` must be off before any demo plays; it's not a saved setting.
@@ -449,10 +450,13 @@ impl Renderer {
                 .spawn()
                 .with_context(|| format!("starting Steam ({}: {e})", exe.display()))?;
         }
-        // Stop works while CS2 starts, and Steam waiting on a message (Cloud sync failed...) ends
-        // the wait: nobody's there to answer it.
+        // Stop works while CS2 starts, and Steam waiting on a message (Cloud sync failed...) or
+        // refusing the start ends the wait: nobody's there to answer it.
         let vc = VConsole::connect(Duration::from_secs(120), &|| {
             self.check()?;
+            if let Some(why) = steam::launch_failed(asked_at) {
+                return Err(NotStarted(why).into());
+            }
             match steam::launch_waiting() {
                 Some(why) if t0.elapsed() > Duration::from_secs(5) => Err(NotStarted(why).into()),
                 _ => Ok(()),
@@ -580,7 +584,8 @@ impl Renderer {
         let loaded = self.play_demo(path);
         if let Err(e) = &loaded {
             // What CS2 said while it failed, for the log.
-            let lines: Vec<String> = self.vc().lines_since(since).into_iter().filter(|l| !l.contains("animgraph") && !l.trim().is_empty()).collect();
+            let noise = |l: &str| l.contains("animgraph") || l.contains("TrueView can't determine") || l.trim().is_empty();
+            let lines: Vec<String> = self.vc().lines_since(since).into_iter().filter(|l| !noise(l)).collect();
             (self.log)(&format!("loading {} failed ({e:#}); CS2's last console lines:", path.display()));
             for l in &lines[lines.len().saturating_sub(60)..] {
                 (self.log)(&format!("    | {l}"));
