@@ -730,7 +730,7 @@ async function renderMatchPage(view, id, tab) {
   const m = s.stats_only ? null : await loadMatch(id);
   if (m) [m._roster] = await Promise.all([loadRoster(m), loadPremierParties()]);
   const tabs = [["overview", "Overview"]];
-  if (m) tabs.push(["timeline", "Timeline"], ["replay", "2D Replay"], ["replay3d", "3D Replay"], ["lineups", "Lineups"], ["aim", "Aim"], ["utility", "Utility"], ["activity", "Activity"], ["trades", "Trades"], ["opening", "Opening Duels"], ["clutches", "Clutches"], ["h2h", "Head to Head"], ["breakdown", "Rating Breakdown"], ["zones", "Map Zones"], ["ratings", "Ratings"],
+  if (m) tabs.push(["timeline", "Timeline"], ["replay", "2D Replay"], ["replay3d", "3D Replay"], ["lineups", "Lineups"], ["aim", "Aim"], ["fights", "Aim & Movement"], ["utility", "Utility"], ["activity", "Activity"], ["trades", "Trades"], ["opening", "Opening Duels"], ["clutches", "Clutches"], ["h2h", "Head to Head"], ["breakdown", "Rating Breakdown"], ["zones", "Map Zones"], ["ratings", "Ratings"],
     ["highlights", `Highlights${m.highlights.length ? ` (${m.highlights.length})` : ""}`], ["lowlights", `Lowlights${(m.lowlights || []).length ? ` (${m.lowlights.length})` : ""}`]);
   if (!tabs.some(([k]) => k === tab)) tab = "overview";
   const fm = s.faceit;
@@ -765,6 +765,7 @@ async function renderMatchPage(view, id, tab) {
     return;
   }
   if (tab === "aim" || tab === "utility" || tab === "activity") return renderStatTab(body, m, id, tab);
+  if (tab === "fights") return renderFightsTab(body, m, id);
   if (tab === "opening") return renderOpeningTab(body, m, id);
   if (tab === "trades") return renderTradesTab(body, m, id);
   if (tab === "h2h") return renderH2HTab(body, m, id);
@@ -1237,6 +1238,222 @@ async function renderStatTab(body, m, id, tab) {
     body.appendChild(note);
   };
   draw();
+}
+
+// ---- match page: aim and movement, fight by fight ------------------------------------------------
+
+// Your kills and deaths one by one: how you shot each fight, and how many points it added to or
+// took off this match's Aim, Crosshair placement and Movement scores (the Mechanics page's areas,
+// scored on this match alone, against the players in your matches).
+const fx = { show: "all", order: "round", area: "all" };
+const FX_AREAS = ["aim", "crosshair", "movement"];
+const FX_RIFLES = new Set(["ak47", "m4a1", "m4a1_silencer", "galilar", "famas", "sg556", "aug"]);
+const FX_STOP_GUNS = new Set([...FX_RIFLES, "awp", "ssg08", "g3sg1", "scar20"]);
+// Guns whose first bullet isn't counted (snipers and shotguns), as in the stats.
+const FX_NO_FIRST = new Set(["awp", "ssg08", "g3sg1", "scar20", "nova", "xm1014", "mag7", "sawedoff"]);
+const FX_ACCURATE = 0.34;
+// How many of each stat's shots (or fights) the whole match counted: each fight's share of it.
+const FX_N = {
+  spotted_accuracy: (a) => a.spotted_shots, head_accuracy: (a) => a.body_hits, first_bullet: (a) => a.first_shots, spray_accuracy: (a) => a.spray_shots,
+  hs_kill_pct: (a) => a.kills, crosshair_deg: (a) => a.crosshair_n, ttd_ms: (a) => a.ttd_n, first_stop: (a) => a.first_stop_shots,
+  counter_strafe: (a) => a.strafe_shots, stop_ms: (a) => a.stop_n, air_shot_pct: (a) => a.spotted_shots,
+};
+const fxBullet = (b) => ({ ms: b[0], speed: b[1] < 0 ? null : b[1], hit: !!(b[2] & 1), air: !!(b[2] & 2), crouch: !!(b[2] & 4), spotted: !!(b[2] & 8), first: !!(b[2] & 16), spray: !!(b[2] & 32) });
+// What a fight adds to each stat, counted the way the stat counts it: rates as { k good of n },
+// averages as one value { x }. Only shots at a spotted enemy count (or ones that hit).
+function fxParts(f, hs) {
+  const bs = (f.bullets || []).map(fxBullet), w = f.weapon, sp = bs.filter((b) => b.spotted);
+  const standing = (b) => !b.air && !b.crouch && b.speed != null;
+  const cnt = (list, ok) => ({ k: list.filter(ok).length, n: list.length });
+  return {
+    spotted_accuracy: cnt(sp, (b) => b.hit),
+    head_accuracy: w === "awp" ? null : { k: f.head, n: f.hits },
+    first_bullet: FX_NO_FIRST.has(w) ? null : cnt(sp.filter((b) => b.first), (b) => b.hit),
+    spray_accuracy: FX_RIFLES.has(w) ? cnt(sp.filter((b) => b.spray), (b) => b.hit) : null,
+    hs_kill_pct: f.kill ? { k: hs ? 1 : 0, n: 1 } : null,
+    crosshair_deg: f.xhair != null ? { x: f.xhair } : null,
+    ttd_ms: f.ttd_ms != null ? { x: f.ttd_ms } : null,
+    first_stop: FX_STOP_GUNS.has(w) ? cnt(sp.filter((b) => b.first && standing(b)), (b) => b.speed < FX_ACCURATE) : null,
+    counter_strafe: FX_RIFLES.has(w) ? cnt(sp.filter(standing), (b) => b.speed < FX_ACCURATE) : null,
+    stop_ms: f.stop_ms != null ? { x: f.stop_ms } : null,
+    air_shot_pct: cnt(sp, (b) => b.air),
+  };
+}
+
+// This match's area scores and each stat's effect on them (as on the Mechanics page), and every
+// fight's share of each effect: its shots' distance from the lobby's average, in the stat's
+// spreads, times the points a spread is worth. A match's fights plus its other shots (fights
+// nobody died in) add up to the stat's effect.
+function fxScore(me, fights, kills) {
+  const bench = state.benchmarks || {};
+  const stats = me.stats || {}, aim = me.aim || {};
+  // A player dies once a round: the kill is the round and the victim.
+  const hsAt = new Map(kills.filter((k) => k.attacker === me.steamid).map((k) => [`${k.round}:${k.victim}`, k.headshot]));
+  const parts = fights.map((f) => fxParts(f, hsAt.get(`${f.round}:${f.other}`)));
+  const areas = MECH_AREAS.filter((a) => FX_AREAS.includes(a.key)).map((area) => {
+    const W = sum(area.stats.map((s) => s.w));
+    const lines = area.stats.map((s) => {
+      const b = bench[s.key], v = stats[s.key];
+      if (!b?.sd || v == null) return { s, v: v ?? null, avg: b?.mean ?? null, z: null };
+      const zRaw = ((v - b.mean) / b.sd) * (s.lower ? -1 : 1);
+      return { s, v, avg: b.mean, sd: b.sd, zRaw, z: Math.max(-3, Math.min(3, zRaw)) };
+    });
+    const got = lines.filter((l) => l.z != null), Wg = sum(got.map((l) => l.s.w));
+    const ok = got.length && Wg >= W / 2;
+    const m = ok ? sum(got.map((l) => l.s.w * l.z)) / Wg : null;
+    const score = ok ? phi(m) * 100 : null;
+    for (const l of lines) {
+      l.points = ok && l.z != null ? score - phi(m - (l.s.w * l.z) / Wg) * 100 : null;
+      if (l.points == null) continue;
+      // Points per spread: the effect over the distance, or the slope when it's about average.
+      const slope = Math.abs(l.zRaw) > 0.01 ? l.points / l.zRaw : (100 * Math.exp(-m * m / 2) / Math.sqrt(2 * Math.PI)) * (l.s.w / Wg);
+      const N = FX_N[l.s.key]?.(aim) || 0;
+      const rate = !["crosshair_deg", "ttd_ms", "stop_ms"].includes(l.s.key);
+      // Crosshair distance is the match's median: one wild fight moves it a step, not by its size,
+      // so a fight counts at most 2 spreads either way.
+      const cap = l.s.key === "crosshair_deg" ? 2 * l.sd : Infinity;
+      l.fights = parts.map((p) => {
+        const c = p[l.s.key];
+        if (!c || !N || (rate && !c.n)) return null;
+        const dev = rate ? (100 * (c.k - (l.avg / 100) * c.n)) / N : Math.max(-cap, Math.min(cap, c.x - l.avg)) / N;
+        return ((dev / l.sd) * (l.s.lower ? -1 : 1)) * slope;
+      });
+      l.rest = l.points - sum(l.fights.filter((x) => x != null));
+    }
+    return { area, lines, score };
+  });
+  return { areas, parts };
+}
+
+async function renderFightsTab(body, m, id) {
+  const [d] = await Promise.all([loadDetails(id), loadBenchmarks()]);
+  if (!d) return noDetails(body);
+  const me = d.players.find((p) => p.steamid === state.index.me);
+  if (!me) { body.innerHTML = `<div class="empty">You're not in this match's details.</div>`; return; }
+  // Read before fights were kept (an older version): read it again from the demo, on request.
+  if ((d.version || 0) < 16) {
+    body.innerHTML = `<section class="panel fx-old"><div class="h3">This match was read before fight-by-fight aim and movement existed</div>
+      <p class="sub">Veloxify adds it to older matches in the background, a few at a time when nothing's being filmed. Or read this one now (about 10 seconds; not while CS2 is open or Veloxify is filming).</p>
+      <button class="btn primary" id="fx-read" ${tauri ? "" : "disabled"}>Read this match now</button><span class="sub" id="fx-msg"></span></section>`;
+    const btn = body.querySelector("#fx-read");
+    btn.onclick = async () => {
+      btn.disabled = true;
+      body.querySelector("#fx-msg").textContent = " Reading the demo…";
+      try {
+        await tauri.core.invoke("rebuild_details", { id });
+        state.details.delete(id);
+        renderFightsTab(body, m, id);
+      } catch (err) {
+        btn.disabled = false;
+        body.querySelector("#fx-msg").textContent = ` ${err}`;
+      }
+    };
+    return;
+  }
+  const fights = me.fights || [];
+  const { areas, parts } = fxScore(me, fights, d.kills || []);
+  const names = new Map(m.players.map((p) => [p.steamid, p.name]));
+  const signed = (v) => (v == null ? "–" : Math.abs(v) < 0.05 ? "0.0" : `${v > 0 ? "+" : "−"}${Math.abs(v).toFixed(1)}`);
+  const tone = (v) => (v == null || Math.abs(v) < 0.05 ? "" : v > 0 ? "up" : "down");
+  const shown = fx.area === "all" ? areas : areas.filter((a) => a.area.key === fx.area);
+  // A fight's points in each area, and over the areas shown.
+  const fightPts = fights.map((f, i) => {
+    const by = Object.fromEntries(areas.map((a) => [a.area.key, a.score == null ? null : sum(a.lines.map((l) => l.fights?.[i] ?? 0))]));
+    return { by, total: sum(shown.map((a) => by[a.area.key] ?? 0)) };
+  });
+  let order = fights.map((f, i) => i).filter((i) => fx.show === "all" || (fx.show === "kills") === fights[i].kill);
+  if (fx.order === "lost") order.sort((a, b) => fightPts[a].total - fightPts[b].total);
+  if (fx.order === "gained") order.sort((a, b) => fightPts[b].total - fightPts[a].total);
+
+  const seg = (key, opts, val) => `<div class="seg">${opts.map(([k, l]) => `<button data-${key}="${k}" class="${val === k ? "on" : ""}">${l}</button>`).join("")}</div>`;
+  const fmtLine = (l, v) => (v == null ? "–" : l.s.fmt(v));
+  const summary = areas.map((a) => {
+    const g = mechGradeOf(a.score);
+    return `<section class="fx-area">
+      <div class="fx-area-h"><span class="mc-ring ${g?.g || ""}" style="--p:${a.score == null ? 0 : Math.round(a.score)}"><b>${a.score == null ? "–" : Math.round(a.score)}</b></span>
+        <span><b>${esc(a.area.name)}</b><span class="sub">${g ? `${g.word} this match` : "Not enough shots this match"}</span></span></div>
+      <div class="fx-lines"><div class="fx-line fx-lh"><span>Stat</span><span>This match</span><span>Lobby</span><span title="Points this stat adds to or takes off the area's score this match">Effect</span><span title="The part of the effect from the kills and deaths below; the rest is from fights nobody died in">From fights</span></div>
+      ${a.lines.map((l) => `<div class="fx-line"><span>${esc(l.s.name)} <i class="sub">×${l.s.w}</i></span><span>${fmtLine(l, l.v)}</span><span class="sub">${fmtLine(l, l.avg)}</span>
+        <span class="${tone(l.points)}">${signed(l.points)}</span><span class="sub">${l.fights ? signed(sum(l.fights.filter((x) => x != null))) : "–"}</span></div>`).join("")}</div></section>`;
+  }).join("");
+
+  // The fight's shots on a line (time since its first): stopped, moving, in the air or crouched;
+  // filled if it hit. Shots without the enemy in view are faint (the stats don't count them).
+  const strip = (f) => {
+    const bs = (f.bullets || []).map(fxBullet);
+    if (!bs.length) return `<span class="fx-strip empty">No shots</span>`;
+    const span = Math.max(400, bs[bs.length - 1].ms);
+    const judged = FX_STOP_GUNS.has(f.weapon);
+    return `<span class="fx-strip">${bs.map((b) => {
+      const kind = b.air ? "air" : b.crouch ? "crouch" : !judged || b.speed == null ? "free" : b.speed < FX_ACCURATE ? "stop" : "move";
+      const what = { air: "in the air", crouch: "crouched", free: "not judged (pistol, SMG or shotgun)", stop: "stopped", move: "moving" }[kind];
+      const tip = `${Math.round(b.ms)} ms: ${what}${b.speed != null ? `, ${Math.round(b.speed * 100)}% of top speed` : ""}, ${b.hit ? "hit" : "missed"}${b.spotted ? "" : " (enemy not in view: not counted)"}`;
+      return `<i class="fx-b ${kind} ${b.hit ? "hit" : ""} ${b.spotted ? "" : "unseen"}" style="left:${(b.ms / span) * 100}%" title="${esc(tip)}"></i>`;
+    }).join("")}</span>`;
+  };
+  // Plain words for how the fight was shot: what the stats made of it.
+  const notes = (f) => {
+    const bs = (f.bullets || []).map(fxBullet), out = [];
+    if (!bs.length) return f.kill ? [] : [["bad", "You didn't fire before dying"]];
+    const first = bs[0];
+    const judged = FX_STOP_GUNS.has(f.weapon);
+    if (first.air) out.push(["bad", "First bullet in the air (jumping or falling)"]);
+    else if (first.crouch) out.push(["", "First bullet crouched"]);
+    else if (judged && first.speed != null) out.push(first.speed < FX_ACCURATE ? ["good", `First bullet stopped (${Math.round(first.speed * 100)}% speed)${f.stop_ms != null ? `, stopped in ${Math.round(f.stop_ms)} ms` : ""}`] : ["bad", `First bullet on the move (${Math.round(first.speed * 100)}% speed)`]);
+    if (!judged) out.push(["", `${weaponName(f.weapon) || "This gun"}: run-and-gun, movement not judged`]);
+    const air = bs.filter((b) => b.air).length, crouch = bs.filter((b) => b.crouch).length, unseen = bs.filter((b) => !b.spotted).length;
+    if (air) out.push(["bad", `${air} shot${air === 1 ? "" : "s"} in the air: they count toward Shots in the air, not as moving shots`]);
+    if (crouch) out.push(["", `${crouch} crouched: not counted for or against stopping`]);
+    if (judged && f.moving) out.push(["bad", `${f.moving} standing shot${f.moving === 1 ? "" : "s"} while moving`]);
+    if (unseen) out.push(["", `${unseen} with the enemy out of view (not counted)`]);
+    if (f.xhair != null) out.push([f.xhair <= 3 ? "good" : f.xhair >= 10 ? "bad" : "", `Crosshair ${f.xhair.toFixed(1)}° from them when they appeared, first hit after ${Math.round(f.ttd_ms)} ms`]);
+    return out;
+  };
+  const fightRow = (i) => {
+    const f = fights[i], p = parts[i], pts = fightPts[i];
+    const counted = (c) => c && (c.x != null || c.n);
+    const detail = shown.map((a) => a.lines.filter((l) => l.fights?.[i] != null || counted(p[l.s.key])).map((l) => {
+      const c = p[l.s.key];
+      const val = !c ? "–" : c.x != null ? l.s.fmt(c.x) : c.n ? `${c.k}/${c.n}` : "–";
+      return `<div class="fx-line"><span>${esc(l.s.name)} <i class="sub">${esc(a.area.name)}</i></span><span>${val}</span><span class="sub">${fmtLine(l, l.avg)}</span><span class="${tone(l.fights?.[i])}">${signed(l.fights?.[i])}</span></div>`;
+    }).join("")).join("");
+    const chips = shown.map((a) => `<span class="fx-pt ${tone(pts.by[a.area.key])}" title="${esc(a.area.name)} points from this fight">${esc(a.area.name.split(" ")[0])} ${signed(pts.by[a.area.key])}</span>`).join("");
+    return `<div class="fx-fight ${f.kill ? "kill" : "death"}" data-fi="${i}">
+      <div class="fx-row">
+        <span class="fx-r">R${f.round}<i class="sub">${mmss(f.t)}</i></span>
+        <span class="fx-who"><b class="${f.kill ? "up" : "down"}">${f.kill ? "Kill" : "Death"}</b> ${f.kill ? "" : "by "}${esc(names.get(f.other) || "someone")} ${f.weapon ? weaponIcon(f.weapon) : ""}
+          <i class="sub">${f.shots} shot${f.shots === 1 ? "" : "s"}, ${f.hits} hit${f.head ? ` (${f.head} head)` : ""}</i></span>
+        ${strip(f)}
+        <span class="fx-pts">${chips}</span>
+        <a class="fx-watch" href="${matchHref(id, "replay")}" data-round="${f.round}" data-t="${f.t}" title="Watch it in the 2D replay">▶</a>
+      </div>
+      <div class="fx-notes">${notes(f).map(([t, s]) => `<span class="fx-note ${t}">${esc(s)}</span>`).join("")}</div>
+      <div class="fx-more" hidden><div class="fx-lines"><div class="fx-line fx-lh"><span>Stat</span><span>This fight</span><span>Lobby</span><span>Points</span></div>${detail || `<div class="sub">Nothing this fight counts toward.</div>`}</div></div>
+    </div>`;
+  };
+
+  body.innerHTML = `
+    <div class="fx-summary">${summary}</div>
+    <div class="ln-bar mc-filters fx-bar">
+      ${seg("fxs", [["all", "All fights"], ["kills", "Kills"], ["deaths", "Deaths"]], fx.show)}
+      ${seg("fxo", [["round", "In order"], ["lost", "Most points lost"], ["gained", "Most points gained"]], fx.order)}
+      ${seg("fxa", [["all", "All areas"], ...areas.map((a) => [a.area.key, a.area.name])], fx.area)}
+    </div>
+    <div class="fx-legend sub"><span><i class="fx-b stop hit"></i>stopped</span><span><i class="fx-b move hit"></i>moving</span><span><i class="fx-b air hit"></i>in the air</span><span><i class="fx-b crouch hit"></i>crouched</span><span><i class="fx-b free hit"></i>pistol/SMG (not judged)</span><span><i class="fx-b stop"></i>missed</span><span><i class="fx-b stop hit unseen"></i>enemy not in view</span></div>
+    <div class="fx-list">${order.map(fightRow).join("") || `<div class="empty small">No ${fx.show === "all" ? "kills or deaths" : fx.show} this match.</div>`}</div>
+    <div class="note">Each fight is your shots from just before you saw the enemy to the kill or your death. Points are that fight's share of each stat's effect on this match's score: how far its shots were from the lobby's average, in the stat's spreads. Click a fight for every stat it counted toward; ▶ watches it in the 2D replay. Shots in fights nobody died in make up the rest of each effect.</div>`;
+
+  const rerender = () => renderFightsTab(body, m, id);
+  body.querySelectorAll("[data-fxs]").forEach((b) => (b.onclick = () => { fx.show = b.dataset.fxs; rerender(); }));
+  body.querySelectorAll("[data-fxo]").forEach((b) => (b.onclick = () => { fx.order = b.dataset.fxo; rerender(); }));
+  body.querySelectorAll("[data-fxa]").forEach((b) => (b.onclick = () => { fx.area = b.dataset.fxa; rerender(); }));
+  body.querySelectorAll(".fx-fight").forEach((el) => (el.onclick = (e) => {
+    if (e.target.closest("a")) return;
+    const more = el.querySelector(".fx-more");
+    more.hidden = !more.hidden;
+    el.classList.toggle("open", !more.hidden);
+  }));
+  body.querySelectorAll(".fx-watch").forEach((a) => (a.onclick = () => { Object.assign(replay, { matchId: id, round: Number(a.dataset.round), t: Math.max(0, Number(a.dataset.t) - 4), playing: false }); }));
 }
 
 // ---- match page: trades, head to head, map zones ---------------------------------------------------
@@ -6545,8 +6762,12 @@ function mechPage(view, data) {
     more.hidden = !more.hidden;
     row.classList.toggle("open", !more.hidden);
   }));
-  // A point on a stat's line: that match.
-  view.querySelectorAll(".mc-spark [data-mid]").forEach((d) => (d.onclick = (e) => { e.stopPropagation(); location.hash = matchHref(d.dataset.mid); }));
+  // A point on a stat's line: that match (aim, crosshair and movement: its fights, one by one).
+  view.querySelectorAll(".mc-spark [data-mid]").forEach((d) => (d.onclick = (e) => {
+    e.stopPropagation();
+    const area = d.closest(".mc-section")?.id.slice(3);
+    location.hash = matchHref(d.dataset.mid, FX_AREAS.includes(area) ? "fights" : "");
+  }));
 }
 const mean = (a) => (a.length ? sum(a) / a.length : null);
 

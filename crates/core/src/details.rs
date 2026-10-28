@@ -16,7 +16,12 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
 /// Bumped whenever what's in a details file changes, so older ones are rebuilt.
-pub const VERSION: u32 = 15;
+pub const VERSION: u32 = 16;
+/// Details older than this are rebuilt before anything is filmed (the match page and insights need
+/// them); newer ones, up to [`VERSION`], only add to the match page (16: each fight's aim and
+/// movement) and are rebuilt when there's time, or when the match page asks. Raise it with
+/// [`VERSION`] when a change matters everywhere.
+pub const NEEDED: u32 = 15;
 
 /// Spotted state is sampled every this many ticks.
 const SPOT_STEP: i32 = 2;
@@ -287,6 +292,57 @@ pub struct DGrenade {
     pub xy: [f32; 2],
 }
 
+/// One of a player's fights, a kill they got or their death, with how they shot it: what their aim
+/// and movement stats are made of, fight by fight (the match page's Aim & Movement tab). Shots are
+/// theirs from a quarter second before they saw the enemy (or 3 s before the kill, and after their
+/// previous kill that round) to the kill.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DFight {
+    /// Round number and seconds into it (the kill or death).
+    pub round: u32,
+    pub t: f32,
+    pub tick: i32,
+    /// They got the kill (else they died).
+    pub kill: bool,
+    /// The enemy.
+    pub other: String,
+    /// Their gun in the fight (base name; the kill's weapon when they didn't shoot).
+    pub weapon: String,
+    /// Their shots, and their bullets that hit this enemy (in the head).
+    pub shots: u32,
+    pub hits: u32,
+    pub head: u32,
+    /// Shots fired in the air, crouched, and (standing, with a rifle or sniper) stopped (under 34%
+    /// of the gun's top speed) or moving.
+    pub air: u32,
+    #[serde(default)]
+    pub crouch: u32,
+    pub stopped: u32,
+    pub moving: u32,
+    /// The fight's first bullet: its speed as a share of the gun's top speed (on the ground, rifles
+    /// and snipers), whether it hit, and how long the stop before it took (ms).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_speed: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_hit: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_ms: Option<f32>,
+    /// From seeing the enemy to the first hit (ms), and how far the crosshair traveled meanwhile
+    /// (degrees): crosshair placement, when they hit them within a second.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttd_ms: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub xhair: Option<f32>,
+    /// Rifle bullets in sprays (3+ in a row) and those that hit.
+    pub spray: u32,
+    pub spray_hits: u32,
+    /// Each shot: [ms after the fight's first, speed as a share of the gun's top speed (-1 when
+    /// unknown), flags: 1 hit, 2 in the air, 4 crouched, 8 at a spotted enemy (or hit), 16 the
+    /// recoil reset (a first bullet), 32 in a spray]. The stats count the spotted ones.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bullets: Vec<[f32; 3]>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DPlayer {
     pub steamid: String,
@@ -306,6 +362,9 @@ pub struct DPlayer {
     /// set against the gun's recoil (`recoil.json`).
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub pull: std::collections::BTreeMap<String, Vec<[f32; 3]>>,
+    /// Every fight they won or lost, with how they shot it (see [`DFight`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fights: Vec<DFight>,
 }
 
 /// Every stat on the match page's Aim, Utility and Activity tabs: key, and whether lower is
@@ -807,6 +866,33 @@ fn flight_path(points: &[raw::ProjectilePoint], thrower: u64, kind: GrenadeKind,
         .collect()
 }
 
+/// Every player's kill and death fights: (player, first tick, last tick); see [`fight_windows_of`].
+fn fight_windows(m: &Match, engagement_at: &dyn Fn(u64, u64, i32) -> Option<(i32, i32)>) -> Vec<(u64, i32, i32)> {
+    let mut out = vec![];
+    for p in &m.players {
+        out.extend(fight_windows_of(m, engagement_at, p.steamid).into_iter().map(|(_, a, b, _)| (p.steamid, a, b)));
+    }
+    out
+}
+
+/// One player's fights, each kill they got and their death: (the enemy, from a quarter second
+/// before they saw the enemy (or 3 s before the kill; at most 6 s) to the kill, the kill). A fight
+/// starts after their last kill in the round, so one spray through two players counts once.
+fn fight_windows_of<'a>(m: &'a Match, engagement_at: &dyn Fn(u64, u64, i32) -> Option<(i32, i32)>, s: u64) -> Vec<(u64, i32, i32, &'a crate::model::Kill)> {
+    let mut prev: Option<(usize, i32)> = None;
+    let mut out = vec![];
+    for k in m.kills.iter().filter(|k| crate::analysis::is_enemy_kill(m, k.attacker, k.victim) && (k.attacker == Some(s) || k.victim == s)) {
+        let Some(other) = (if k.attacker == Some(s) { Some(k.victim) } else { k.attacker }) else { continue };
+        let live = m.rounds[k.round].live_tick;
+        let seen = engagement_at(s, other, k.tick).map(|(a, _)| a);
+        let start = seen.unwrap_or(k.tick - 3 * TICKRATE as i32).max(k.tick - 6 * TICKRATE as i32).max(live) - 16;
+        let after = prev.filter(|&(r, _)| r == k.round).map_or(i32::MIN, |(_, t)| t + 2);
+        out.push((other, start.max(after), k.tick + 1, k));
+        prev = Some((k.round, k.tick));
+    }
+    out
+}
+
 fn view_angle(a: (f64, f64), b: (f64, f64)) -> f64 {
     let dir = |(p, y): (f64, f64)| {
         let (p, y) = (p.to_radians(), y.to_radians());
@@ -1104,6 +1190,21 @@ pub fn build(demo: &[u8], m: &Match, a: &Analysis, me: u64) -> Result<MatchDetai
     for k in &m.kills {
         state_ticks.insert(k.tick - 2);
     }
+    // Every shot in a kill or death's fight, and the half second before its first one: the Aim &
+    // movement tab shows how each was fired, spotted or not.
+    for (p, start, end) in fight_windows(m, &engagement_at) {
+        let Some(list) = shots.get(&p) else { continue };
+        let mut first = true;
+        for sh in list.iter().filter(|sh| sh.tick >= start && sh.tick <= end) {
+            state_ticks.insert(sh.tick);
+            state_ticks.insert(sh.tick - 1);
+            if std::mem::take(&mut first) {
+                for d in 2..=STOP_LOOKBACK {
+                    state_ticks.insert(sh.tick - d);
+                }
+            }
+        }
+    }
     // Every tick of the half second before a fight's first bullet (how they stopped for it).
     for (p, list) in &shots {
         for s in list.iter().filter(|s| s.first && stop_to_shoot(&s.weapon) && has_spotted(*p, s.tick)) {
@@ -1311,14 +1412,16 @@ pub fn build(demo: &[u8], m: &Match, a: &Analysis, me: u64) -> Result<MatchDetai
         // Crosshair placement: how far the crosshair traveled (every tick's view change added up) from
         // first seeing the enemy to first damaging them, in fights decided within a second (up to a
         // second of it), as Leetify's numbers come out.
-        let fights: Vec<(i32, i32)> = first_hit
+        let fights: Vec<(u64, i32, i32)> = first_hit
             .iter()
             .filter(|((o, _, _), _)| *o == s)
-            .map(|(&(_, _, start), &hit)| (start, hit))
-            .filter(|&(start, hit)| ((hit - start) as f64 / TICKRATE * 1000.0) <= TTD_MAX_MS)
+            .map(|(&(_, target, start), &hit)| (target, start, hit))
+            .filter(|&(_, start, hit)| ((hit - start) as f64 / TICKRATE * 1000.0) <= TTD_MAX_MS)
             .collect();
+        // Per fight: (target, start) -> (time to damage, crosshair travel).
+        let mut placed: HashMap<(u64, i32), (f64, Option<f64>)> = HashMap::new();
         let path_angles: HashMap<i32, (f64, f64)> = {
-            let mut ticks: Vec<i32> = fights.iter().flat_map(|&(start, hit)| start..=hit.min(start + CP_MAX_TICKS)).collect();
+            let mut ticks: Vec<i32> = fights.iter().flat_map(|&(_, start, hit)| start..=hit.min(start + CP_MAX_TICKS)).collect();
             ticks.sort_unstable();
             ticks.dedup();
             if ticks.is_empty() {
@@ -1331,8 +1434,9 @@ pub fn build(demo: &[u8], m: &Match, a: &Analysis, me: u64) -> Result<MatchDetai
                     .unwrap_or_default()
             }
         };
-        for &(start, hit) in &fights {
+        for &(target, start, hit) in &fights {
             ttd.push((hit - start) as f64 / TICKRATE * 1000.0);
+            placed.insert((target, start), ((hit - start) as f64 / TICKRATE * 1000.0, None));
             let mut total = 0.0;
             let mut prev: Option<(f64, f64)> = None;
             for t in start..=hit.min(start + CP_MAX_TICKS) {
@@ -1345,7 +1449,70 @@ pub fn build(demo: &[u8], m: &Match, a: &Analysis, me: u64) -> Result<MatchDetai
             }
             if prev.is_some() {
                 xhair.push(total);
+                if let Some(e) = placed.get_mut(&(target, start)) {
+                    e.1 = Some(total);
+                }
             }
+        }
+        // Each kill and death with how they shot it: every shot of theirs in the fight, measured
+        // the same way as the stats (in the air; on the ground with a rifle or sniper, stopped
+        // under 34% of the gun's top speed), spotted or not.
+        let pos = |t: i32| Some((num(s, t, "X")?, num(s, t, "Y")?));
+        let speed_at = |t: i32| Some((pos(t)?.0 - pos(t - 1)?.0).hypot(pos(t)?.1 - pos(t - 1)?.1) * TICKRATE);
+        let mut my_fights: Vec<DFight> = vec![];
+        for (other, start, end, k) in fight_windows_of(m, &engagement_at, s) {
+            let kill = k.attacker == Some(s);
+            let mine: Vec<&ShotInfo> = list.iter().filter(|sh| sh.tick >= start && sh.tick <= end).collect();
+            let hits: Vec<_> = m.damages.iter().filter(|d| d.attacker == Some(s) && d.victim == other && d.tick >= start && d.tick <= end && is_gun(d.weapon.trim_start_matches("weapon_"))).collect();
+            // (in the air, crouched, speed as a share of the gun's top speed)
+            let how = |sh: &ShotInfo| -> (bool, bool, Option<f64>) {
+                let air = num(s, sh.tick, "is_airborne").unwrap_or(0.0) > 0.5;
+                let duck = num(s, sh.tick, "duck_amount").unwrap_or(0.0) >= CROUCHED;
+                (air, duck, speed_at(sh.tick).map(|v| v / max_speed(&sh.weapon)))
+            };
+            let ground = |sh: &ShotInfo| { let (air, duck, _) = how(sh); !air && !duck && stop_to_shoot(&sh.weapon) };
+            let first = mine.first().copied();
+            let first_how = first.map(how);
+            // The stop before the first bullet: from the last tick running to the first stopped.
+            let stop_ms = first.filter(|sh| stop_to_shoot(&sh.weapon) && first_how.is_some_and(|h| !h.0 && h.2.is_some_and(|v| v < ACCURATE_SPEED))).and_then(|sh| {
+                let top = max_speed(&sh.weapon);
+                let run = (sh.tick - STOP_LOOKBACK + 1..=sh.tick).rev().find(|&t| speed_at(t).is_some_and(|v| v >= RUNNING_SPEED * top))?;
+                let stopped = (run + 1..=sh.tick).find(|&t| speed_at(t).is_some_and(|v| v < ACCURATE_SPEED * top))?;
+                Some((stopped - run) as f32 / TICKRATE as f32 * 1000.0)
+            });
+            let fp = placed.iter().filter(|((t, st), _)| *t == other && *st >= start - 16 && *st <= end).max_by_key(|((_, st), _)| *st).map(|(_, v)| *v);
+            my_fights.push(DFight {
+                round: m.rounds[k.round].number,
+                t: secs(k.round, k.tick),
+                tick: k.tick,
+                kill,
+                other: other.to_string(),
+                weapon: first.map(|sh| sh.weapon.clone()).unwrap_or_else(|| if kill { k.weapon.trim_start_matches("weapon_").to_string() } else { String::new() }),
+                shots: mine.len() as u32,
+                hits: hits.len() as u32,
+                head: hits.iter().filter(|d| d.hitgroup == "head").count() as u32,
+                air: mine.iter().filter(|sh| how(sh).0).count() as u32,
+                crouch: mine.iter().filter(|sh| { let h = how(sh); !h.0 && h.1 }).count() as u32,
+                stopped: mine.iter().filter(|sh| ground(sh)).filter(|sh| how(sh).2.is_some_and(|v| v < ACCURATE_SPEED)).count() as u32,
+                moving: mine.iter().filter(|sh| ground(sh)).filter(|sh| how(sh).2.is_some_and(|v| v >= ACCURATE_SPEED)).count() as u32,
+                first_speed: first.filter(|sh| stop_to_shoot(&sh.weapon)).and(first_how).filter(|h| !h.0 && !h.1).and_then(|h| h.2).map(|v| v as f32),
+                first_hit: first.map(|sh| sh.hit),
+                stop_ms,
+                ttd_ms: fp.map(|v| v.0 as f32),
+                xhair: fp.and_then(|v| v.1).map(|v| v as f32),
+                spray: mine.iter().filter(|sh| sh.spray && weapon_class(&sh.weapon) == "rifle").count() as u32,
+                spray_hits: mine.iter().filter(|sh| sh.spray && sh.hit && weapon_class(&sh.weapon) == "rifle").count() as u32,
+                bullets: mine
+                    .iter()
+                    .map(|sh| {
+                        let (air, duck, speed) = how(sh);
+                        let ms = (sh.tick - first.map_or(sh.tick, |f| f.tick)) as f32 / TICKRATE as f32 * 1000.0;
+                        let spotted = has_spotted(s, sh.tick) || sh.hit;
+                        let flags = sh.hit as u8 | (air as u8) << 1 | ((duck && !air) as u8) << 2 | (spotted as u8) << 3 | (sh.first as u8) << 4 | (sh.spray as u8) << 5;
+                        [ms.round(), speed.map_or(-1.0, |v| (v * 100.0).round() as f32 / 100.0), flags as f32]
+                    })
+                    .collect(),
+            });
         }
         aim.ttd_n = ttd.len() as u32;
         // The median, as Leetify reports it.
@@ -1490,7 +1657,7 @@ pub fn build(demo: &[u8], m: &Match, a: &Analysis, me: u64) -> Result<MatchDetai
         }
         act.rounds_survived = (0..m.rounds.len()).filter(|r| !a.rounds[*r].died.contains(&s)).count() as u32;
 
-        let mut dp = DPlayer { steamid: sid(s), aim, utility: util, activity: act, trades: trades.remove(&s).unwrap_or_default(), stats: Default::default(), crosshair: String::new(), pull };
+        let mut dp = DPlayer { steamid: sid(s), aim, utility: util, activity: act, trades: trades.remove(&s).unwrap_or_default(), stats: Default::default(), crosshair: String::new(), pull, fights: my_fights };
         dp.compute_stats();
         players.push(dp);
     }
@@ -1636,8 +1803,13 @@ pub fn path(root: &std::path::Path, id: &str) -> std::path::PathBuf {
     root.join("matches").join(format!("{id}.details.json"))
 }
 
-/// Whether a match's details are missing or from an older version.
+/// Whether a match's details are missing or older than [`NEEDED`] (rebuilt before filming).
 pub fn stale(root: &std::path::Path, id: &str) -> bool {
+    leading_version(&path(root, id)).is_none_or(|v| v < NEEDED)
+}
+
+/// Not built with this [`VERSION`]: missing only what newer versions add (see [`NEEDED`]).
+pub fn outdated(root: &std::path::Path, id: &str) -> bool {
     leading_version(&path(root, id)).is_none_or(|v| v < VERSION)
 }
 

@@ -428,7 +428,7 @@ impl Worker {
             }
             // Older matches' details (match page, insights, crosshairs) before automatic filming:
             // a minute at a time, until none are left (an update can make all of them stale).
-            let (rebuilt, more_details) = if waiting { (false, false) } else { self.backfill_details(&settings, me) };
+            let (rebuilt, more_details) = if waiting { (false, false) } else { self.backfill_details(&settings, me, false, Duration::from_secs(60)) };
             if rebuilt {
                 self.library_changed();
             }
@@ -521,6 +521,14 @@ impl Worker {
                 self.set("idle", "Up to date", 0, 0);
             }
             lineups_held |= held;
+            // Then, when there's time, what newer versions add to older matches' pages (each fight's
+            // aim and movement): half a minute after each round of filming, so filming isn't held up.
+            if !held && !waiting && pending_render.is_empty() && pending_clips.is_empty() && pending_lineups.is_empty() && !system::cs2_running() {
+                let (rebuilt, _) = self.backfill_details(&settings, me, true, Duration::from_secs(30));
+                if rebuilt {
+                    self.library_changed();
+                }
+            }
             // Storage limits (Settings): oldest clips not in a folder, oldest saved demos.
             let (clips, demos) = crate::clips::enforce(&settings);
             if clips + demos > 0 {
@@ -545,10 +553,11 @@ impl Worker {
         }
     }
 
-    /// Builds missing (or outdated) match-page details for matches whose demo is still on disk,
-    /// newest first, for up to a minute; stops when CS2 opens or Get demos starts. Returns whether
-    /// any were built (benchmarks are refreshed then) and whether some are still left.
-    fn backfill_details(&self, settings: &Settings, me: u64) -> (bool, bool) {
+    /// Builds missing (or stale) match-page details for matches whose demo is still on disk, newest
+    /// first, for up to `budget`; stops when CS2 opens or Get demos starts. `extra`: also those
+    /// only missing what newer versions add (`details::outdated`). Returns whether any were built
+    /// (benchmarks are refreshed then) and whether some are still left.
+    fn backfill_details(&self, settings: &Settings, me: u64, extra: bool, budget: Duration) -> (bool, bool) {
         let lib = &settings.library_dir;
         let Ok(index) = std::fs::read_to_string(lib.join("index.json")).map_err(anyhow::Error::from).and_then(|t| Ok(serde_json::from_str::<Index>(&t)?))
         else {
@@ -560,7 +569,7 @@ impl Worker {
         let mut todo: Vec<(i64, String, PathBuf)> = index
             .matches
             .iter()
-            .filter(|m| cs2hl_core::details::stale(lib, &m.id))
+            .filter(|m| if extra { cs2hl_core::details::outdated(lib, &m.id) } else { cs2hl_core::details::stale(lib, &m.id) })
             .filter_map(|m| {
                 let entry: MatchEntry = serde_json::from_str(&std::fs::read_to_string(lib.join("matches").join(format!("{}.json", m.id))).ok()?).ok()?;
                 let demo = PathBuf::from(&entry.demo_path);
@@ -580,7 +589,7 @@ impl Worker {
         let mut built = 0;
         let mut left = false;
         for (i, (_, id, demo_path)) in todo.into_iter().enumerate() {
-            if started.elapsed() > Duration::from_secs(60) || system::cs2_running() || crate::demos::downloading(&self.app) {
+            if started.elapsed() > budget || system::cs2_running() || crate::demos::downloading(&self.app) {
                 left = true;
                 break;
             }

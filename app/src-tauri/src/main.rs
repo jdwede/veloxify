@@ -308,6 +308,39 @@ async fn viewer_prepare(app: tauri::AppHandle, state: State<'_, AppState>, id: S
     .map_err(|e| format!("{e:#}"))
 }
 
+/// Builds one match's details again from its demo: the match page asks when its Aim & Movement tab
+/// needs a newer version than the match has. Not while CS2 is open or Veloxify is filming.
+#[tauri::command]
+async fn rebuild_details(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    if state.status.lock().unwrap().state == "rendering" {
+        return Err("Veloxify is filming: this match can be read again when it's done (or stop filming at the top right)".into());
+    }
+    if system::cs2_running() {
+        return Err("CS2 is open: Veloxify reads demos only while it's closed. This fills in after you close it.".into());
+    }
+    let (lib, me) = {
+        let s = state.settings.lock().unwrap();
+        (s.library_dir.clone(), s.steamid64.or_else(system::active_steam_user))
+    };
+    let me = me.ok_or("Couldn't find your Steam account.")?;
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        let entry: cs2hl_core::library::MatchEntry = std::fs::read_to_string(lib.join("matches").join(format!("{id}.json")))
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .ok_or("Match not found.")?;
+        let demo_path = std::path::PathBuf::from(&entry.demo_path);
+        if !demo_path.exists() {
+            return Err("This match's demo isn't on disk anymore (the storage limit removed it), so it can't be read again.".into());
+        }
+        let demo = cs2hl_core::demo_io::read_demo(&demo_path).map_err(|e| format!("{e:#}"))?;
+        let m = cs2hl_core::model::load_match(&demo).map_err(|e| format!("{e:#}"))?;
+        let a = cs2hl_core::analysis::analyze(&m);
+        cs2hl_core::details::write(&lib, &id, &demo, &m, &a, me).map_err(|e| format!("{e:#}"))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Opens the match's demo in CS2 (the user clicked Watch in CS2). Returns the console command to
 /// paste when CS2 is already open.
 #[tauri::command]
@@ -883,6 +916,7 @@ fn main() {
             check_update,
             viewer_state,
             viewer_prepare,
+            rebuild_details,
             watch_in_cs2,
             install_update,
             open_faceit,

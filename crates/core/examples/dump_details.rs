@@ -32,6 +32,20 @@ fn main() -> anyhow::Result<()> {
             ac.damage, ac.shots, pct(ac.wasted_bullets, ac.magazine_bullets), ac.rounds_survived
         );
     }
+    // Your fights, one per line: what the Aim & movement tab shows.
+    if let Some(mine) = d.players.iter().find(|p| p.steamid == me.to_string()) {
+        println!("your fights ({}):", mine.fights.len());
+        for f in &mine.fights {
+            println!(
+                "  r{:>2} {:>5.1}s {} {:<14} shots {:>2} hits {:>2} hs {} air {} crouch {} stopped {:>2} moving {:>2} | first {:>5} hit {:?} stop {:>5} | ttd {:>5} xhair {:>6} | spray {}/{}",
+                f.round, f.t, if f.kill { "KILL " } else { "DEATH" }, f.weapon, f.shots, f.hits, f.head, f.air, f.crouch, f.stopped, f.moving,
+                f.first_speed.map(|v| format!("{:.0}%", v * 100.0)).unwrap_or("-".into()), f.first_hit,
+                f.stop_ms.map(|v| format!("{v:.0}")).unwrap_or("-".into()), f.ttd_ms.map(|v| format!("{v:.0}")).unwrap_or("-".into()),
+                f.xhair.map(|v| format!("{v:.1}")).unwrap_or("-".into()), f.spray_hits, f.spray
+            );
+            println!("      {}", f.bullets.iter().map(|b| format!("{}ms:{}{}{}", b[0], if b[1] < 0.0 { "?".into() } else { format!("{:.0}%", b[1] * 100.0) }, ["", "*", "^", "^*", "c", "c*", "", ""][b[2] as usize & 7], if b[2] as u32 & 8 == 0 { "?" } else { "" })).collect::<Vec<_>>().join(" "));
+        }
+    }
     println!("clutches: {:?}", d.clutches.iter().map(|c| format!("r{} 1v{} {} k{}", c.round, c.vs, c.result, c.kills)).collect::<Vec<_>>());
     println!("openings: {}", d.kills.iter().filter(|k| k.opening).count());
     for p in &d.players {
