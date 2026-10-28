@@ -181,6 +181,16 @@ pub fn cs2_csgo_dir() -> Result<PathBuf> {
         .context("CS2 install not found in any Steam library")
 }
 
+/// CS2's installed build (`steamapps\appmanifest_730.acf`): it changes with each CS2 update.
+pub fn cs2_build() -> Option<String> {
+    let csgo = cs2_csgo_dir().ok()?;
+    let acf = std::fs::read_to_string(csgo.ancestors().nth(4)?.join("appmanifest_730.acf")).ok()?;
+    acf.lines().find_map(|l| {
+        let parts: Vec<&str> = l.split('"').collect();
+        (parts.len() >= 4 && parts[1] == "buildid").then(|| parts[3].to_string())
+    })
+}
+
 /// The user's CS2 config folder (`userdata\<account id>\730\local\cfg`).
 pub fn user_cfg_dir(steamid64: u64) -> PathBuf {
     steam_dir().join("userdata").join((steamid64 - STEAMID64_BASE).to_string()).join(r"730\local\cfg")

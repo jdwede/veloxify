@@ -7,7 +7,7 @@
 
 use crate::assemble::{make_thumb, make_thumb_at, SETTLE_S};
 use crate::profile::Profile;
-use crate::session::{Aborted, DemoIncompatible, Renderer};
+use crate::session::{Aborted, DemoCrashed, DemoIncompatible, Renderer};
 use anyhow::{Context, Result};
 use cs2hl_core::library::{HighlightEntry, Index, MatchEntry};
 use std::collections::{BTreeMap, HashMap};
@@ -82,14 +82,15 @@ fn save(path: &Path, m: &MatchEntry) -> Result<()> {
 
 /// Highlight ids still to render in `scope`, in render order: (match id, highlight id).
 pub fn plan(lib: &Path, scope: &Scope) -> Result<Vec<(String, String)>> {
+    retry_crashing_demos(lib);
     let curation = cs2hl_core::curation::Curation::load(lib);
     if let Scope::Items(items) = scope {
         let mut out = vec![];
         for (mid, id) in items {
             let Ok(m) = load(&lib.join("matches").join(format!("{mid}.json"))) else { continue };
             // Asked for by name: worth another try after a failure (but not on a demo CS2 can no
-            // longer play).
-            let retry = |e: &Option<String>| e.as_deref().is_none_or(|e| !e.contains("older CS2 version"));
+            // longer play, or one that crashes CS2 until CS2 updates).
+            let retry = |e: &Option<String>| e.as_deref().is_none_or(|e| !e.contains("older CS2 version") && e != CRASHES_CS2);
             let pending = m.highlights.iter().any(|h| &h.id == id && h.clip.is_none() && retry(&h.render_error))
                 || m.lowlights.iter().any(|l| &l.id == id && l.clip.is_none() && retry(&l.render_error))
                 || m.potm.as_ref().is_some_and(|p| &p.id == id && p.clip.is_none() && retry(&p.render_error));
@@ -196,6 +197,8 @@ pub fn render(
     let mut not_drawing = false;
     // CS2 crashes in a row.
     let mut crashes = 0;
+    // Demos set aside in a row for crashing CS2 as it opens them.
+    let mut crashed_demos = 0;
     // CS2 can't play demos from before its last update that changed how demos are recorded (it
     // says so, or stops with an error box): a match as old as one known not to play is skipped.
     let mut unplayable = load_unplayable(lib);
@@ -247,8 +250,19 @@ pub fn render(
             };
             drop(bytes);
             let me_name = m.players.iter().find(|p| p.steamid == steamid64.to_string()).map(|p| p.name.clone()).unwrap_or_default();
-            match renderer.load_demo(&dem, &me_name) {
-                Ok(()) => loaded = Some(mid.clone()),
+            // CS2 crashing as it opens a demo: once more on a fresh CS2, in case it was chance.
+            let mut opened = renderer.load_demo(&dem, &me_name);
+            if opened.as_ref().is_err_and(|e| e.is::<DemoCrashed>()) {
+                drain(on);
+                on(Event::Log(format!("CS2 crashed opening the {} demo; trying it once more", m.map)));
+                renderer.relaunch_if_closed()?;
+                opened = renderer.load_demo(&dem, &me_name);
+            }
+            match opened {
+                Ok(()) => {
+                    loaded = Some(mid.clone());
+                    crashed_demos = 0;
+                }
                 Err(e) if e.downcast_ref::<Aborted>().is_some() => {
                     stopped = true;
                     break;
@@ -275,7 +289,37 @@ pub fn render(
                     drain(on);
                     continue;
                 }
-                Err(e) => return Err(e),
+                Err(e) if e.is::<DemoCrashed>() => {
+                    // Set aside until CS2's next update (it may fix it); the other matches go on.
+                    for h in m.highlights.iter_mut().filter(|h| h.clip.is_none()) {
+                        h.render_error = Some(CRASHES_CS2.into());
+                    }
+                    for l in m.lowlights.iter_mut().filter(|l| l.clip.is_none()) {
+                        l.render_error = Some(CRASHES_CS2.into());
+                    }
+                    if let Some(p) = m.potm.as_mut().filter(|p| p.clip.is_none()) {
+                        p.render_error = Some(CRASHES_CS2.into());
+                    }
+                    save(&path, &m)?;
+                    note_crashing_demo(lib, &mid);
+                    broken.push(mid.clone());
+                    loaded = None;
+                    drain(on);
+                    on(Event::Log(format!("skipping {}: CS2 crashes every time it opens this demo", m.map)));
+                    // Demo after demo crashing is more likely CS2 itself: stop for now.
+                    crashed_demos += 1;
+                    if crashed_demos >= 3 {
+                        return Err(crate::session::Cs2Crashed(String::new()).into());
+                    }
+                    renderer.relaunch_if_closed()?;
+                    drain(on);
+                    continue;
+                }
+                Err(e) => {
+                    // What CS2 printed before it failed.
+                    drain(on);
+                    return Err(e);
+                }
             }
             drain(on);
         }
@@ -824,6 +868,51 @@ fn save_unplayable(lib: &Path, set: &std::collections::BTreeSet<String>) {
     let _ = std::fs::write(lib.join("unplayable_demos.json"), serde_json::to_string(set).unwrap_or_default());
 }
 
+/// Why a clip whose demo crashes CS2 as it opens isn't filmed.
+const CRASHES_CS2: &str = "CS2 crashes every time it opens this demo (a CS2 bug since its 22 October update, with some FACEIT demos). Veloxify tries again after CS2's next update.";
+
+/// Matches whose demo crashed CS2 as it opened, and the CS2 version that did it
+/// (`crashing_demos.json`).
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+struct CrashingDemos {
+    build: String,
+    matches: std::collections::BTreeSet<String>,
+}
+
+fn note_crashing_demo(lib: &Path, mid: &str) {
+    let file = lib.join("crashing_demos.json");
+    let mut c: CrashingDemos = std::fs::read_to_string(&file).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+    c.build = crate::steam::cs2_build().unwrap_or_default();
+    c.matches.insert(mid.to_string());
+    let _ = std::fs::write(file, serde_json::to_string(&c).unwrap_or_default());
+}
+
+/// Once CS2 has updated, the demos that crashed it get another try.
+fn retry_crashing_demos(lib: &Path) {
+    let file = lib.join("crashing_demos.json");
+    let Some(c) = std::fs::read_to_string(&file).ok().and_then(|t| serde_json::from_str::<CrashingDemos>(&t).ok()) else { return };
+    let Some(now) = crate::steam::cs2_build() else { return };
+    if now == c.build {
+        return;
+    }
+    for mid in &c.matches {
+        let path = lib.join("matches").join(format!("{mid}.json"));
+        let Ok(mut m) = load(&path) else { continue };
+        let crashed = |e: &mut Option<String>| {
+            if e.as_deref() == Some(CRASHES_CS2) {
+                *e = None;
+            }
+        };
+        m.highlights.iter_mut().for_each(|h| crashed(&mut h.render_error));
+        m.lowlights.iter_mut().for_each(|l| crashed(&mut l.render_error));
+        if let Some(p) = m.potm.as_mut() {
+            crashed(&mut p.render_error);
+        }
+        let _ = save(&path, &m);
+    }
+    let _ = std::fs::remove_file(file);
+}
+
 /// Demos CS2 couldn't load for a lineup video (not known to be too old): match -> runs it failed.
 /// After [`LOAD_TRIES`] runs it's left alone: each try costs a CS2 restart.
 fn load_failures(lib: &Path) -> BTreeMap<String, u32> {
@@ -1102,7 +1191,7 @@ pub fn render_lineups(
                             failed_loads.insert(o.match_id.clone());
                             *load_failed.entry(o.match_id.clone()).or_default() += 1;
                             save_load_failures(lib, &load_failed);
-                            last_error = e.to_string();
+                            last_error = if e.is::<DemoCrashed>() { "CS2 crashes when it opens this demo.".into() } else { e.to_string() };
                         }
                         on(Event::Log(format!("{}: {last_error}; restarting CS2", o.match_id)));
                         // A failed load can leave CS2 stuck: start over with a fresh session.

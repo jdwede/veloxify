@@ -161,6 +161,18 @@ impl std::fmt::Display for Cs2Crashed {
 }
 impl std::error::Error for Cs2Crashed {}
 
+/// CS2 crashed while opening a demo. Some demos do that every time (since CS2's 22 October 2026
+/// update: FACEIT demos where a player has a pet chicken), so it's the demo, not CS2 at large.
+#[derive(Debug)]
+pub struct DemoCrashed(pub PathBuf);
+
+impl std::fmt::Display for DemoCrashed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "CS2 crashed opening {}", self.0.display())
+    }
+}
+impl std::error::Error for DemoCrashed {}
+
 /// The session was stopped: by the user ("Stop rendering"), or because something brought CS2
 /// forward (`wants_cs2`: the user is trying to play).
 #[derive(Debug)]
@@ -401,6 +413,12 @@ impl Renderer {
         }
         self.vc = None;
         *self.applied.lock().unwrap() = None;
+        // A crashed CS2 takes a few seconds to write its crash report and go: Steam won't start
+        // another meanwhile.
+        let t0 = Instant::now();
+        while cs2_running() && t0.elapsed() < Duration::from_secs(30) {
+            self.pause(Duration::from_millis(500))?;
+        }
         self.launch()
     }
 
@@ -572,6 +590,7 @@ impl Renderer {
             Err(e) if e.downcast_ref::<Cs2Crashed>().is_some_and(|c| c.0.contains("CopyNewEntity") || c.0.contains("class index")) => {
                 return Err(DemoIncompatible(path.to_path_buf()).into())
             }
+            Err(e) if e.is::<Cs2Crashed>() => return Err(DemoCrashed(path.to_path_buf()).into()),
             other => other?,
         }
         (self.log)(&format!("demo loaded in {:.0}s", t0.elapsed().as_secs_f64()));

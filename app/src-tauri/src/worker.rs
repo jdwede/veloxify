@@ -131,9 +131,9 @@ pub struct Worker {
     tray_icon: Cell<Option<usize>>,
     /// When filming last stopped because CS2 stopped drawing: no filming until there's input.
     not_drawing: Cell<Option<Instant>>,
-    /// When CS2 last didn't open for filming (Steam waiting on a message...) or kept crashing,
-    /// and the status saying so: filming waits [`NOT_STARTED_WAIT`] instead of trying again and
-    /// again.
+    /// When CS2 last didn't open for filming (Steam waiting on a message...), kept crashing, or
+    /// filming stopped on an error, and the status saying so: filming waits [`NOT_STARTED_WAIT`]
+    /// instead of trying again and again.
     not_started: RefCell<Option<(Instant, String)>>,
     /// Matches re-read so far in this run of re-reading (it goes a minute at a time), so the count
     /// carries on instead of starting over each minute.
@@ -261,6 +261,9 @@ impl Worker {
             last_played = last_played.max(t);
         }
         let mut film_now = false;
+        // Each press of "Film now" also ends a wait after CS2 didn't open (or crashed), once:
+        // `film_now` stays on until the next game, for the wait after playing.
+        let mut pressed = false;
         // Right tray color from the start (the first import can take a while).
         self.set(if system::cs2_running() { "waiting" } else { "idle" }, "Starting", 0, 0);
         loop {
@@ -297,7 +300,7 @@ impl Worker {
                     Ok(Job::RenderLineups(ids)) => pending_lineups.extend(ids),
                     Ok(Job::Resume) => (held, lineups_held) = (false, false),
                     Ok(Job::Premier) => premier_next = Some(Instant::now()),
-                    Ok(Job::FilmNow) => film_now = true,
+                    Ok(Job::FilmNow) => (film_now, pressed) = (true, true),
                     Err(RecvTimeoutError::Disconnected) => return,
                     _ => {}
                 }
@@ -313,7 +316,7 @@ impl Worker {
                     Ok(Job::RenderLineups(ids)) => pending_lineups.extend(ids),
                     Ok(Job::Resume) => (held, lineups_held) = (false, false),
                     Ok(Job::Premier) => premier_next = Some(Instant::now()),
-                    Ok(Job::FilmNow) => film_now = true,
+                    Ok(Job::FilmNow) => (film_now, pressed) = (true, true),
                     Err(RecvTimeoutError::Disconnected) => return,
                     _ => {}
                 }
@@ -433,10 +436,11 @@ impl Worker {
             }
             // CS2 didn't open for filming last time (or crashed): try again after a while, or for
             // what's asked.
+            let pressed_now = std::mem::take(&mut pressed);
             let since = self.not_started.borrow().as_ref().map(|(t, _)| *t);
             if let Some(since) = since {
                 let asked = !pending_clips.is_empty() || !pending_lineups.is_empty() || !pending_render.is_empty();
-                if asked || film_now || since.elapsed() >= NOT_STARTED_WAIT {
+                if asked || pressed_now || since.elapsed() >= NOT_STARTED_WAIT {
                     *self.not_started.borrow_mut() = None;
                 }
             }
@@ -494,7 +498,7 @@ impl Worker {
                         Job::RenderLineups(ids) => pending_lineups.extend(ids),
                         Job::Resume => (held, lineups_held) = (false, false),
                         Job::Premier => premier_next = Some(Instant::now()),
-                        Job::FilmNow => film_now = true,
+                        Job::FilmNow => (film_now, pressed) = (true, true),
                         _ => {}
                     }
                 }
@@ -528,7 +532,7 @@ impl Worker {
                             Job::Import(files) => self.forget(&files),
                             Job::Resume => (held, lineups_held) = (false, false),
                             Job::Premier => premier_next = Some(Instant::now()),
-                            Job::FilmNow => film_now = true,
+                            Job::FilmNow => (film_now, pressed) = (true, true),
                             Job::Now => {}
                         }
                         first = true;
@@ -571,7 +575,7 @@ impl Worker {
                 Ok(Job::RenderLineups(ids)) => pending_lineups.extend(ids),
                 Ok(Job::Resume) => (held, lineups_held) = (false, false),
                 Ok(Job::Premier) => premier_next = Some(Instant::now()),
-                Ok(Job::FilmNow) => film_now = true,
+                Ok(Job::FilmNow) => (film_now, pressed) = (true, true),
                 Err(RecvTimeoutError::Disconnected) => return,
                 _ => {}
             }
@@ -979,14 +983,17 @@ impl Worker {
                 self.not_drawing.set(Some(Instant::now()));
                 self.set("waiting", e.to_string(), 0, 0);
             }
-            Err(e) if e.downcast_ref::<cs2hl_render::session::NotStarted>().is_some() || e.downcast_ref::<cs2hl_render::session::Cs2Crashed>().is_some() => {
-                vlog!("{noun}: {e}");
+            // CS2 didn't open, crashed, or filming stopped on an error: trying again at once would
+            // only start CS2 again and again, so wait a while.
+            Err(e) => {
+                vlog!("{noun}: {e:#}");
                 let at = chrono::Local::now() + chrono::TimeDelta::seconds(NOT_STARTED_WAIT.as_secs() as i64);
-                let why = format!("{e}. Filming tries again at {}", at.format("%-I:%M %p"));
+                let crashed = e.downcast_ref::<cs2hl_render::session::NotStarted>().is_some() || e.downcast_ref::<cs2hl_render::session::Cs2Crashed>().is_some();
+                let why = if crashed { format!("{e}") } else { format!("Filming stopped: {e:#}") };
+                let why = format!("{why}. Filming tries again at {}", at.format("%-I:%M %p"));
                 *self.not_started.borrow_mut() = Some((Instant::now(), why.clone()));
-                self.set("waiting", why, 0, 0);
+                self.set("waiting", why, done, total);
             }
-            Err(e) => self.set("error", format!("Rendering stopped: {e:#}"), done, total),
             Ok(_) => {}
         }
         stopped
