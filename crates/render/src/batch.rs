@@ -194,6 +194,8 @@ pub fn render(
     // Frozen recordings in a row: CS2 isn't drawing (monitor off...), so stop rather than go on.
     let mut frozen_streak = 0;
     let mut not_drawing = false;
+    // CS2 crashes in a row.
+    let mut crashes = 0;
     // CS2 can't play demos from before its last update that changed how demos are recorded (it
     // says so, or stops with an error box): a match as old as one known not to play is skipped.
     let mut unplayable = load_unplayable(lib);
@@ -357,6 +359,7 @@ pub fn render(
                 }
                 rendered += 1;
                 frozen_streak = 0;
+                crashes = 0;
                 on(Event::Rendered { match_id: mid.clone(), title, clip_s: duration, took_s: ts.elapsed().as_secs_f64() });
             }
             Err(e) if e.downcast_ref::<Aborted>().is_some() => {
@@ -373,7 +376,11 @@ pub fn render(
                 }
             }
             Err(e) => {
+                let crashed = e.downcast_ref::<crate::session::Cs2Crashed>();
+                // CS2 closing by itself isn't this clip's fault: it's tried again another time.
+                let silent = crashed.is_some_and(|c| c.0.is_empty());
                 match (hi, li) {
+                    _ if silent => {}
                     (Some(i), _) => m.highlights[i].render_error = Some(e.to_string()),
                     (None, Some(i)) => m.lowlights[i].render_error = Some(e.to_string()),
                     _ => {
@@ -383,7 +390,13 @@ pub fn render(
                     }
                 }
                 on(Event::Failed { match_id: mid.clone(), title, error: e.to_string() });
-                if e.downcast_ref::<crate::session::Cs2Crashed>().is_some() {
+                if crashed.is_some() {
+                    // Twice in a row: CS2 isn't going to film right now (the worker waits).
+                    crashes += 1;
+                    if crashes >= 2 {
+                        save(&path, &m)?;
+                        return Err(e);
+                    }
                     loaded = None;
                     renderer.relaunch_if_closed()?;
                 }
@@ -984,6 +997,8 @@ pub fn render_lineups(
     let mut queue: Vec<(Job, usize, String)> = jobs.into_iter().map(|j| (j, 0, String::new())).collect();
     let mut frozen_streak = 0;
     let mut not_drawing = false;
+    // CS2 crashes in a row: twice and CS2 isn't going to film right now (the worker waits).
+    let mut crashes = 0;
     'passes: for _pass in 0..4 {
     if queue.is_empty() {
         break;
@@ -1071,6 +1086,12 @@ pub fn render_lineups(
                         break 'passes;
                     }
                     Err(e) => {
+                        if e.downcast_ref::<crate::session::Cs2Crashed>().is_some() {
+                            crashes += 1;
+                            if crashes >= 2 {
+                                return Err(e);
+                            }
+                        }
                         if e.downcast_ref::<DemoIncompatible>().is_some() {
                             unplayable.insert(o.match_id.clone());
                             save_unplayable(lib, &unplayable);
@@ -1178,6 +1199,7 @@ pub fn render_lineups(
                     save_lineup_clips(lib, &clips)?;
                     rendered += 1;
                     frozen_streak = 0;
+                    crashes = 0;
                     on(Event::Rendered { match_id: o.match_id.clone(), title: job.title.clone(), clip_s: lead + hold, took_s: ts.elapsed().as_secs_f64() });
                     drain(on);
                     continue 'jobs;
@@ -1189,6 +1211,16 @@ pub fn render_lineups(
                 Err(e) => {
                     last_error = if e.downcast_ref::<WrongPov>().is_some() { "CS2's camera wouldn't stay on the thrower.".into() } else { e.to_string() };
                     on(Event::Log(format!("{} from {}: {last_error}; trying another throw", job.title, o.match_id)));
+                    if e.downcast_ref::<crate::session::Cs2Crashed>().is_some() {
+                        crashes += 1;
+                        if crashes >= 2 {
+                            return Err(e);
+                        }
+                        if let Some(r) = renderer.take() {
+                            r.close();
+                        }
+                        loaded = None;
+                    }
                     if e.downcast_ref::<crate::assemble::Frozen>().is_some() {
                         frozen_streak += 1;
                         if frozen_streak >= 3 {

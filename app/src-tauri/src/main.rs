@@ -887,6 +887,7 @@ fn main() {
     let (s2, st2) = (settings.clone(), status.clone());
     let abort = Arc::new(AtomicBool::new(false));
     let abort_menu = abort.clone();
+    let status_menu = status.clone();
     let abort_worker = abort.clone();
 
     tauri::Builder::default()
@@ -991,9 +992,17 @@ fn main() {
                     }
                     "stop" => abort_menu.store(true, Ordering::SeqCst),
                     "quit" => {
-                        // Quitting mid-render still hands CS2 back with the user's settings.
+                        // Quitting mid-render still hands CS2 back with the user's settings: the
+                        // render winds down first (closes its CS2, puts the video settings back).
                         abort_menu.store(true, Ordering::SeqCst);
-                        app.exit(0)
+                        let (app, status) = (app.clone(), status_menu.clone());
+                        std::thread::spawn(move || {
+                            let t0 = std::time::Instant::now();
+                            while status.lock().unwrap().state == "rendering" && t0.elapsed() < std::time::Duration::from_secs(20) {
+                                std::thread::sleep(std::time::Duration::from_millis(200));
+                            }
+                            app.exit(0)
+                        });
                     }
                     _ => {}
                 })

@@ -26,12 +26,16 @@ pub struct VConsole {
 
 impl VConsole {
     /// Connects to CS2's console port, retrying until `timeout` (CS2 opens it during startup).
-    pub fn connect(timeout: Duration) -> Result<Self> {
+    /// `keep_waiting` is asked before each retry; its error ends the wait (Stop pressed...).
+    pub fn connect(timeout: Duration, keep_waiting: &dyn Fn() -> Result<()>) -> Result<Self> {
         let deadline = Instant::now() + timeout;
         let stream = loop {
             match TcpStream::connect_timeout(&"127.0.0.1:29000".parse()?, Duration::from_secs(3)) {
                 Ok(s) => break s,
-                Err(_) if Instant::now() < deadline => std::thread::sleep(Duration::from_secs(1)),
+                Err(_) if Instant::now() < deadline => {
+                    keep_waiting()?;
+                    std::thread::sleep(Duration::from_secs(1))
+                }
                 Err(e) => bail!("CS2 console port never opened: {e}"),
             }
         };

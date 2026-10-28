@@ -46,6 +46,92 @@ pub fn steam_exe() -> PathBuf {
         .unwrap_or_else(|| steam_dir().join("steam.exe"))
 }
 
+/// The end of one of Steam's own logs (`logs/<name>`): its last 256 KB.
+fn log_tail(name: &str) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(steam_dir().join("logs").join(name)).ok()?;
+    let len = f.metadata().ok()?.len();
+    f.seek(SeekFrom::Start(len.saturating_sub(256 * 1024))).ok()?;
+    let mut buf = vec![];
+    f.read_to_end(&mut buf).ok()?;
+    Some(String::from_utf8_lossy(&buf).into_owned())
+}
+
+/// What's holding up Steam's latest start of CS2 (in the last 15 minutes), from Steam's log of
+/// its steps: waiting for an answer (a "Cloud sync failed" message...) or stuck on one step for
+/// over a minute. None when it finished, failed, or is just getting on with it.
+pub fn launch_waiting() -> Option<String> {
+    launch_waiting_in(&log_tail("console_log.txt")?, chrono::Local::now().naive_local())
+}
+
+/// [`launch_waiting`] from the end of Steam's log, at local time `now`.
+fn launch_waiting_in(text: &str, now: chrono::NaiveDateTime) -> Option<String> {
+    // [2026-10-28 04:07:46] GameAction [AppID 730, ActionID 105] : LaunchApp waiting for user response to SynchronizingCloud "syncfailed"
+    let (at, what) = text.lines().rev().find_map(|l| {
+        let (at, rest) = l.strip_prefix('[')?.split_once("] GameAction [AppID 730, ActionID ")?;
+        let what = rest.split_once("] : LaunchApp ")?.1;
+        Some((chrono::NaiveDateTime::parse_from_str(at, "%Y-%m-%d %H:%M:%S").ok()?, what))
+    })?;
+    let age = now - at;
+    if age > chrono::TimeDelta::minutes(15) {
+        return None;
+    }
+    if let Some(step) = what.strip_prefix("waiting for user response to ") {
+        let task = step.split(' ').next().unwrap_or(step);
+        return match task {
+            // Steam answers these itself.
+            "ShowInterstitials" | "CreatingProcess" => None,
+            "SynchronizingCloud" => Some("Steam couldn't sync CS2's Steam Cloud files and is asking what to do (restarting Steam clears it)".into()),
+            _ => Some(format!("Steam is waiting for an answer before it starts CS2 ({step})")),
+        };
+    }
+    let task = what.strip_prefix("changed task to ")?.split(" with ").next()?;
+    if matches!(task, "Completed" | "Failed") || age < chrono::TimeDelta::minutes(1) {
+        return None;
+    }
+    Some(match task {
+        "SynchronizingCloud" => "Steam is stuck syncing CS2's Steam Cloud files (restarting Steam clears it)".into(),
+        "DownloadingDepots" => "Steam is updating CS2 first".into(),
+        "WaitingPrevProcess" => "Steam is waiting for an earlier CS2 to close".into(),
+        _ => format!("Steam's start of CS2 is stuck at \"{task}\""),
+    })
+}
+
+/// Whether the latest CS2 Steam started has Veloxify's `-insecure` (Steam logs each game's
+/// command line as it starts it); None when Steam's log doesn't say.
+pub fn last_cs2_was_ours() -> Option<bool> {
+    let text = log_tail("gameprocess_log.txt")?;
+    let line = text.lines().rev().find(|l| l.contains(" as a tracked process ") && l.contains("cs2.exe"))?;
+    Some(line.contains(" -insecure"))
+}
+
+/// When a CS2 you started yourself last closed (Unix seconds), from Steam's log of the games it
+/// runs: so Veloxify knows you just played even when it wasn't running at the time.
+pub fn last_played() -> Option<i64> {
+    use chrono::TimeZone;
+    let at = last_played_in(&log_tail("gameprocess_log.txt")?)?;
+    chrono::Local.from_local_datetime(&at).earliest().map(|t| t.timestamp())
+}
+
+/// [`last_played`] from the end of Steam's log.
+fn last_played_in(text: &str) -> Option<chrono::NaiveDateTime> {
+    // [2026-10-28 04:26:03] AppID 730 adding PID 80108 as a tracked process ""C:\...\cs2.exe" -steam -novid"
+    // [2026-10-28 04:51:37] Remove 730 from running list
+    let (mut yours, mut last) = (false, None);
+    for l in text.lines() {
+        let Some((at, what)) = l.strip_prefix('[').and_then(|l| l.split_once("] ")) else { continue };
+        // A start with its command line: CS2 (yours unless it has Veloxify's -insecure), or
+        // another program counted as CS2 (Veloxify's Premier check). CS2 starting itself again
+        // is logged without one.
+        if what.starts_with("AppID 730 adding PID") && what.contains("tracked process \"") {
+            yours = what.contains("cs2.exe") && !what.contains(" -insecure");
+        } else if what == "Remove 730 from running list" && yours {
+            last = chrono::NaiveDateTime::parse_from_str(at, "%Y-%m-%d %H:%M:%S").ok().or(last);
+        }
+    }
+    last
+}
+
 /// The account last signed in on this PC, from Steam's list of remembered accounts
 /// (`config/loginusers.vdf`: account ids and names, no passwords): the one marked most recent,
 /// else the newest. For when Steam doesn't say who's signed in right now.
@@ -106,4 +192,53 @@ pub fn account_id(steamid64: u64) -> u64 {
 
 pub fn exists(p: &Path) -> bool {
     p.exists()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{last_played_in, launch_waiting_in};
+
+    const LOG: &str = r#"[2026-10-28 04:07:45] ExecCommandLine: ""c:\program files (x86)\steam\steam.exe" -applaunch 730 -insecure"
+[2026-10-28 04:07:45] GameAction [AppID 730, ActionID 105] : LaunchApp changed task to UpdatingAppInfo with ""
+[2026-10-28 04:07:46] GameAction [AppID 730, ActionID 105] : LaunchApp changed task to SynchronizingCloud with ""
+[2026-10-28 04:07:46] GameAction [AppID 730, ActionID 105] : LaunchApp waiting for user response to SynchronizingCloud "syncfailed"
+"#;
+
+    fn at(t: &str) -> chrono::NaiveDateTime {
+        chrono::NaiveDateTime::parse_from_str(t, "%Y-%m-%d %H:%M:%S").unwrap()
+    }
+
+    #[test]
+    fn steam_waiting_on_cloud_sync() {
+        assert!(launch_waiting_in(LOG, at("2026-10-28 04:07:50")).unwrap().contains("Steam Cloud"));
+        // Long gone: not about this start.
+        assert_eq!(launch_waiting_in(LOG, at("2026-10-28 05:00:00")), None);
+    }
+
+    #[test]
+    fn steam_steps_that_finish() {
+        let routine = format!("{LOG}[2026-10-28 04:19:20] GameAction [AppID 730, ActionID 106] : LaunchApp waiting for user response to ShowInterstitials \"\"\n");
+        assert_eq!(launch_waiting_in(&routine, at("2026-10-28 04:19:21")), None);
+        let stuck = "[2026-10-28 03:58:26] GameAction [AppID 730, ActionID 104] : LaunchApp changed task to SynchronizingCloud with \"\"\n";
+        assert_eq!(launch_waiting_in(stuck, at("2026-10-28 03:58:50")), None);
+        assert!(launch_waiting_in(stuck, at("2026-10-28 04:00:00")).unwrap().contains("stuck syncing"));
+        let done = "[2026-10-28 04:26:03] GameAction [AppID 730, ActionID 1] : LaunchApp changed task to Completed with \"\"\n";
+        assert_eq!(launch_waiting_in(done, at("2026-10-28 04:30:00")), None);
+    }
+
+    #[test]
+    fn your_cs2_closing_not_veloxifys() {
+        let log = r#"[2026-10-28 04:26:03] AppID 730 adding PID 80108 as a tracked process ""C:\Steam\cs2.exe" -steam -novid -freq 240"
+[2026-10-28 04:26:05] Remove 730 from running list
+[2026-10-28 04:26:06] AppID 730 adding PID 69112 as a tracked process
+[2026-10-28 04:51:37] AppID 730 no longer tracking PID 69112, exit code -1073741819
+[2026-10-28 04:51:37] Remove 730 from running list
+[2026-10-28 04:54:23] AppID 730 adding PID 83424 as a tracked process ""C:\veloxify.exe" --premier-matches x.json"
+[2026-10-28 04:54:26] Remove 730 from running list
+[2026-10-28 04:54:29] AppID 730 adding PID 51408 as a tracked process ""C:\Steam\cs2.exe" -steam -insecure -novid -windowed"
+[2026-10-28 04:55:11] Remove 730 from running list
+"#;
+        // Your CS2 started itself again at 04:26:05 (Steam logs a close then too): it closed at 04:51:37.
+        assert_eq!(last_played_in(log), Some(at("2026-10-28 04:51:37")));
+    }
 }

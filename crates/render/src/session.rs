@@ -145,13 +145,18 @@ impl std::fmt::Display for NotDrawing {
 }
 impl std::error::Error for NotDrawing {}
 
-/// CS2 stopped with an error box (its message); Veloxify closed it.
+/// CS2 stopped with an error box (its message; Veloxify closed it), or closed by itself with no
+/// message (empty).
 #[derive(Debug)]
 pub struct Cs2Crashed(pub String);
 
 impl std::fmt::Display for Cs2Crashed {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "CS2 stopped with an error: {}", self.0)
+        if self.0.is_empty() {
+            f.write_str("CS2 closed by itself (it crashed)")
+        } else {
+            write!(f, "CS2 stopped with an error: {}", self.0)
+        }
     }
 }
 impl std::error::Error for Cs2Crashed {}
@@ -169,6 +174,18 @@ impl std::fmt::Display for Aborted {
     }
 }
 impl std::error::Error for Aborted {}
+
+/// CS2 didn't open for filming (why: Steam waiting for an answer, you started CS2 yourself...).
+/// Filming waits a while instead of asking Steam again and again.
+#[derive(Debug)]
+pub struct NotStarted(pub String);
+
+impl std::fmt::Display for NotStarted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "CS2 didn't open for filming: {}", self.0)
+    }
+}
+impl std::error::Error for NotStarted {}
 
 pub struct Renderer {
     profile: Profile,
@@ -188,6 +205,8 @@ pub struct Renderer {
     abort: Arc<AtomicBool>,
     wants_cs2: Arc<AtomicBool>,
     closed: Arc<AtomicBool>,
+    /// The CS2 that came up is one you started (Steam held Veloxify's): it's left alone.
+    foreign: bool,
     log: Box<dyn Fn(&str) + Send>,
 }
 
@@ -307,6 +326,7 @@ impl Renderer {
             abort,
             wants_cs2: Arc::new(AtomicBool::new(false)),
             closed: Arc::new(AtomicBool::new(false)),
+            foreign: false,
             log,
         };
         // The screen asleep stops CS2 drawing (the recording freezes): keep it on while filming.
@@ -321,6 +341,11 @@ impl Renderer {
     fn check(&self) -> Result<()> {
         if self.abort.load(Ordering::SeqCst) {
             return Err(Aborted { wants_cs2: self.wants_cs2.load(Ordering::SeqCst) }.into());
+        }
+        // CS2 gone without an error box: its console connection closed with it. Waiting on it
+        // would only time out, clip after clip.
+        if self.vc.as_ref().is_some_and(|vc| !vc.alive()) {
+            return Err(Cs2Crashed(String::new()).into());
         }
         Ok(())
     }
@@ -382,6 +407,10 @@ impl Renderer {
     fn launch(&mut self) -> Result<()> {
         let o = &self.profile.output;
         let prev = window::foreground();
+        // Steam still busy with (or stuck on) an earlier start of CS2: asking again only piles up.
+        if let Some(why) = steam::launch_waiting() {
+            bail!(NotStarted(why));
+        }
         (self.log)("launching CS2 in the background");
         let t0 = Instant::now();
         let exe = steam::steam_exe();
@@ -402,7 +431,23 @@ impl Renderer {
                 .spawn()
                 .with_context(|| format!("starting Steam ({}: {e})", exe.display()))?;
         }
-        self.vc = Some(VConsole::connect(Duration::from_secs(120))?);
+        // Stop works while CS2 starts, and Steam waiting on a message (Cloud sync failed...) ends
+        // the wait: nobody's there to answer it.
+        let vc = VConsole::connect(Duration::from_secs(120), &|| {
+            self.check()?;
+            match steam::launch_waiting() {
+                Some(why) if t0.elapsed() > Duration::from_secs(5) => Err(NotStarted(why).into()),
+                _ => Ok(()),
+            }
+        })
+        .map_err(|e| if e.is::<Aborted>() || e.is::<NotStarted>() { e } else { NotStarted("it didn't come up within 2 minutes".into()).into() })?;
+        self.vc = Some(vc);
+        // A CS2 you started yourself meanwhile is yours: nothing is sent to it, it isn't moved,
+        // and it isn't closed.
+        if steam::last_cs2_was_ours() == Some(false) {
+            self.foreign = true;
+            bail!(NotStarted("you started CS2 yourself".into()));
+        }
         while window::cs2_window().is_none() && t0.elapsed() < Duration::from_secs(60) {
             self.pause(Duration::from_millis(100))?;
         }
@@ -800,6 +845,12 @@ impl Renderer {
             return;
         }
         let urgent = self.abort.load(Ordering::SeqCst);
+        // Only Veloxify's own CS2 is closed: the one it reached, or (when it never did) one Steam's
+        // log shows it started; never one you started yourself.
+        if self.foreign {
+            self.vc = None;
+        }
+        let ours = self.vc.is_some() || (!self.foreign && cs2_running() && steam::last_cs2_was_ours() == Some(true));
         if self.vc.is_some() {
             if self.vc().alive() {
                 // The lock outlives CS2: don't leave your own spectating stuck on yourself.
@@ -817,10 +868,10 @@ impl Renderer {
         }
         // Stopping for the user: don't make them wait on a slow shutdown.
         let deadline = Instant::now() + Duration::from_secs(if urgent { 8 } else { 60 });
-        while cs2_running() && Instant::now() < deadline {
+        while ours && cs2_running() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(250));
         }
-        if cs2_running() {
+        if ours && cs2_running() {
             (self.log)("CS2 didn't exit; force-closing it (your saved settings are already your own)");
             let mut c = Command::new("taskkill");
             c.args(["/F", "/IM", "cs2.exe"]);
@@ -830,8 +881,12 @@ impl Renderer {
                 std::thread::sleep(Duration::from_millis(200));
             }
         }
-        if let Ok(true) = self.protector.restore_video() {
-            (self.log)("restored your cs2_video.txt");
+        // A CS2 still running saves its video settings when it quits: yours go back once it's
+        // closed (Veloxify checks while it waits).
+        if !cs2_running() {
+            if let Ok(true) = self.protector.restore_video() {
+                (self.log)("restored your cs2_video.txt");
+            }
         }
         keep_display_on(false);
     }

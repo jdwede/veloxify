@@ -9,7 +9,7 @@ use cs2hl_core::library::{Index, MatchEntry, HIGHLIGHT_RULES};
 use cs2hl_render::batch::{self, Event, Scope};
 use cs2hl_render::profile::Profile;
 use serde::Serialize;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -131,6 +131,10 @@ pub struct Worker {
     tray_icon: Cell<Option<usize>>,
     /// When filming last stopped because CS2 stopped drawing: no filming until there's input.
     not_drawing: Cell<Option<Instant>>,
+    /// When CS2 last didn't open for filming (Steam waiting on a message...) or kept crashing,
+    /// and the status saying so: filming waits [`NOT_STARTED_WAIT`] instead of trying again and
+    /// again.
+    not_started: RefCell<Option<(Instant, String)>>,
     /// Matches re-read so far in this run of re-reading (it goes a minute at a time), so the count
     /// carries on instead of starting over each minute.
     reread_done: Cell<usize>,
@@ -139,6 +143,9 @@ pub struct Worker {
     /// When automatic work waits until (Unix seconds; 0: not waiting), shown in the status.
     wait_until: Cell<u64>,
 }
+
+/// How long filming waits after CS2 didn't open for it, or crashed.
+const NOT_STARTED_WAIT: Duration = Duration::from_secs(30 * 60);
 
 /// The tray icon tells at a glance what CS2 is up to: green = CS2 closed (Veloxify is free to
 /// work), red = Veloxify has CS2 open, clipping, plain = you're playing (Veloxify waits).
@@ -150,7 +157,7 @@ const TRAY_ICONS: [&[u8]; 3] = [
 
 impl Worker {
     pub fn new(app: AppHandle, settings: Arc<Mutex<Settings>>, status: Arc<Mutex<Status>>, abort: Arc<AtomicBool>, stop_item: Option<MenuItem<Wry>>) -> Self {
-        Self { app, settings, status, seen: Seen::load(), failed: HashMap::new(), abort, stop_item, tray_icon: Cell::new(None), not_drawing: Cell::new(None), reread_done: Cell::new(0), rules_done: Cell::new(0), wait_until: Cell::new(0) }
+        Self { app, settings, status, seen: Seen::load(), failed: HashMap::new(), abort, stop_item, tray_icon: Cell::new(None), not_drawing: Cell::new(None), not_started: RefCell::new(None), reread_done: Cell::new(0), rules_done: Cell::new(0), wait_until: Cell::new(0) }
     }
 
     fn set(&self, state: &str, message: impl Into<String>, done: usize, total: usize) {
@@ -182,6 +189,7 @@ impl Worker {
                 "rendering" if s.total > 0 => format!("Veloxify: filming {} {}/{} (CS2 in use)", kind_noun(&s.kind), (s.done + 1).min(s.total), s.total),
                 "rendering" => format!("Veloxify: starting CS2 to film {}", kind_noun(&s.kind)),
                 "importing" => format!("Veloxify: {}", s.message),
+                "waiting" if self.not_started.borrow().is_some() => format!("Veloxify: {}", s.message),
                 "waiting" => "Veloxify: waiting for CS2 to close".to_string(),
                 "error" => format!("Veloxify: {}", s.message),
                 _ if s.wait_until > 0 => match chrono::DateTime::from_timestamp(s.wait_until as i64, 0) {
@@ -248,6 +256,10 @@ impl Worker {
         let mut premier_fails = 0u32;
         // When CS2 last ran (saved, so a restart still waits), and "Film now" pressed since.
         let mut last_played: i64 = std::fs::read_to_string(last_played_path()).ok().and_then(|t| t.trim().parse().ok()).unwrap_or(0);
+        // Played while Veloxify wasn't running: Steam's log says when your own CS2 last closed.
+        if let Some(t) = cs2hl_render::steam::last_played() {
+            last_played = last_played.max(t);
+        }
         let mut film_now = false;
         // Right tray color from the start (the first import can take a while).
         self.set(if system::cs2_running() { "waiting" } else { "idle" }, "Starting", 0, 0);
@@ -404,6 +416,7 @@ impl Worker {
             }
             if was_playing {
                 (held, lineups_held) = (false, false);
+                *self.not_started.borrow_mut() = None;
             }
             // New matches (Get demos after filming was stopped): their highlights still film.
             if imported {
@@ -418,12 +431,20 @@ impl Worker {
                     self.not_drawing.set(None);
                 }
             }
-            let can_film = self.not_drawing.get().is_none();
+            // CS2 didn't open for filming last time (or crashed): try again after a while, or for
+            // what's asked.
+            let since = self.not_started.borrow().as_ref().map(|(t, _)| *t);
+            if let Some(since) = since {
+                let asked = !pending_clips.is_empty() || !pending_lineups.is_empty() || !pending_render.is_empty();
+                if asked || film_now || since.elapsed() >= NOT_STARTED_WAIT {
+                    *self.not_started.borrow_mut() = None;
+                }
+            }
             // Clips and lineup videos you asked for come first.
-            if can_film && !pending_clips.is_empty() {
+            if self.can_film() && !pending_clips.is_empty() {
                 held |= self.render(&settings, me, Scope::Items(std::mem::take(&mut pending_clips)));
             }
-            if can_film && !pending_lineups.is_empty() && !system::cs2_running() {
+            if self.can_film() && !pending_lineups.is_empty() && !system::cs2_running() {
                 held |= self.render_lineups(&settings, me, Some(std::mem::take(&mut pending_lineups)));
             }
             // Older matches' details (match page, insights, crosshairs) before automatic filming:
@@ -480,14 +501,14 @@ impl Worker {
                 continue;
             }
             // Each kind films on its own switch (Settings): highlights, then lowlights, then lineups.
-            if can_film && ((!held && !waiting) || !pending_render.is_empty()) {
+            if self.can_film() && ((!held && !waiting) || !pending_render.is_empty()) {
                 if (settings.auto_render && !held && !waiting) || !pending_render.is_empty() {
                     let scope =
                         if pending_render.is_empty() { Scope::LatestSession } else { Scope::Matches(std::mem::take(&mut pending_render)) };
                     held |= self.render(&settings, me, scope);
                 }
                 // Then the latest session's worst deaths, for the whiff analyzer.
-                if settings.auto_lowlights && settings.lowlights_per_match > 0 && !held && !waiting && !system::cs2_running() {
+                if settings.auto_lowlights && settings.lowlights_per_match > 0 && !held && !waiting && self.can_film() && !system::cs2_running() {
                     let items = latest_lowlights(&settings.library_dir, settings.lowlights_per_match);
                     if !items.is_empty() {
                         held |= self.render(&settings, me, Scope::Items(items));
@@ -495,7 +516,7 @@ impl Worker {
                 }
                 // Then grenade lineup videos, the most thrown first, a batch at a time. Anything
                 // asked for meanwhile, and demos being downloaded (new matches), go first.
-                if settings.auto_lineups && !held && !lineups_held && !waiting && !system::cs2_running() {
+                if settings.auto_lineups && !held && !lineups_held && !waiting && self.can_film() && !system::cs2_running() {
                     let seen = ASKED.load(Ordering::SeqCst);
                     let mut first = crate::demos::downloading(&self.app);
                     while let Ok(job) = jobs.try_recv() {
@@ -535,7 +556,11 @@ impl Worker {
                 let _ = ingest::rebuild_index(&settings.library_dir, me);
                 self.library_changed();
             }
-            if self.status.lock().unwrap().state != "error" {
+            // (Re-reading may have run since CS2 didn't open: that's still what's going on.)
+            let not_started = self.not_started.borrow().as_ref().map(|(_, why)| why.clone());
+            if let Some(why) = not_started {
+                self.set("waiting", why, 0, 0);
+            } else if self.status.lock().unwrap().state != "error" {
                 self.set("idle", "Up to date", 0, 0);
             }
             match jobs.recv_timeout(POLL) {
@@ -791,6 +816,12 @@ impl Worker {
         added > 0
     }
 
+    /// Whether filming may start: not while CS2 isn't drawing or didn't open last time (asked
+    /// again before each kind, so one that couldn't open CS2 ends the round).
+    fn can_film(&self) -> bool {
+        self.not_drawing.get().is_none() && self.not_started.borrow().is_none()
+    }
+
     /// Films clips; true when filming was stopped before the end.
     fn render(&self, settings: &Settings, me: u64, scope: Scope) -> bool {
         self.run_batch(settings, me, Batch::Clips(scope), None)
@@ -947,6 +978,13 @@ impl Worker {
                 vlog!("{noun}: {e}");
                 self.not_drawing.set(Some(Instant::now()));
                 self.set("waiting", e.to_string(), 0, 0);
+            }
+            Err(e) if e.downcast_ref::<cs2hl_render::session::NotStarted>().is_some() || e.downcast_ref::<cs2hl_render::session::Cs2Crashed>().is_some() => {
+                vlog!("{noun}: {e}");
+                let at = chrono::Local::now() + chrono::TimeDelta::seconds(NOT_STARTED_WAIT.as_secs() as i64);
+                let why = format!("{e}. Filming tries again at {}", at.format("%-I:%M %p"));
+                *self.not_started.borrow_mut() = Some((Instant::now(), why.clone()));
+                self.set("waiting", why, 0, 0);
             }
             Err(e) => self.set("error", format!("Rendering stopped: {e:#}"), done, total),
             Ok(_) => {}
